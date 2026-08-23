@@ -59,7 +59,7 @@ const bulk = sec('04','Bulk actions — admin only',
 <div class="bulk2" style="margin-bottom:var(--s4)">
   <div class="bulk2-top">
     <span class="cnt"><b>12</b> keys selected</span>
-    <button class="clr">Clear selection</button>
+    <button class="clr hit">Clear selection</button>
     <div class="right"><span class="pill pill-info"><i></i>Admin action</span></div>
   </div>
   <div class="bulk2-body">
@@ -196,7 +196,7 @@ const share = sec('03','Share sheet with QR — the full flow',
             <span class="hour-opt" style="min-width:0;flex:1;font-size:11.5px;min-height:32px">7 d</span>
           </div>
         </div>
-        <label class="check on" style="min-height:0;margin-bottom:var(--s3)"><span class="box">${ic('check')}</span><span style="font-size:12px">Single use — dies after first open</span></label>
+        <label class="check on" style="margin-bottom:var(--s3)"><span class="box">${ic('check')}</span><span style="font-size:12px">Single use — dies after first open</span></label>
         <div class="claim-cta"><span class="btn btn-primary btn-block">${ic('share')}Copy link</span></div>
       </div>
     </div></div>

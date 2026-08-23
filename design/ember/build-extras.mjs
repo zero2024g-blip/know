@@ -51,9 +51,9 @@ const body = `
     <div class="demo-lbl"><span class="n">01</span><h2>Toasts instead of modal popups</h2>
       <p>SweetAlert blocks the screen and needs a click to dismiss. A toast confirms and gets out of the way.</p></div>
     <div class="toast-stack">
-      <div class="toast">${ic('check')}<div><div class="t">Key copied</div><div class="s">ZM-8QK4-77TC-A19F is on your clipboard</div></div><button class="x" aria-label="Dismiss">${ic('x')}</button></div>
-      <div class="toast is-warn">${ic('alert')}<div><div class="t">3 keys expire tomorrow</div><div class="s">Free Fire, PUBG M and 1 more</div></div><button class="x" aria-label="Dismiss">${ic('x')}</button></div>
-      <div class="toast is-bad">${ic('alert')}<div><div class="t">Not enough balance</div><div class="s">$18.00 needed, $4.00 available</div></div><button class="x" aria-label="Dismiss">${ic('x')}</button></div>
+      <div class="toast">${ic('check')}<div><div class="t">Key copied</div><div class="s">ZM-8QK4-77TC-A19F is on your clipboard</div></div><button class="x hit" aria-label="Dismiss">${ic('x')}</button></div>
+      <div class="toast is-warn">${ic('alert')}<div><div class="t">3 keys expire tomorrow</div><div class="s">Free Fire, PUBG M and 1 more</div></div><button class="x hit" aria-label="Dismiss">${ic('x')}</button></div>
+      <div class="toast is-bad">${ic('alert')}<div><div class="t">Not enough balance</div><div class="s">$18.00 needed, $4.00 available</div></div><button class="x hit" aria-label="Dismiss">${ic('x')}</button></div>
     </div>
   </section>
 
@@ -76,7 +76,7 @@ const body = `
       <div class="demo-lbl"><span class="n">03</span><h2>Share sheet with QR</h2></div>
       <p class="hint" style="margin-bottom:var(--s3)">Buyers mistype keys. Let them scan it instead.</p>
       <div class="drawer">
-        <div class="drawer-h">${ic('share')}<h3>Send this key</h3><button class="x" aria-label="Close">${ic('x')}</button></div>
+        <div class="drawer-h">${ic('share')}<h3>Send this key</h3><button class="x hit" aria-label="Close">${ic('x')}</button></div>
         <div class="drawer-b">
           <div class="qr">${qr()}</div>
           <p class="qr-cap">Scan to load the key on a phone</p>

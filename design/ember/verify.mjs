@@ -45,11 +45,12 @@ for (const [vname, w, h, dsf] of VIEWS){
           if (!el.checkVisibility || !el.checkVisibility()) return;
           const st = getComputedStyle(el);
           if (st.display==='none' || st.visibility==='hidden') return;
-          // hit area may be widened by a pseudo-element; measure the real thing
-          if (el.classList.contains('switch')){
-            const pb = getComputedStyle(el,'::before');
-            const grow = Math.abs(parseFloat(pb.top)||0) + Math.abs(parseFloat(pb.bottom)||0);
-            if (r.height + grow >= 44) return;
+          // hit area may be widened by a ::before overlay; measure the effective box
+          const pb = getComputedStyle(el, '::before');
+          if (pb && pb.content !== 'none'){
+            const gy = Math.abs(parseFloat(pb.top)||0) + Math.abs(parseFloat(pb.bottom)||0);
+            const gx = Math.abs(parseFloat(pb.left)||0) + Math.abs(parseFloat(pb.right)||0);
+            if (r.height + gy >= 44 && r.width + gx >= 44) return;
           }
           if (r.height < 32 || r.width < 24){
             out.tiny.push(`${el.tagName.toLowerCase()}.${(el.className||'').toString().split(' ')[0]} ${Math.round(r.width)}x${Math.round(r.height)}`);

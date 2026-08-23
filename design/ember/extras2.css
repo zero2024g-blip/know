@@ -303,3 +303,8 @@
   padding:var(--s3) var(--s4);margin-top:var(--s3);
 }
 .note b{color:var(--text-2)}
+
+/* Two accent washes stacked lift the ground and drop the ratio to 3.85:1.
+   Give the count badge its own dark ground -> 6.09:1. */
+.fchip.on .n{background:rgba(18,13,11,.45); color:var(--accent)}
+.applied .fchip.on{background:var(--surface); border-color:var(--accent)}

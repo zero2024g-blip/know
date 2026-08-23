@@ -586,3 +586,15 @@ select.control{
   .pg{min-width:40px; height:40px}
   .nav-links a{min-height:var(--tap)}
 }
+
+/* ===================================================================
+   HIT-AREA UTILITY
+   Keeps an element's painted size while giving it a 44px target.
+   Used on small close/clear controls where a bigger box would look wrong.
+   =================================================================== */
+.hit{position:relative}
+.hit::before{content:""; position:absolute; inset:-13px -10px}
+@media(pointer:coarse){
+  .clearall,.bulk2-top .clr{min-height:var(--tap); display:inline-flex; align-items:center}
+  .toast .x,.drawer-h .x{width:30px; height:30px; display:grid; place-items:center}
+}
