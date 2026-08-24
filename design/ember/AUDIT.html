@@ -1,0 +1,439 @@
+<title>Eagle Panel Audit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+:root{
+  --bg:#F7F6F4;--surface:#FFFFFF;--surface-2:#F1EFEC;
+  --ink:#17151A;--ink-2:#4A444F;--muted:#6B6570;
+  --line:#E3E0DC;--line-2:#D3CFC9;--accent:#C2462F;
+  --crit:#B3261E;--high:#B54708;--med:#8A6100;--low:#4A5568;--good:#116939;
+  --crit-bg:#FDECEA;--high-bg:#FEF0E6;--med-bg:#FDF6E3;--low-bg:#EEF1F5;--good-bg:#E6F4EC;
+  --sh:0 1px 2px rgba(20,16,24,.05),0 12px 34px -18px rgba(20,16,24,.26);
+}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#131215;--surface:#1B1A1E;--surface-2:#232127;
+  --ink:#EFEDEA;--ink-2:#C0BAC4;--muted:#948E9C;
+  --line:#2C2A30;--line-2:#3A3740;--accent:#F0785C;
+  --crit:#FF8A80;--high:#FFB870;--med:#F5D06A;--low:#A8B3C4;--good:#6EE7A0;
+  --crit-bg:#341614;--high-bg:#31200F;--med-bg:#2C2611;--low-bg:#1F2229;--good-bg:#12281C;
+  --sh:0 1px 2px rgba(0,0,0,.5),0 16px 40px -20px rgba(0,0,0,.8);
+}}
+:root[data-theme="dark"]{
+  --bg:#131215;--surface:#1B1A1E;--surface-2:#232127;
+  --ink:#EFEDEA;--ink-2:#C0BAC4;--muted:#948E9C;
+  --line:#2C2A30;--line-2:#3A3740;--accent:#F0785C;
+  --crit:#FF8A80;--high:#FFB870;--med:#F5D06A;--low:#A8B3C4;--good:#6EE7A0;
+  --crit-bg:#341614;--high-bg:#31200F;--med-bg:#2C2611;--low-bg:#1F2229;--good-bg:#12281C;
+  --sh:0 1px 2px rgba(0,0,0,.5),0 16px 40px -20px rgba(0,0,0,.8);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Source Sans 3",ui-sans-serif,system-ui,sans-serif;font-size:17px;line-height:1.6;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+h1,h2,h3{font-family:"Bricolage Grotesque",sans-serif;margin:0;line-height:1.14;text-wrap:balance}
+code{font-family:"JetBrains Mono",monospace;font-size:.86em;background:var(--surface-2);
+  border:1px solid var(--line);border-radius:5px;padding:1px 5px;word-break:break-word}
+pre{margin:12px 0 0;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;
+  padding:13px 15px;overflow-x:auto;font-family:"JetBrains Mono",monospace;font-size:13px;line-height:1.55}
+pre code{background:none;border:0;padding:0;font-size:inherit}
+.del{color:var(--crit)} .add{color:var(--good)}
+
+.mast{padding:64px 0 34px;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:"JetBrains Mono",monospace;font-size:12px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 16px}
+.mast h1{font-size:clamp(34px,5.4vw,58px);font-weight:800;letter-spacing:-.022em;max-width:15ch}
+.mast .lede{max-width:64ch;color:var(--ink-2);font-size:19px;margin:18px 0 0}
+
+.tally{display:grid;gap:10px;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:28px}
+@media(min-width:680px){.tally{grid-template-columns:repeat(5,minmax(0,1fr))}}
+.tcard{border:1px solid var(--line);border-radius:11px;background:var(--surface);padding:13px 15px}
+.tcard .n{font-family:"JetBrains Mono",monospace;font-size:27px;font-weight:700;line-height:1.1}
+.tcard .l{font-size:12.5px;color:var(--muted);margin-top:2px;font-weight:600}
+.tcard.c .n{color:var(--crit)} .tcard.h .n{color:var(--high)}
+.tcard.m .n{color:var(--med)} .tcard.l .n{color:var(--low)} .tcard.g .n{color:var(--good)}
+
+.callout{margin-top:26px;border:1px solid var(--crit);background:var(--crit-bg);
+  border-radius:12px;padding:18px 20px}
+.callout h3{font-size:17px;color:var(--crit);margin-bottom:6px}
+.callout p{margin:0;color:var(--ink-2);font-size:15.5px}
+.callout p + p{margin-top:8px}
+
+.sec{padding:48px 0;border-bottom:1px solid var(--line)}
+.sec > h2{font-size:clamp(23px,3vw,31px);font-weight:800;letter-spacing:-.015em;margin-bottom:8px}
+.sec > .sub{color:var(--ink-2);max-width:64ch;margin:0 0 28px}
+
+.find{border:1px solid var(--line);border-radius:12px;background:var(--surface);
+  margin-bottom:16px;overflow:hidden;box-shadow:var(--sh)}
+.find-h{display:flex;gap:12px;align-items:flex-start;padding:16px 19px;flex-wrap:wrap}
+.sev{font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:700;letter-spacing:.12em;
+  text-transform:uppercase;padding:4px 9px;border-radius:999px;flex:0 0 auto;margin-top:2px}
+.sev.c{background:var(--crit-bg);color:var(--crit)}
+.sev.h{background:var(--high-bg);color:var(--high)}
+.sev.m{background:var(--med-bg);color:var(--med)}
+.sev.l{background:var(--low-bg);color:var(--low)}
+.find-h .ttl{flex:1;min-width:200px}
+.find-h h3{font-size:18px;font-weight:700;margin-bottom:3px}
+.find-h .where{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--muted)}
+.find-b{padding:0 19px 18px;font-size:15.5px;color:var(--ink-2)}
+.find-b p{margin:0 0 10px}
+.find-b p:last-child{margin-bottom:0}
+.find-b b{color:var(--ink)}
+.fix{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line-2)}
+.fix .lbl{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--good);font-weight:700;margin-bottom:6px}
+
+.good-grid{display:grid;gap:11px;grid-template-columns:minmax(0,1fr)}
+@media(min-width:720px){.good-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.gitem{display:flex;gap:11px;align-items:flex-start;border:1px solid var(--line);
+  border-radius:10px;background:var(--surface);padding:13px 15px;font-size:14.5px;color:var(--ink-2)}
+.gitem .tick{width:19px;height:19px;border-radius:50%;background:var(--good);color:var(--bg);
+  display:grid;place-items:center;font-size:12px;flex:0 0 auto;margin-top:1px;font-weight:700}
+.gitem b{color:var(--ink);display:block;margin-bottom:1px}
+
+.order{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}
+.orow{display:flex;gap:14px;padding:14px 18px;border-bottom:1px solid var(--line);align-items:flex-start}
+.orow:last-child{border-bottom:0}
+.orow .num{font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:700;color:var(--accent);
+  flex:0 0 24px;padding-top:2px}
+.orow .ob{flex:1;min-width:0}
+.orow .ob b{display:block;margin-bottom:2px}
+.orow .ob span{color:var(--ink-2);font-size:14.5px}
+.orow .eff{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--muted);
+  flex:0 0 auto;white-space:nowrap;padding-top:3px}
+
+.foot{padding:28px 0 70px;color:var(--muted);font-size:14.5px}
+html{scroll-behavior:smooth}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <p class="eyebrow">eagle_panel · CodeIgniter 4 · security &amp; performance audit</p>
+  <h1>What I found in the panel</h1>
+  <p class="lede">Read across the controllers, models, filters, routes, helpers, config and <code>.htaccess</code>. The framework-level work here is better than most panels I see — the problems are concentrated in a few specific places, and two of them matter today.</p>
+
+  <div class="tally">
+    <div class="tcard c"><div class="n">2</div><div class="l">Critical</div></div>
+    <div class="tcard h"><div class="n">3</div><div class="l">High</div></div>
+    <div class="tcard m"><div class="n">5</div><div class="l">Medium</div></div>
+    <div class="tcard l"><div class="n">4</div><div class="l">Low</div></div>
+    <div class="tcard g"><div class="n">11</div><div class="l">Done right</div></div>
+  </div>
+
+  <div class="callout">
+    <h3>Before anything else — the archive contained a live <code>.env</code></h3>
+    <p><b>Rotate the database password now.</b> <code>database.default.password</code> was set to a real value in the zip you sent, so it now exists in this conversation's history. I read only the non-credential settings and deleted the file from my copy, but the exposure already happened when it was uploaded.</p>
+    <p>Rotate <code>encryption.key</code> at the same time — see finding 1, which is a separate problem with the same file.</p>
+  </div>
+</header>
+
+<section class="sec">
+  <h2>A correction to what I told you last time</h2>
+  <p class="sub">Last turn I said the unescaped <code>created_by</code> in <code>Admin/referral.php</code> was an exploitable stored XSS that could hand over an admin session. <b>That was wrong.</b></p>
+  <div class="find">
+    <div class="find-h">
+      <span class="sev l">Not exploitable</span>
+      <div class="ttl"><h3>The unescaped output cannot carry a payload</h3>
+      <div class="where">app/Controllers/Auth.php:164 · app/Controllers/User.php:198</div></div>
+    </div>
+    <div class="find-b">
+      <p>Every value reaching those unescaped <code>&lt;?=</code> tags is constrained at its entry point. <code>username</code> is <code>alpha_numeric</code> at registration, at login and at admin edit — so <code>&lt;</code>, <code>&gt;</code> and quotes can never be stored. <code>fullname</code> is <code>alpha_space</code> <em>and</em> passed through <code>esc()</code> before insert. <code>id_reff</code> is an auto-increment integer, <code>code</code> is <code>random_string('alnum', 6)</code>, <code>set_saldo</code> is <code>numeric</code>.</p>
+      <p>I should have checked the validation rules before calling it exploitable. The unescaped output is still worth fixing as defence-in-depth — it is one loosened rule away from being real — but it is a hygiene item, not the emergency I described.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>Critical</h2>
+  <p class="sub">Both are secrets in source. Neither depends on an attacker finding a clever bug.</p>
+
+  <div class="find">
+    <div class="find-h"><span class="sev c">Critical</span>
+      <div class="ttl"><h3>The encryption key is a short dictionary word</h3>
+      <div class="where">.env → encryption.key</div></div></div>
+    <div class="find-b">
+      <p>Eight lowercase letters, and a phrase a wordlist would carry. CodeIgniter's <code>Encryption</code> service derives from this key — anything you encrypt or sign with it is forgeable by anyone who guesses it, and any attacker who ever obtains a ciphertext can brute-force this in seconds.</p>
+      <p>It matters more the moment you build the share-link tokens we designed: those tokens are exactly the kind of thing that would be signed with this key.</p>
+      <div class="fix"><div class="lbl">Fix</div>
+      <pre><code>php spark key:generate     <span style="color:var(--muted)"># writes a 32-byte random key</span>
+
+<span class="del">encryption.key = g████████</span>
+<span class="add">encryption.key = hex2bin:9f2c...   # 64 hex chars</span></code></pre></div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev c">Critical</span>
+      <div class="ttl"><h3>A hardcoded password, sent in the URL</h3>
+      <div class="where">app/Controllers/Keys.php:88–100 — <code>api_key_reset()</code></div></div></div>
+    <div class="find-b">
+      <p><code>$pass = $this->request->getGet('pass'); … if ($pass == 't██████' …)</code></p>
+      <p>Three problems stacked. The secret is <b>seven characters, committed in source</b>. It travels as a <b>GET parameter</b>, which means it is written into Apache access logs, Cloudflare's request logs, browser history, and any <code>Referer</code> header sent to a third party. And the comparison is <code>==</code> rather than a constant-time check.</p>
+      <p>The route sits behind the auth filter, so this is not an unauthenticated hole — but a shared static secret in a query string is the kind of thing that leaks quietly and is never rotated.</p>
+      <div class="fix"><div class="lbl">Fix</div>
+      <pre><code><span class="del">$pass = $this->request->getGet('pass');
+if ($pass == 't██████' and $db_key) {</span>
+<span class="add">$pass = (string) $this->request->getPost('pass');   // POST, never GET
+if (hash_equals(getenv('api.resetSecret'), $pass) && $db_key) {</span></code></pre></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>High</h2>
+
+  <div class="find">
+    <div class="find-h"><span class="sev h">High</span>
+      <div class="ttl"><h3>The rate limiter trusts a header anyone can set</h3>
+      <div class="where">app/Controllers/Auth.php — <code>clientIp()</code></div></div></div>
+    <div class="find-b">
+      <p><code>CF-Connecting-IP</code> is read and used directly, with no check that the request actually arrived from Cloudflare. Login throttling keys off that value, so a forged header means <b>every attempt looks like a new IP and the limiter never fires</b> — unlimited password guessing against Argon2id.</p>
+      <p>Today your <code>.htaccess</code> saves you: <code>Require ip</code> restricts the origin to Cloudflare's ranges, and Cloudflare overwrites the header. So this is <b>not currently exploitable</b> — but it means one config change is all that stands between you and unmetered brute force. That is too thin for the control that protects every account.</p>
+      <div class="fix"><div class="lbl">Fix — verify the peer before trusting the header</div>
+      <pre><code>private function clientIp(): string
+{
+    $remote = $this->request->getIPAddress();
+    <span class="add">if (! $this->fromCloudflare($remote)) {
+        return $remote;              // header is not trustworthy here
+    }</span>
+    $cf = $this->request->getServer('HTTP_CF_CONNECTING_IP');
+    return filter_var($cf, FILTER_VALIDATE_IP) ?: $remote;
+}</code></pre>
+      <p style="margin-top:10px">Keep the Cloudflare range list in one place and refresh it — they publish it at <code>cloudflare.com/ips</code> and it does change. The list in your <code>.htaccess</code> is a point-in-time copy.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev h">High</span>
+      <div class="ttl"><h3>AdminFilter allows the request when its checks don't run</h3>
+      <div class="where">app/Filters/AdminFilter.php</div></div></div>
+    <div class="find-b">
+      <p>The filter only denies inside a nested <code>if</code>. Fall outside it and the method returns <code>null</code>, which CodeIgniter reads as <b>allow</b>:</p>
+      <pre><code>if ($session->userid and $session->time_login) {
+    $user = $userModel->getUser($session->userid);
+    if ($user) {
+        if ($user->level != 1) { return redirect()… }   <span style="color:var(--muted)">// only exit that denies</span>
+    }
+}
+<span class="del">// no session      → falls through → ALLOWED
+// user row gone   → $user falsy → ALLOWED</span></code></pre>
+      <p>The unauthenticated path is covered by <code>AuthFilter</code> running first, so that half is not reachable. The second half is: <b>delete a user row while their session is live and that session gains admin access</b> to every <code>/admin/*</code> route. Narrow, but real — and the shape is wrong regardless. An authorisation filter should deny by default and allow only on proof.</p>
+      <div class="fix"><div class="lbl">Fix — invert it</div>
+      <pre><code>$user = $session->userid ? (new UserModel)->getUser($session->userid) : null;
+<span class="add">if (! $user || (int) $user->level !== 1) {
+    return redirect()->to('dashboard')->with('msgWarning', 'Access Denied!');
+}
+return;   // only an actual admin reaches here</span></code></pre></div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev h">High</span>
+      <div class="ttl"><h3>Key-existence oracle before the password check</h3>
+      <div class="where">app/Controllers/Keys.php — <code>api_key_reset()</code></div></div></div>
+    <div class="find-b">
+      <p><code>$db_key = $model->getKeys($keys);</code> runs <b>before</b> the secret is validated, and the response always includes <code>'registered' =&gt; $db_key ? true : false</code> — regardless of whether <code>pass</code> was correct.</p>
+      <p>So any signed-in account can probe arbitrary key strings and learn which ones exist, without owning them and without the secret. The <code>sleep(1)</code> slows a single thread; it does nothing against parallel requests. For a panel whose whole product <em>is</em> the keys, a validity oracle is the wrong thing to hand out.</p>
+      <div class="fix"><div class="lbl">Fix</div>
+      <p>Validate the secret first and return an identical response for both "wrong secret" and "no such key". Scope the lookup to the caller unless they are admin, and rate-limit the endpoint per account, not just per IP.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>Medium</h2>
+
+  <div class="find">
+    <div class="find-h"><span class="sev m">Medium</span>
+      <div class="ttl"><h3>Blurring the key is CSS, not protection</h3>
+      <div class="where">app/Models/KeysModel.php — <code>API_getKeys()</code> · Views/Keys/list.php:81</div></div></div>
+    <div class="find-b">
+      <p>The DataTables endpoint selects <code>user_key</code> and returns it <b>in plaintext JSON</b>. The "Hide keys" toggle adds a CSS class that applies <code>filter: blur(3px)</code>. The network tab, or a direct call to <code>keys/api</code>, returns every key unobscured.</p>
+      <p>The scoping itself is correct — <code>API_getKeys()</code> filters by <code>registrator</code> for non-admins, so this is not a cross-user leak. The issue is the false assurance: the toggle looks like a security control and isn't one. And for an admin session it is the single request that dumps every key in the system, which makes it the obvious target if a session is ever stolen.</p>
+      <div class="fix"><div class="lbl">Fix</div>
+      <p>Return a masked value by default (<code>ZM-8QK4-****-****</code>) and serve the full key from a separate, per-row, rate-limited endpoint that logs each reveal to the activity log. Then "Hide keys" is describing something true.</p></div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev m">Medium</span>
+      <div class="ttl"><h3><code>and</code> where the logic needs <code>or</code></h3>
+      <div class="where">app/Filters/AuthFilter.php</div></div></div>
+    <div class="find-b">
+      <p><code>if (!$session->userid and !$session->time_login)</code> — this redirects only when <b>both</b> are missing. Half a session passes the gate.</p>
+      <p>I traced both halves: with <code>time_login</code> set but no <code>userid</code>, execution reaches <code>checkAuthFilter()</code> → <code>getUser(null)</code> → <code>null</code> → property access on null → <b>PHP 8 fatal, a 500</b>. So it fails closed today rather than open. It is still the wrong condition, and it is one null-guard away from becoming a bypass instead of a crash.</p>
+      <div class="fix"><div class="lbl">Fix</div>
+      <pre><code><span class="del">if (!$session->userid and !$session->time_login) {</span>
+<span class="add">if (! $session->userid || ! $session->time_login) {</span></code></pre>
+      <p style="margin-top:10px">And guard the null in <code>UserModel::checkAuthFilter()</code> — <code>$userCek</code> can legitimately be null when a user row is removed.</p></div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev m">Medium</span>
+      <div class="ttl"><h3>CSP is fully written, then switched off</h3>
+      <div class="where">.env → app.CSPEnabled = false · .htaccess section 1</div></div></div>
+    <div class="find-b">
+      <p>You configured every CSP directive in <code>.env</code> — <code>defaultSrc 'none'</code>, <code>scriptSrc 'self'</code>, the lot — and then left <code>CSPEnabled = false</code>, so none of it is sent. The header that <em>is</em> sent comes from <code>.htaccess</code> and contains <code>script-src … 'unsafe-inline'</code>, which permits exactly the injection a CSP exists to stop.</p>
+      <p>You can't simply flip it on: the panel uses inline <code>&lt;script&gt;</code> blocks throughout the views, and <code>'self'</code> would break them. Doing this properly means nonces.</p>
+      <div class="fix"><div class="lbl">Fix — in order</div>
+      <p>Move inline scripts to files under <code>public/assets/js</code>, or emit a per-request nonce and add it to each block. Then set <code>CSPEnabled = true</code> and drop <code>'unsafe-inline'</code> from the <code>.htaccess</code> header so the two stop contradicting each other. Run with <code>reportOnly = true</code> first to see what breaks.</p></div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev m">Medium</span>
+      <div class="ttl"><h3>The old password scheme still exists on dormant accounts</h3>
+      <div class="where">app/Helpers/nata_helper.php:10</div></div></div>
+    <div class="find-b">
+      <p><code>md5("X███████████████" . $password)</code> then bcrypt at <b>cost 8</b>. The pepper is in source, MD5 is fast, and cost 8 is well below a sane 2026 setting.</p>
+      <p>Your migration is done properly — login verifies against the legacy hash, then <code>password_needs_rehash</code> upgrades to Argon2id. But it only fires <em>when someone logs in</em>. Accounts that have been idle since the change still carry the weak hash indefinitely.</p>
+      <div class="fix"><div class="lbl">Fix</div>
+      <p>Query how many rows still hold a bcrypt-<code>$2y$08$</code> hash. Force a reset on those accounts, then delete <code>create_password()</code> and the fallback branch entirely so the weak path cannot come back.</p></div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev m">Medium</span>
+      <div class="ttl"><h3>Sessions last 30 days</h3>
+      <div class="where">.env → app.sessionExpiration = 2592000 · cookie.expires = 2592000</div></div></div>
+    <div class="find-b">
+      <p>A month-long session on a panel that holds balance and can revoke every key. The in-app timer is much tighter — 24 hours with "keep me signed in", 30 minutes without — so the framework value mostly governs how long a stolen cookie stays useful.</p>
+      <p>Bring it down to something like 7 days, and build the Active sessions screen we designed so you can actually revoke one.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>Low — worth cleaning up</h2>
+
+  <div class="find">
+    <div class="find-h"><span class="sev l">Low</span>
+      <div class="ttl"><h3>The LFI guard in <code>index.php</code> does nothing</h3>
+      <div class="where">index.php:7</div></div></div>
+    <div class="find-b">
+      <pre><code>define('FCPATH', __DIR__ . DIRECTORY_SEPARATOR);
+
+<span style="color:var(--muted)">// 🔴 جلوگیری از حملات LFI</span>
+if (strpos(<span class="del">$filename</span>, '..') !== false || strpos(<span class="del">$filename</span>, '/') !== false) {
+    die("Access Denied!");
+}</code></pre>
+      <p><code>$filename</code> is <b>never assigned</b> — not in this file, not anywhere. It is always <code>null</code>, <code>strpos(null, '..')</code> is always <code>false</code>, and the branch never runs. On PHP 8.1+ it also emits a deprecation notice on every single request.</p>
+      <p>It reads like protection and provides none, which is worse than having nothing there — someone reviewing this file later will assume LFI is handled. Delete it. Path traversal is not the front controller's job anyway.</p>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev l">Low</span>
+      <div class="ttl"><h3>The API exception in <code>.htaccess</code> skips every rule after it</h3>
+      <div class="where">.htaccess section 3A</div></div></div>
+    <div class="find-b">
+      <p><code>RewriteRule ^.*zezr_connector.*$ - [L,NC]</code> sits first and carries <code>[L]</code>. Any URL containing that string therefore bypasses rules B through F — the direct-IP block, the HTTPS redirect, the method filter and the query-string injection filter.</p>
+      <p>It also matches on <em>substring</em>, so <code>/anything/zezr_connector/anything</code> qualifies. Anchor it to the real route and let the rest of the chain apply, or move it below the filters it doesn't need to skip.</p>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev l">Low</span>
+      <div class="ttl"><h3>A stale backup sits in the webroot</h3>
+      <div class="where">public/default.php.old.php</div></div></div>
+    <div class="find-b">
+      <p>It ends in <code>.php</code>, so it executes rather than downloading. Old copies of live files are a standard place for an outdated code path to survive a fix. Remove it — the <code>.bak</code> pattern in your <code>FilesMatch</code> block does not catch this name.</p>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev l">Low</span>
+      <div class="ttl"><h3>Escaping happens on write instead of on output</h3>
+      <div class="where">app/Controllers/User.php:216, 318</div></div></div>
+    <div class="find-b">
+      <p><code>'fullname' =&gt; esc($fullname)</code> stores HTML entities in the database. A name with an apostrophe comes back as <code>&amp;#39;</code> forever, and if you later add <code>esc()</code> on output — which you should — it double-escapes. Store the raw value; escape when rendering.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>Performance — where the lag actually is</h2>
+  <p class="sub">The panel is not slow because of PHP. It is slow because of what the browser has to fetch before it can paint, and one query that reads far more than it needs.</p>
+
+  <div class="find">
+    <div class="find-h"><span class="sev m">Medium</span>
+      <div class="ttl"><h3>Every key in the table is loaded to answer a yes/no question</h3>
+      <div class="where">app/Controllers/Keys.php — <code>index()</code></div></div></div>
+    <div class="find-b">
+      <p><code>$keys = $model->findAll();</code> pulls every row with every column into PHP memory. The view then uses it for exactly one thing:</p>
+      <pre><code>Views/Keys/list.php:21    &lt;?php if ($keylist) : ?&gt;</code></pre>
+      <p>That is the only reference. The table itself is populated by the server-side DataTables endpoint, so <b>the entire result set is fetched, hydrated into objects, and thrown away</b> on every page load. At 1,284 keys that is already wasteful; it grows linearly and will eventually hit the memory limit.</p>
+      <p><code>User::manage_users()</code> does the same via <code>getUserList()</code>.</p>
+      <div class="fix"><div class="lbl">Fix</div>
+      <pre><code><span class="del">$keys = $model->findAll();
+'keylist' =&gt; $keys,</span>
+<span class="add">'has_keys' =&gt; $model->where($scope)->countAllResults(),</span></code></pre></div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev m">Medium</span>
+      <div class="ttl"><h3>Four external hosts before the page can render</h3>
+      <div class="where">app/Views/Layout/Starter.php</div></div></div>
+    <div class="find-b">
+      <p><code>cdn.jsdelivr.net</code>, <code>code.jquery.com</code>, <code>cdnjs.cloudflare.com</code>, <code>fonts.googleapis.com</code> — four DNS lookups and four TLS handshakes, each a full round trip, before the first paint. On a phone on mobile data that is most of the perceived load time. Your own assets total 16 KB.</p>
+      <p>There is a correctness angle too: you are pinned to <code>bootstrap@5.0.2</code>, which is years of fixes behind, and every one of those hosts can see your users' IPs on every page view.</p>
+      <div class="fix"><div class="lbl">Fix</div>
+      <p>Download all four into <code>public/assets</code> and serve them from your own origin. Cloudflare caches them at the edge for free, so you get one connection reused for everything instead of four cold ones. Self-host the Poppins and JetBrains Mono files too, with <code>font-display: swap</code> and a <code>preload</code> for the weights you actually use.</p></div>
+    </div>
+  </div>
+
+  <div class="find">
+    <div class="find-h"><span class="sev l">Low</span>
+      <div class="ttl"><h3>Cloudflare free — three settings worth checking</h3>
+      <div class="where">deployment</div></div></div>
+    <div class="find-b">
+      <p><b>Never cache an authenticated page.</b> Send <code>Cache-Control: private, no-store</code> on everything behind the auth filter, and on the share-link claim page when you build it. A signed-in page cached at the edge and served to someone else is the worst kind of leak, and it is a configuration mistake rather than a code one.</p>
+      <p><b>Keep the origin allowlist current.</b> Cloudflare adds ranges; the copy in your <code>.htaccess</code> is frozen at the day it was written. When a new range appears, real users get 403s and you will be debugging the wrong thing.</p>
+      <p><b>Turn on Bot Fight Mode</b> and put a rate-limiting rule on <code>/login</code> and <code>/check</code>. The free plan allows one rule — spend it on <code>/check</code>, since that is your only unauthenticated endpoint that answers questions about keys.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>What is already right</h2>
+  <p class="sub">Worth stating plainly, because it is the reason the list above is as short as it is.</p>
+  <div class="good-grid">
+    <div class="gitem"><span class="tick">✓</span><div><b>No raw SQL anywhere</b>Every query goes through the query builder. I grepped for string interpolation into queries across controllers, models and helpers — nothing. SQL injection is genuinely handled.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>Argon2id with a real migration</b>Verify, detect legacy, rehash on the next login. This is the correct pattern and most panels get it wrong.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>Session regenerated on login and logout</b><code>regenerate(true)</code> in both places, which closes session fixation.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>Timing-safe unknown usernames</b>A dummy <code>password_hash()</code> runs when the user doesn't exist, so response time doesn't reveal which accounts are real.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>DB-backed login throttling</b>Per-IP attempt counting with escalating block windows, plus periodic purge of stale rows.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>CSRF enabled globally</b>In <code>globals.before</code> with token regeneration on, not left commented out.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>Honeypot filter active</b>Registered and applied, with a hidden field name that isn't obviously a honeypot.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>Cookie flags correct</b><code>Secure</code>, <code>HttpOnly</code> and <code>SameSite=Strict</code> all set — the strong combination, not the default one.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>Ownership checks on key access</b><code>edit_key</code> and the reset path both test <code>level == 1 || registrator == username</code>. No IDOR on those routes.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>DataTables runs server-side</b><code>serverSide: true</code> with scoped builders, so the table pages at the database rather than in the browser.</div></div>
+    <div class="gitem"><span class="tick">✓</span><div><b>The <code>.htaccess</code> is unusually good</b>Cloudflare-only origin allowlist, <code>.env</code> denied, framework directories blocked, HSTS, <code>X-Frame-Options</code>, <code>nosniff</code>, directory listing off, method filtering.</div></div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>The order I would do it in</h2>
+  <div class="order">
+    <div class="orow"><span class="num">1</span><div class="ob"><b>Rotate the DB password and the encryption key</b><span>The <code>.env</code> left your machine. Nothing else matters until this is done.</span></div><span class="eff">minutes</span></div>
+    <div class="orow"><span class="num">2</span><div class="ob"><b>Move the reset secret out of source and out of the URL</b><span>Env var, POST body, <code>hash_equals</code>.</span></div><span class="eff">~30 min</span></div>
+    <div class="orow"><span class="num">3</span><div class="ob"><b>Invert AdminFilter, fix the <code>and</code> in AuthFilter</b><span>Both are a few lines. Deny by default in both.</span></div><span class="eff">~30 min</span></div>
+    <div class="orow"><span class="num">4</span><div class="ob"><b>Verify the peer before trusting <code>CF-Connecting-IP</code></b><span>Restores the rate limiter's guarantee without depending on <code>.htaccess</code> alone.</span></div><span class="eff">~1 h</span></div>
+    <div class="orow"><span class="num">5</span><div class="ob"><b>Close the key-existence oracle</b><span>Check the secret first; return an identical response for wrong-secret and no-such-key.</span></div><span class="eff">~1 h</span></div>
+    <div class="orow"><span class="num">6</span><div class="ob"><b>Drop the wasted <code>findAll()</code>, self-host the four CDNs</b><span>The two changes that will actually be felt as speed.</span></div><span class="eff">~2 h</span></div>
+    <div class="orow"><span class="num">7</span><div class="ob"><b>Mask keys in the API response</b><span>Then the "Hide keys" toggle means something.</span></div><span class="eff">~3 h</span></div>
+    <div class="orow"><span class="num">8</span><div class="ob"><b>Nonce the inline scripts, then enable CSP</b><span>Largest job here, and the one that pays off for years.</span></div><span class="eff">~1 day</span></div>
+  </div>
+</section>
+
+<footer class="foot">
+  Scope: <code>app/</code> (controllers, models, filters, config, helpers, views), <code>index.php</code>, <code>.htaccess</code>, <code>public/</code>. <code>vendor/</code> was not reviewed. <code>Controllers/Connect.php</code> was empty in the archive — since it is exempt from both CSRF and auth, it is the single most exposed route in the app and needs its own review with its own authentication.
+</footer>
+
+</div>
