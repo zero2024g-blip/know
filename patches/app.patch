@@ -1,0 +1,4694 @@
+diff -ruN /tmp/orig_app/BACKUP/Views/Admin/referral.php app/BACKUP/Views/Admin/referral.php
+--- /tmp/orig_app/BACKUP/Views/Admin/referral.php	2026-08-24 23:02:52.490915225 +0000
++++ app/BACKUP/Views/Admin/referral.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,190 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-
+-<style>
+-    /* تنظیمات عمومی تم برای هماهنگی با Starter */
+-    body { 
+-        font-family: 'Inter', sans-serif; 
+-        background-color: var(--bg-body) !important; 
+-        color: var(--text-main) !important; 
+-    }
+-    
+-    /* استایل کارت‌های مدرن و داینامیک */
+-    .reff-card { 
+-        border: 1px solid var(--border-color) !important; 
+-        border-radius: 20px; 
+-        overflow: hidden; 
+-        background-color: var(--bg-card) !important; 
+-    }
+-    .reff-header { background: #1a1d20; padding: 1.25rem 1.5rem; border: none; }
+-    
+-    /* استایل فرم ورودی */
+-    .form-label { font-size: 0.85rem; font-weight: 600; color: var(--text-main); }
+-    
+-    .input-group-text { 
+-        background-color: var(--table-header) !important; 
+-        border: 1px solid var(--border-color) !important; 
+-        border-radius: 12px 0 0 12px !important;
+-        color: #28a745;
+-        font-weight: bold;
+-    }
+-    
+-    .form-control {
+-        border-radius: 12px;
+-        padding: 0.75rem 1rem;
+-        border: 1px solid var(--border-color);
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-    }
+-    
+-    .form-control:focus {
+-        border-color: #ff4d4d; /* قرمز برند */
+-        box-shadow: 0 0 0 0.25rem rgba(255, 77, 77, 0.1);
+-        background-color: var(--input-bg) !important;
+-        outline: none;
+-    }
+-
+-    /* دکمه ایجاد اختصاصی */
+-    .btn-create {
+-        border-radius: 12px;
+-        padding: 0.8rem;
+-        font-weight: 700;
+-        background: #1a1d20;
+-        color: white;
+-        border: none;
+-        transition: all 0.2s;
+-    }
+-    .btn-create:hover { 
+-        background: #000; 
+-        transform: translateY(-2px); 
+-        box-shadow: 0 5px 15px rgba(0,0,0,0.3); 
+-    }
+-
+-    /* استایل جدول تاریخچه */
+-    .table thead th {
+-        background-color: var(--table-header) !important;
+-        text-transform: uppercase;
+-        font-size: 0.7rem;
+-        letter-spacing: 1px;
+-        color: var(--text-muted) !important;
+-        border: none;
+-        padding: 15px;
+-    }
+-    .table tbody td {
+-        padding: 12px 15px;
+-        vertical-align: middle;
+-        border-bottom: 1px solid var(--border-color) !important;
+-        font-size: 0.85rem;
+-        color: var(--text-main);
+-    }
+-    
+-    /* نشانگر کدها */
+-    .code-badge {
+-        font-family: 'Monaco', 'Consolas', monospace;
+-        background: rgba(67, 56, 202, 0.1);
+-        color: #818cf8;
+-        padding: 4px 8px;
+-        border-radius: 6px;
+-        font-size: 0.8rem;
+-    }
+-
+-    /* استایل وضعیت خالی */
+-    .empty-state {
+-        background-color: var(--bg-card) !important;
+-        border: 1px solid var(--border-color) !important;
+-        border-radius: 20px;
+-    }
+-
+-    .saldo-text { color: #28a745; font-weight: 700; }
+-</style>
+-
+-<div class="container-fluid py-4">
+-    <div class="row">
+-        <div class="col-lg-12 mb-4">
+-            <?= $this->include('Layout/msgStatus') ?>
+-            <h3 class="fw-bold">Referral Management</h3>
+-            <p class="text-muted small">Generate and track balance-loading referral codes.</p>
+-        </div>
+-
+-        <div class="col-lg-4 mb-4">
+-            <div class="card reff-card shadow-sm">
+-                <div class="card-header reff-header text-white">
+-                    <h6 class="mb-0 fw-bold"><i class="bi bi-plus-circle me-2"></i> Generate Code</h6>
+-                </div>
+-                <div class="card-body p-4">
+-                    <?= form_open() ?>
+-                    <div class="mb-4">
+-                        <label for="set_saldo" class="form-label">Set Balance (Saldo) Amount</label>
+-                        <div class="input-group">
+-                            <span class="input-group-text">$</span>
+-                            <input type="number" class="form-control" name="set_saldo" id="set_saldo" 
+-                                   min="1" value="5" placeholder="Amount">
+-                        </div>
+-                        <small class="text-muted mt-2 d-block small">This value will be added to the user's account upon use.</small>
+-                        <?php if ($validation->hasError('set_saldo')) : ?>
+-                            <div class="text-danger small mt-1 fw-bold"><?= $validation->getError('set_saldo') ?></div>
+-                        <?php endif; ?>
+-                    </div>
+-                    
+-                    <div class="d-grid">
+-                        <button type="submit" class="btn btn-create shadow-sm">
+-                            <i class="bi bi-magic me-2"></i> Create Code
+-                        </button>
+-                    </div>
+-                    <?= form_close() ?>
+-                </div>
+-            </div>
+-        </div>
+-
+-        <div class="col-lg-8">
+-            <?php if ($code) : ?>
+-                <div class="card reff-card shadow-sm">
+-                    <div class="card-header py-3 d-flex justify-content-between align-items-center" style="background: transparent; border-bottom: 1px solid var(--border-color);">
+-                        <h6 class="mb-0 fw-bold"><i class="bi bi-journal-text me-2"></i> Generation History</h6>
+-                        <span class="badge bg-dark rounded-pill">Total: <?= $total_code ?></span>
+-                    </div>
+-                    <div class="card-body p-0">
+-                        <div class="table-responsive">
+-                            <table class="table mb-0">
+-                                <thead>
+-                                    <tr>
+-                                        <th>ID</th>
+-                                        <th>Hashed Code</th>
+-                                        <th>Amount</th>
+-                                        <th>Status/User</th>
+-                                        <th>Created By</th>
+-                                    </tr>
+-                                </thead>
+-                                <tbody>
+-                                    <?php foreach ($code as $c) : ?>
+-                                        <tr>
+-                                            <td><span class="text-muted small">#<?= $c->id_reff ?></span></td>
+-                                            <td><code class="code-badge"><?= substr($c->code, 0, 15) ?>...</code></td>
+-                                            <td><span class="saldo-text">$<?= $c->set_saldo ?></span></td>
+-                                            <td>
+-                                                <?php if($c->used_by): ?>
+-                                                    <span class="badge bg-light text-dark border"><i class="bi bi-person me-1"></i><?= $c->used_by ?></span>
+-                                                <?php else: ?>
+-                                                    <span class="badge bg-success-subtle text-success">Available</span>
+-                                                <?php endif; ?>
+-                                            </td>
+-                                            <td><small class="text-muted fw-semibold"><?= $c->created_by ?></small></td>
+-                                        </tr>
+-                                    <?php endforeach; ?>
+-                                </tbody>
+-                            </table>
+-                        </div>
+-                    </div>
+-                </div>
+-            <?php else : ?>
+-                <div class="text-center py-5 empty-state shadow-sm">
+-                    <i class="bi bi-ticket-perforated text-muted display-4"></i>
+-                    <p class="mt-3 text-muted">No referral codes generated yet.</p>
+-                </div>
+-            <?php endif; ?>
+-        </div>
+-    </div>
+-</div>
+-
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/Admin/user_edit.php app/BACKUP/Views/Admin/user_edit.php
+--- /tmp/orig_app/BACKUP/Views/Admin/user_edit.php	2026-08-24 23:02:52.491660816 +0000
++++ app/BACKUP/Views/Admin/user_edit.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,170 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-
+-<style>
+-    /* تنظیمات عمومی تم برای هماهنگی با کل پنل */
+-    body { 
+-        font-family: 'Inter', sans-serif; 
+-        background-color: var(--bg-body) !important; 
+-        color: var(--text-main) !important; 
+-    }
+-    
+-    .edit-user-card { 
+-        border: 1px solid var(--border-color) !important; 
+-        border-radius: 20px; 
+-        overflow: hidden; 
+-        background-color: var(--bg-card) !important;
+-    }
+-    .edit-user-header { background: #1a1d20; padding: 1.25rem 1.5rem; border: none; }
+-    
+-    /* استایل فرم و اینپوت‌ها */
+-    .form-label { font-size: 0.85rem; font-weight: 600; color: var(--text-main); margin-bottom: 0.5rem; }
+-    
+-    .form-control, .form-select {
+-        border-radius: 12px;
+-        padding: 0.75rem 1rem;
+-        border: 1px solid var(--border-color);
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-        transition: all 0.3s ease;
+-    }
+-
+-    .form-control:focus, .form-select:focus {
+-        background-color: var(--input-bg) !important;
+-        border-color: #ff4d4d; /* قرمز برند */
+-        box-shadow: 0 0 0 0.25rem rgba(255, 77, 77, 0.1);
+-        outline: none;
+-    }
+-
+-    /* باکس موجودی (Saldo) داینامیک */
+-    .saldo-input-group .input-group-text {
+-        background-color: rgba(46, 204, 113, 0.1);
+-        border: 1px solid var(--border-color);
+-        color: #2ecc71;
+-        border-radius: 12px 0 0 12px !important;
+-        font-weight: bold;
+-    }
+-    .saldo-input-group .form-control {
+-        border-left: none;
+-        font-weight: 700;
+-        color: #2ecc71 !important;
+-    }
+-
+-    /* دکمه آپدیت */
+-    .btn-update {
+-        border-radius: 12px;
+-        padding: 0.8rem 1.5rem;
+-        font-weight: 700;
+-        background-color: #1a1d20;
+-        color: white;
+-        border: none;
+-        transition: all 0.2s;
+-    }
+-    .btn-update:hover { background-color: #000; transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+-
+-    .section-divider {
+-        font-size: 0.75rem;
+-        font-weight: 800;
+-        text-transform: uppercase;
+-        letter-spacing: 1px;
+-        color: var(--text-muted);
+-        margin: 1.5rem 0 1rem 0;
+-        display: block;
+-    }
+-
+-    /* اصلاح رنگ Badge آی‌دی */
+-    .badge.bg-light {
+-        background-color: var(--table-header) !important;
+-        color: var(--text-main) !important;
+-        border: 1px solid var(--border-color);
+-    }
+-</style>
+-
+-<div class="container py-4">
+-    <div class="row justify-content-center">
+-        <div class="col-lg-8">
+-            <?= $this->include('Layout/msgStatus') ?>
+-
+-            <div class="card edit-user-card shadow-lg mb-4">
+-                <div class="card-header edit-user-header d-flex justify-content-between align-items-center">
+-                    <div>
+-                        <h5 class="text-white mb-0 fw-bold">Edit Account</h5>
+-                        <small class="text-secondary">Managing: <?= getName($target) ?></small>
+-                    </div>
+-                    <span class="badge bg-light rounded-pill px-3">ID: #<?= $target->id_users ?></span>
+-                </div>
+-
+-                <div class="card-body p-4 p-md-5">
+-                    <?= form_open() ?>
+-                    <input type="hidden" name="user_id" value="<?= $target->id_users ?>">
+-
+-                    <span class="section-divider">Profile Information</span>
+-                    <div class="row mb-4">
+-                        <div class="col-md-6 mb-3">
+-                            <label for="username" class="form-label">Username</label>
+-                            <input type="text" name="username" id="username" class="form-control" value="<?= old('username') ?: $target->username ?>">
+-                            <?php if ($validation->hasError('username')) : ?>
+-                                <div class="text-danger small mt-1"><?= $validation->getError('username') ?></div>
+-                            <?php endif; ?>
+-                        </div>
+-                        <div class="col-md-6 mb-3">
+-                            <label for="fullname" class="form-label">Full Name</label>
+-                            <input type="text" name="fullname" id="fullname" class="form-control" value="<?= old('fullname') ?: $target->fullname ?>">
+-                            <?php if ($validation->hasError('fullname')) : ?>
+-                                <div class="text-danger small mt-1"><?= $validation->getError('fullname') ?></div>
+-                            <?php endif; ?>
+-                        </div>
+-                    </div>
+-
+-                    <span class="section-divider">Permissions & Status</span>
+-                    <div class="row mb-4">
+-                        <div class="col-md-6 mb-3">
+-                            <label for="level" class="form-label">User Role</label>
+-                            <?php $sel_level = ['' => 'Select Role', '1' => '👑 Admin', '2' => '🤝 Reseller']; ?>
+-                            <?= form_dropdown(['class' => 'form-select', 'name' => 'level', 'id' => 'level'], $sel_level, $target->level) ?>
+-                        </div>
+-                        <div class="col-md-6 mb-3">
+-                            <label for="status" class="form-label">Account Status</label>
+-                            <?php $sel_status = ['' => 'Select Status', '0' => '🚫 Banned/Blocked', '1' => '✅ Active']; ?>
+-                            <?= form_dropdown(['class' => 'form-select', 'name' => 'status', 'id' => 'status'], $sel_status, $target->status) ?>
+-                        </div>
+-                    </div>
+-
+-                    <span class="section-divider">Financial & Network</span>
+-                    <div class="row mb-4">
+-                        <div class="col-md-6 mb-3">
+-                            <label for="saldo" class="form-label">Current Saldo (Balance)</label>
+-                            <div class="input-group saldo-input-group">
+-                                <span class="input-group-text">$</span>
+-                                <input type="number" name="saldo" id="saldo" class="form-control" value="<?= old('saldo') ?: $target->saldo ?>">
+-                            </div>
+-                            <?php if ($validation->hasError('saldo')) : ?>
+-                                <div class="text-danger small mt-1"><?= $validation->getError('saldo') ?></div>
+-                            <?php endif; ?>
+-                        </div>
+-                        <div class="col-md-6 mb-3">
+-                            <label for="uplink" class="form-label">Uplink (Referrer)</label>
+-                            <input type="text" name="uplink" id="uplink" class="form-control" value="<?= old('uplink') ?: $target->uplink ?>">
+-                            <?php if ($validation->hasError('uplink')) : ?>
+-                                <div class="text-danger small mt-1"><?= $validation->getError('uplink') ?></div>
+-                            <?php endif; ?>
+-                        </div>
+-                    </div>
+-
+-                    <div class="d-grid gap-2">
+-                        <button type="submit" class="btn btn-update shadow-sm">
+-                            <i class="bi bi-person-check-fill me-2"></i> Save Changes
+-                        </button>
+-                        <a href="<?= site_url('admin/manage-users') ?>" class="btn btn-link text-muted text-decoration-none small mt-2">
+-                            <i class="bi bi-arrow-left"></i> Discard and Return
+-                        </a>
+-                    </div>
+-                    <?= form_close() ?>
+-                </div>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/Admin/users.php app/BACKUP/Views/Admin/users.php
+--- /tmp/orig_app/BACKUP/Views/Admin/users.php	2026-08-24 23:02:52.491837275 +0000
++++ app/BACKUP/Views/Admin/users.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,289 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-
+-<style>
+-    /* تنظیمات عمومی تم */
+-    body { 
+-        font-family: 'Inter', sans-serif; 
+-        background-color: var(--bg-body) !important; 
+-        color: var(--text-main) !important; 
+-    }
+-    
+-    /* استایل کارت و جدول */
+-    .user-card { 
+-        border: 1px solid var(--border-color) !important; 
+-        border-radius: 20px; 
+-        overflow: hidden; 
+-        background: var(--bg-card) !important; 
+-    }
+-    .user-header { background: #1a1d20; padding: 1.25rem 1.5rem; border: none; }
+-    
+-    /* استایل هشدار Quick Search */
+-    .quick-search-alert {
+-        border-radius: 15px;
+-        background-color: var(--bg-card) !important;
+-        border: 1px solid var(--border-color) !important;
+-        color: var(--text-main) !important;
+-    }
+-
+-    .table thead th { 
+-        background-color: var(--table-header) !important; 
+-        text-transform: uppercase; 
+-        font-size: 0.7rem; 
+-        letter-spacing: 1px; 
+-        color: var(--text-muted) !important; 
+-        border: none;
+-        padding: 15px;
+-    }
+-    .table tbody td { 
+-        padding: 15px; 
+-        vertical-align: middle; 
+-        border-bottom: 1px solid var(--border-color) !important; 
+-        font-size: 0.85rem; 
+-        color: var(--text-main) !important;
+-    }
+-
+-    /* هاور ردیف‌های جدول در حالت تاریک */
+-    .table-hover tbody tr:hover {
+-        background-color: rgba(255, 255, 255, 0.02) !important;
+-    }
+-    
+-    /* نشانگرهای نقش و وضعیت */
+-    .badge-role { padding: 5px 10px; border-radius: 8px; font-weight: 700; font-size: 0.7rem; }
+-    .role-admin { background-color: rgba(13, 110, 253, 0.15); color: #3d8bfd; }
+-    .role-reseller { background-color: rgba(102, 16, 242, 0.15); color: #8f5df5; }
+-    
+-    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+-    .status-active { background-color: #28a745; box-shadow: 0 0 8px rgba(40, 167, 69, 0.4); }
+-    .status-banned { background-color: #dc3545; box-shadow: 0 0 8px rgba(220, 53, 69, 0.4); }
+-
+-    /* اصلاح لایبل موجودی */
+-    .saldo-badge { 
+-        font-weight: 800; 
+-        color: #2ecc71; 
+-        background: rgba(46, 204, 113, 0.1); 
+-        padding: 4px 10px; 
+-        border-radius: 20px; 
+-    }
+-    
+-    /* اصلاح اینپوت سرچ DataTable برای هر دو حالت */
+-    .dataTables_filter input { 
+-        border-radius: 10px; 
+-        border: 1px solid var(--border-color) !important; 
+-        padding: 6px 15px; 
+-        background: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-        margin-left: 10px;
+-        outline: none;
+-    }
+-    .dataTables_filter input:focus {
+-        border-color: #ff4d4d !important;
+-        box-shadow: 0 0 0 0.2rem rgba(255, 77, 77, 0.1);
+-    }
+-
+-    .dataTables_length select {
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-        border: 1px solid var(--border-color) !important;
+-        border-radius: 8px;
+-    }
+-    
+-/* تغییر رنگ دکمه‌های صفحه‌بندی فعال */
+-.page-item.active .page-link {
+-    background-color: #ff4d4d !important; /* رنگ قرمز برند شما */
+-    border-color: #ff4d4d !important;
+-    color: #fff !important;
+-}
+-
+-/* تغییر رنگ متن دکمه‌های غیرفعال (شماره‌ها) */
+-.page-link {
+-    color: #ff4d4d !important; /* رنگ متن شماره‌ها */
+-    background-color: var(--bg-card) !important;
+-    border-color: var(--border-color) !important;
+-}
+-
+-/* افکت هاور (وقتی موس روی شماره‌ها می‌رود) */
+-.page-link:hover {
+-    background-color: rgba(255, 77, 77, 0.1) !important;
+-    color: #ff4d4d !important;
+-    border-color: #ff4d4d !important;
+-}
+-
+-/* تغییر رنگ متن Showing entries در پایین جدول */
+-.dataTables_info {
+-    color: var(--text-muted) !important;
+-    font-size: 0.85rem;
+-}
+-
+-/* اصلاح استایل دکمه‌های Previous و Next */
+-.page-item.disabled .page-link {
+-    background-color: var(--bg-card) !important;
+-    color: var(--text-muted) !important;
+-    opacity: 0.5;
+-}
+-/* --- وسط‌چین کردن بخش پایین جدول --- */
+-
+-/* حذف حالت شناور و وسط‌چین کردن محفظه اصلی */
+-.dataTables_wrapper .row:last-child {
+-    display: flex;
+-    flex-direction: column; /* چیدمان ستونی برای قرارگیری روی هم */
+-    align-items: center;    /* مرکز محور افقی */
+-    justify-content: center;
+-    gap: 15px;              /* ایجاد فاصله بین متن و دکمه‌ها */
+-    margin-top: 20px;
+-}
+-
+-/* وسط‌چین کردن متن Showing 1 to 10... */
+-.dataTables_info {
+-    text-align: center !important;
+-    float: none !important;
+-    padding-top: 0 !important;
+-}
+-
+-/* وسط‌چین کردن دکمه‌های صفحه‌بندی */
+-.dataTables_paginate {
+-    float: none !important;
+-    display: flex !important;
+-    justify-content: center !important;
+-}
+-
+-/* اطمینان از اینکه در موبایل هم درست نمایش داده می‌شود */
+-@media (max-width: 768px) {
+-    .dataTables_paginate .pagination {
+-        flex-wrap: wrap; /* برای اینکه شماره‌ها در موبایل نشکنند */
+-        justify-content: center;
+-    }
+-}
+-</style>
+-
+-<div class="container-fluid py-4">
+-    <div class="row">
+-        <div class="col-lg-12">
+-            <div class="alert quick-search-alert shadow-sm d-flex align-items-center mb-4 p-3" role="alert">
+-                <div class="bg-primary text-white rounded-circle d-flex align-items-center justify-content-center me-3" style="width: 40px; height: 40px; flex-shrink: 0;">
+-                    <i class="bi bi-info-lg"></i>
+-                </div>
+-                <div>
+-                    <strong class="d-block">Quick Search</strong>
+-                    <span class="text-muted small">Find users by username, fullname, saldo, or uplink instantly.</span>
+-                </div>
+-            </div>
+-
+-            <div class="card user-card shadow-sm">
+-                <div class="card-header user-header d-flex justify-content-between align-items-center">
+-                    <h5 class="text-white mb-0 fw-bold">
+-                        <i class="bi bi-people-fill me-2 text-info"></i> User Management
+-                    </h5>
+-                </div>
+-                
+-                <div class="card-body p-0">
+-                    <div class="table-responsive p-3">
+-                        <table id="datatable" class="table table-hover w-100">
+-                            <thead>
+-                                <tr>
+-                                    <th>ID</th>
+-                                    <th>User Information</th>
+-                                    <th>Role</th>
+-                                    <th>Saldo</th>
+-                                    <th>Status</th>
+-                                    <th>Uplink</th>
+-                                    <th>Actions</th>
+-                                </tr>
+-                            </thead>
+-                        </table>
+-                    </div>
+-                </div>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-
+-<?= $this->endSection() ?>
+-
+-<?= $this->section('css') ?>
+-<?= link_tag("https://cdn.datatables.net/1.11.5/css/dataTables.bootstrap5.min.css") ?>
+-<?= $this->endSection() ?>
+-
+-<?= $this->section('js') ?>
+-<?= script_tag("https://cdn.datatables.net/1.11.5/js/jquery.dataTables.min.js") ?>
+-<?= script_tag("https://cdn.datatables.net/1.11.5/js/dataTables.bootstrap5.min.js") ?>
+-
+-<script>
+-    $(document).ready(function() {
+-        var table = $('#datatable').DataTable({
+-            processing: true,
+-            serverSide: true,
+-            order: [[0, "desc"]],
+-            ajax: "<?= site_url('admin/api/users') ?>",
+-            language: {
+-                search: "_INPUT_",
+-                searchPlaceholder: "Quick search users...",
+-                lengthMenu: "Show _MENU_ entries",
+-            },
+-            columns: [
+-                { 
+-                    data: 'id',
+-                    render: (data) => `<span class="text-muted small fw-bold">#${data}</span>`
+-                },
+-                {
+-                    data: 'username',
+-                    render: function(data, type, row) {
+-                        return `
+-                            <div class="d-flex align-items-center">
+-                                <div class="rounded-circle d-flex align-items-center justify-content-center me-2" style="width: 35px; height: 35px; font-size: 0.8rem; font-weight: bold; background: var(--table-header); color: var(--text-main); border: 1px solid var(--border-color);">
+-                                    ${data.charAt(0).toUpperCase()}
+-                                </div>
+-                                <div>
+-                                    <div class="fw-bold" style="color: var(--text-main);">${data}</div>
+-                                    <div class="text-muted small" style="font-size: 0.75rem;">${row.fullname || 'No Fullname'}</div>
+-                                </div>
+-                            </div>`;
+-                    }
+-                },
+-                {
+-                    data: 'level',
+-                    render: function(data) {
+-                        var cls = (data === 'Admin') ? 'role-admin' : 'role-reseller';
+-                        var icon = (data === 'Admin') ? 'bi-shield-check' : 'bi-person-badge';
+-                        return `<span class="badge-role ${cls}"><i class="bi ${icon} me-1"></i>${data}</span>`;
+-                    }
+-                },
+-                {
+-                    data: 'saldo',
+-                    render: function(data, type, row) {
+-                        if (row.level === 'Admin') return `<span class="text-muted small">&infin;</span>`;
+-                        return `<span class="saldo-badge">$${parseFloat(data).toFixed(2)}</span>`;
+-                    }
+-                },
+-                {
+-                    data: 'status',
+-                    render: function(data) {
+-                        var dot = (data == 1) ? 'status-active' : 'status-banned';
+-                        var text = (data == 1) ? 'Active' : 'Suspended';
+-                        return `<span class="status-dot ${dot}"></span><span class="small fw-bold">${text}</span>`;
+-                    }
+-                },
+-                {
+-                    data: 'uplink',
+-                    render: (data) => `<span class="text-muted small">@${data || 'system'}</span>`
+-                },
+-                {
+-                    data: null,
+-                    orderable: false,
+-                    render: function(data, type, row) {
+-                        <?php if ($user->level == 1) : ?>
+-                            return `<a href="<?= site_url('admin/edit') ?>/${row.id}" class="btn btn-dark btn-sm rounded-pill px-3 shadow-sm border border-secondary" style="font-size: 0.75rem; font-weight: 700;">
+-                                        <i class="bi bi-pencil-square me-1"></i> EDIT
+-                                    </a>`;
+-                        <?php else: ?>
+-                            return '<span class="text-muted small">No Access</span>';
+-                        <?php endif; ?>
+-                    }
+-                }
+-            ]
+-        });
+-    });
+-</script>
+-
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/Auth/login.php app/BACKUP/Views/Auth/login.php
+--- /tmp/orig_app/BACKUP/Views/Auth/login.php	2026-08-24 23:02:52.493183670 +0000
++++ app/BACKUP/Views/Auth/login.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,186 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-
+-<style>
+-    /* تنظیمات عمومی تم */
+-    body {
+-        font-family: 'Inter', sans-serif;
+-        background-color: var(--bg-body) !important;
+-        color: var(--text-main) !important;
+-    }
+-
+-    .login-card {
+-        border: 1px solid var(--border-color) !important;
+-        border-radius: 20px;
+-        overflow: hidden;
+-        background-color: var(--bg-card) !important;
+-    }
+-
+-    .login-header {
+-        background: #1a1d20;
+-        padding: 1.5rem 1rem;
+-        border: none;
+-    }
+-
+-    .form-label {
+-        font-size: 0.85rem;
+-        font-weight: 600;
+-        color: var(--text-main);
+-        margin-bottom: 0.5rem;
+-    }
+-
+-    .form-control {
+-        border-radius: 12px;
+-        padding: 0.7rem 1rem;
+-        border: 1px solid var(--border-color);
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-        transition: all 0.3s ease;
+-    }
+-
+-    .form-control:focus {
+-        background-color: var(--input-bg) !important;
+-        border-color: #ff4d4d;
+-        box-shadow: 0 0 0 0.25rem rgba(255, 77, 77, 0.1);
+-        outline: none;
+-    }
+-
+-    .form-check-input:checked {
+-        background-color: #ff4d4d !important;
+-        border-color: #ff4d4d !important;
+-    }
+-    
+-    .form-check-label {
+-        color: var(--text-muted) !important;
+-        cursor: pointer;
+-    }
+-
+-    .btn-login {
+-        border-radius: 12px;
+-        padding: 0.8rem;
+-        font-weight: 600;
+-        /* تغییر به قرمز برند برای دید بهتر در دارک مود */
+-        background-color: #ff4d4d !important;
+-        color: white !important;
+-        border: none;
+-        transition: all 0.3s ease;
+-        box-shadow: 0 4px 15px rgba(255, 77, 77, 0.2);
+-    }
+-
+-    .btn-login:hover {
+-        /* در حالت هاور کمی روشن‌تر می‌شود */
+-        background-color: #ff6666 !important;
+-        transform: translateY(-2px);
+-        box-shadow: 0 6px 20px rgba(255, 77, 77, 0.4);
+-        color: white !important;
+-    }
+-
+-    .btn-login:active {
+-        transform: translateY(0);
+-    }
+-
+-    /* --- استایل کپسول پایین (اصلاح شده برای هر دو حالت) --- */
+-    .register-link-container {
+-        margin-top: 1.5rem;
+-        /* در حالت لایت‌مد سفید نیمه‌شفاف باشد تا روی بک‌گراند طوسی بدنه خودنمایی کند */
+-        background: rgba(255, 255, 255, 0.9) !important; 
+-        backdrop-filter: blur(8px);
+-        padding: 10px 25px;
+-        border-radius: 50px;
+-        display: inline-block;
+-        border: 1px solid rgba(0, 0, 0, 0.05); /* حاشیه بسیار ظریف در حالت روشن */
+-        color: #6c757d; /* رنگ متن طوسی ملایم برای لایت‌مد */
+-    }
+-
+-    /* استایل اختصاصی برای زمانی که دارک‌مود فعال است */
+-    [data-theme="dark"] .register-link-container {
+-        background: var(--bg-card) !important;
+-        border: 1px solid var(--border-color) !important;
+-        color: var(--text-muted) !important;
+-    }
+-
+-    .register-link-container a {
+-        color: #ff4d4d !important;
+-        text-decoration: none;
+-    }
+-
+-    .register-link-container a:hover {
+-        text-decoration: underline !important;
+-    }
+-    
+-    /* رفع مشکل سفیدی کادر در زمان Autofill گوگل */
+-input:-webkit-autofill,
+-input:-webkit-autofill:hover, 
+-input:-webkit-autofill:focus, 
+-input:-webkit-autofill:active {
+-    /* تغییر رنگ متن به سفید یا رنگ اصلی تم */
+-    -webkit-text-fill-color: var(--text-main) !important;
+-    /* تغییر رنگ پس‌زمینه به رنگ اینپوت‌های تم شما */
+-    -webkit-box-shadow: 0 0 0 1000px var(--input-bg) inset !important;
+-    /* تنظیم ضخامت و رنگ حاشیه */
+-    border: 1px solid var(--border-color) !important;
+-    transition: background-color 5000s ease-in-out 0s;
+-}
+-
+-/* برای اطمینان در تم تاریک */
+-[data-theme="dark"] input:-webkit-autofill {
+-    -webkit-text-fill-color: #ffffff !important;
+-    -webkit-box-shadow: 0 0 0 1000px #2b3035 inset !important; /* یا همان var(--input-bg) */
+-}
+-</style>
+-
+-<div class="row justify-content-center align-items-center" style="min-height: 85vh;">
+-    <div class="col-lg-4 col-md-6">
+-        <?= $this->include('Layout/msgStatus') ?>
+-        
+-        <div class="card login-card shadow-lg">
+-            <div class="card-header login-header text-center text-white">
+-                <h4 class="mb-0 fw-bold">Login</h4>
+-                <p class="text-secondary small mb-0 mt-1">Welcome back! Please enter your details.</p>
+-            </div>
+-            
+-            <div class="card-body p-4 p-md-5">
+-                <?= form_open('login') ?>
+-                <?= csrf_field() ?>
+-                
+-                <div class="mb-4">
+-                    <label for="username" class="form-label">Username</label>
+-                    <input type="text" class="form-control" name="username" id="username" 
+-                           placeholder="Your username" value="<?= old('username') ?>" required minlength="4">
+-                </div>
+-
+-                <div class="mb-4">
+-                    <label for="password" class="form-label">Password</label>
+-                    <input type="password" class="form-control" name="password" id="password" 
+-                           placeholder="••••••••" required minlength="6">
+-                </div>
+-
+-                <div class="form-check mb-4">
+-                    <input type="checkbox" class="form-check-input" name="stay_log" id="stay_log" value="yes">
+-                    <label class="form-check-label small" for="stay_log">
+-                        Keep me logged in
+-                    </label>
+-                </div>
+-
+-                <div class="d-grid">
+-                    <button type="submit" class="btn btn-login shadow-sm">
+-                        <i class="bi bi-box-arrow-in-right me-2"></i> Log in
+-                    </button>
+-                </div>
+-                
+-                <?= form_close() ?>
+-            </div>
+-        </div>
+-
+-        <div class="text-center w-100 mt-2">
+-            <div class="register-link-container shadow-sm">
+-                <small>Don't have an account? 
+-                    <a href="<?= site_url('register') ?>" class="fw-bold">Register here</a>
+-                </small>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/Auth/register.php app/BACKUP/Views/Auth/register.php
+--- /tmp/orig_app/BACKUP/Views/Auth/register.php	2026-08-24 23:02:52.493797853 +0000
++++ app/BACKUP/Views/Auth/register.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,179 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-
+-<style>
+-    /* تنظیمات عمومی تم برای هماهنگی با کل سایت */
+-    body {
+-        font-family: 'Inter', sans-serif;
+-        background-color: var(--bg-body) !important;
+-        color: var(--text-main) !important;
+-    }
+-
+-    .register-card {
+-        border: 1px solid var(--border-color) !important;
+-        border-radius: 20px;
+-        overflow: hidden;
+-        background-color: var(--bg-card) !important;
+-    }
+-
+-    .register-header {
+-        background: #1a1d20;
+-        padding: 1.5rem 1rem;
+-        border: none;
+-    }
+-
+-    .form-label {
+-        font-size: 0.85rem;
+-        font-weight: 600;
+-        color: var(--text-main);
+-        margin-bottom: 0.5rem;
+-    }
+-
+-    .form-control {
+-        border-radius: 12px;
+-        padding: 0.7rem 1rem;
+-        border: 1px solid var(--border-color);
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-        transition: all 0.3s ease;
+-    }
+-
+-    .form-control:focus {
+-        background-color: var(--input-bg) !important;
+-        border-color: #ff4d4d; /* قرمز برند */
+-        box-shadow: 0 0 0 0.25rem rgba(255, 77, 77, 0.1);
+-        outline: none;
+-    }
+-
+-    .btn-register {
+-        border-radius: 12px;
+-        padding: 0.8rem;
+-        font-weight: 600;
+-        /* تغییر به قرمز برند برای دید بهتر در دارک مود */
+-        background-color: #ff4d4d !important;
+-        color: white !important;
+-        border: none;
+-        transition: all 0.3s ease;
+-        box-shadow: 0 4px 15px rgba(255, 77, 77, 0.2);
+-    }
+-
+-    .btn-register:hover {
+-        /* در حالت هاور کمی روشن‌تر می‌شود */
+-        background-color: #ff6666 !important;
+-        transform: translateY(-2px);
+-        box-shadow: 0 6px 20px rgba(255, 77, 77, 0.4);
+-        color: white !important;
+-    }
+-
+-    .btn-register:active {
+-        transform: translateY(0);
+-    }
+-
+-    /* --- اصلاح کادر Already have an account --- */
+-    .login-link-container {
+-        margin-top: 1.5rem;
+-        background: var(--bg-card); /* داینامیک: در حالت تاریک، تیره می‌شود */
+-        backdrop-filter: blur(8px);
+-        padding: 10px 25px;
+-        border-radius: 50px;
+-        display: inline-block;
+-        border: 1px solid var(--border-color);
+-        color: var(--text-muted);
+-    }
+-
+-    /* رنگ لینک لاگین */
+-    .login-link-container a {
+-        color: #ff4d4d !important; /* قرمز برند */
+-    }
+-    /* رفع مشکل سفیدی کادر در زمان Autofill گوگل */
+-input:-webkit-autofill,
+-input:-webkit-autofill:hover, 
+-input:-webkit-autofill:focus, 
+-input:-webkit-autofill:active {
+-    /* تغییر رنگ متن به سفید یا رنگ اصلی تم */
+-    -webkit-text-fill-color: var(--text-main) !important;
+-    /* تغییر رنگ پس‌زمینه به رنگ اینپوت‌های تم شما */
+-    -webkit-box-shadow: 0 0 0 1000px var(--input-bg) inset !important;
+-    /* تنظیم ضخامت و رنگ حاشیه */
+-    border: 1px solid var(--border-color) !important;
+-    transition: background-color 5000s ease-in-out 0s;
+-}
+-
+-/* برای اطمینان در تم تاریک */
+-[data-theme="dark"] input:-webkit-autofill {
+-    -webkit-text-fill-color: #ffffff !important;
+-    -webkit-box-shadow: 0 0 0 1000px #2b3035 inset !important; /* یا همان var(--input-bg) */
+-}
+-</style>
+-
+-<div class="row justify-content-center align-items-center pt-4 pb-5" style="min-height: 90vh;">
+-    <div class="col-lg-4 col-md-6">
+-        <?= $this->include('Layout/msgStatus') ?>
+-        
+-        <div class="card register-card shadow-lg">
+-            <div class="card-header register-header text-center text-white">
+-                <h4 class="mb-0 fw-bold">Create Account</h4>
+-                <p class="text-secondary small mb-0 mt-1">Join us and start your journey</p>
+-            </div>
+-            
+-            <div class="card-body p-4 p-md-4">
+-                <?= form_open() ?>
+-
+-                <div class="mb-3">
+-                    <label for="username" class="form-label">Username</label>
+-                    <input type="text" class="form-control" name="username" id="username" 
+-                           placeholder="Choose a username" value="<?= old('username') ?>" required minlength="4" maxlength="24">
+-                    <?php if ($validation->hasError('username')) : ?>
+-                        <div class="text-danger small mt-1 fw-bold"><?= $validation->getError('username') ?></div>
+-                    <?php endif; ?>
+-                </div>
+-
+-                <div class="mb-3">
+-                    <label for="password" class="form-label">Password</label>
+-                    <input type="password" class="form-control" name="password" id="password" 
+-                           placeholder="Create a strong password" required minlength="6" maxlength="24">
+-                    <?php if ($validation->hasError('password')) : ?>
+-                        <div class="text-danger small mt-1 fw-bold"><?= $validation->getError('password') ?></div>
+-                    <?php endif; ?>
+-                </div>
+-
+-                <div class="mb-3">
+-                    <label for="password2" class="form-label">Confirm Password</label>
+-                    <input type="password" class="form-control" name="password2" id="password2" 
+-                           placeholder="Repeat your password" required minlength="6" maxlength="24">
+-                    <?php if ($validation->hasError('password2')) : ?>
+-                        <div class="text-danger small mt-1 fw-bold"><?= $validation->getError('password2') ?></div>
+-                    <?php endif; ?>
+-                </div>
+-
+-                <div class="mb-4">
+-                    <label for="referral" class="form-label">Referral Code</label>
+-                    <input type="text" class="form-control" name="referral" id="referral" 
+-                           placeholder="Enter referral code" value="<?= old('referral') ?>" maxlength="25" required>
+-                    <?php if ($validation->hasError('referral')) : ?>
+-                        <div class="text-danger small mt-1 fw-bold"><?= $validation->getError('referral') ?></div>
+-                    <?php endif; ?>
+-                </div>
+-
+-                <div class="d-grid">
+-                    <button type="submit" class="btn btn-register shadow-sm">
+-                        <i class="bi bi-person-plus-fill me-2"></i> Register Now
+-                    </button>
+-                </div>
+-                
+-                <?= form_close() ?>
+-            </div>
+-        </div>
+-
+-        <div class="text-center w-100 mt-2">
+-            <div class="login-link-container shadow-sm">
+-                <small>Already have an account? 
+-                    <a href="<?= site_url('login') ?>" class="fw-bold text-decoration-none">Login here</a>
+-                </small>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/Keys/generate.php app/BACKUP/Views/Keys/generate.php
+--- /tmp/orig_app/BACKUP/Views/Keys/generate.php	2026-08-24 23:02:52.494989040 +0000
++++ app/BACKUP/Views/Keys/generate.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,235 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-
+-<style>
+-    body { font-family: 'Inter', sans-serif; background-color: var(--bg-body) !important; color: var(--text-main) !important; }
+-    
+-    /* استایل کارت اصلی */
+-    .generate-card { border: none; border-radius: 20px; overflow: hidden; background-color: var(--bg-card) !important; }
+-    .generate-header { background: #1a1d20; padding: 1.25rem 1.5rem; border: none; }
+-    
+-    /* باکس نمایش لایسنس تولید شده (هماهنگ با تم) */
+-    .key-result-box {
+-        background: rgba(40, 167, 69, 0.05);
+-        border: 1px dashed #28a745;
+-        border-radius: 15px;
+-        padding: 20px;
+-        margin-bottom: 25px;
+-    }
+-    .key-result-box .bg-white {
+-        background-color: var(--bg-card) !important;
+-        border-color: var(--border-color) !important;
+-    }
+-    
+-    /* استایل المان‌های حساس */
+-    .key-sensi {
+-        font-family: 'Monaco', 'Consolas', monospace;
+-        background: var(--input-bg);
+-        padding: 4px 10px;
+-        border-radius: 6px;
+-        color: #d63384;
+-        font-size: 1.1rem;
+-    }
+-    
+-    /* استایل فرم (اصلاح شده برای Dark Mode) */
+-    .form-label { font-size: 0.85rem; font-weight: 600; color: var(--text-main); }
+-    
+-    .form-control, .form-select {
+-        border-radius: 12px;
+-        padding: 0.75rem 1rem;
+-        border: 1px solid var(--border-color);
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-    }
+-
+-    /* اصلاح رنگ آیکون فلش در Select (برای حالت تاریک) */
+-    .form-select {
+-        background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%236c757d' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M2 5l6 6 6-6'/%3e%3c/svg%3e");
+-    }
+-
+-    .form-control:focus, .form-select:focus {
+-        border-color: #ff4d4d; /* قرمز برند */
+-        box-shadow: 0 0 0 0.25rem rgba(255, 77, 77, 0.1);
+-        outline: none;
+-    }
+-    
+-    /* باکس تخمین قیمت */
+-    #estimation {
+-        background-color: rgba(67, 56, 202, 0.1) !important;
+-        border: 1px solid #4338ca;
+-        color: #4338ca;
+-        font-weight: 800;
+-        font-size: 1.4rem;
+-    }
+-
+-    [data-theme="dark"] #estimation {
+-        color: #818cf8;
+-        border-color: #818cf8;
+-    }
+-
+-    .btn-generate {
+-        border-radius: 12px;
+-        padding: 1rem;
+-        font-weight: 700;
+-        background: #1a1d20;
+-        color: white;
+-        border: none;
+-        transition: all 0.2s;
+-    }
+-    .btn-generate:hover { background: #000; transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+-
+-/* اصلاح تراز و سایز دکمه View All بدون تغییر در ساختار اصلی */
+-.generate-header .btn-sm {
+-    display: inline-flex;
+-    align-items: center;
+-    justify-content: center;
+-    height: 31px; /* ارتفاع دقیق مشابه صفحات دیگر */
+-    padding: 0 12px !important;
+-    font-size: 0.75rem;
+-    font-weight: 600;
+-    line-height: 1;
+-}
+-
+-.generate-header .btn-sm i {
+-    font-size: 0.85rem;
+-    margin-top: 1px; /* اصلاح تراز بصری آیکون */
+-}
+-
+-.generate-header h5 {
+-    line-height: 1; /* جلوگیری از کشیدن ارتفاع هدر توسط متن */
+-}
+-
+-.text-main { color: var(--text-main) !important; }
+-.key-sensi { 
+-    font-family: 'Monaco', 'Consolas', monospace; 
+-    padding: 2px 8px; 
+-    border-radius: 5px; 
+-    font-weight: bold;
+-}
+-
+-</style>
+-
+-<div class="container py-5">
+-    <div class="row justify-content-center">
+-        <div class="col-lg-7">
+-            <?= $this->include('Layout/msgStatus') ?>
+-
+-            <?php $keys = session()->getFlashdata('generatedKeys'); ?>
+-            <?php if ($keys): ?>
+-                <div class="key-result-box shadow-sm animate__animated animate__fadeIn" style="background: rgba(40, 167, 69, 0.1); border: 1px solid #28a745;">
+-                    <h5 class="text-success fw-bold mb-3">
+-                        <i class="bi bi-check-all me-2"></i> Keys Generated Successfully!
+-                    </h5>
+-                    
+-                    <div class="alert alert-success" role="alert" style="background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-main);">
+-                        <?php foreach ($keys as $keyData): ?>
+-                            <div class="mb-3 pb-3 border-bottom border-secondary border-opacity-25">
+-                                <span class="text-muted">Game :</span> <strong class="text-main"><?= $keyData['game'] ?></strong> 
+-                                (<strong class="text-danger"><?= $keyData['duration'] ?></strong> Hours Access)<br>
+-                                
+-                                <span class="text-muted">License :</span> 
+-                                <code class="key-sensi mt-1 d-inline-block" style="color: #ff4d4d; background: var(--input-bg); border: 1px solid var(--border-color);">
+-                                    `<?= $keyData['user_key'] ?>`
+-                                </code><br>
+-                                
+-                                <span class="text-muted">Device Limit :</span> Up to <strong class="text-info"><?= $keyData['max_devices'] ?></strong> Devices<br>
+-                                <small class="text-warning" style="font-size: 0.75rem;">
+-                                    <i class="bi bi-info-circle me-1"></i> Your duration will start after successful license login.
+-                                </small>
+-                            </div>
+-                        <?php endforeach; ?>
+-
+-                        <div class="mt-2 d-flex justify-content-between align-items-center">
+-                            <small class="text-main">
+-                                <i class="bi bi-wallet2 me-1"></i> Saldo Reduce: 
+-                                <span class="text-danger fw-bold">-<?= session()->getFlashdata('fees') ?>$</span>
+-                            </small>
+-                            <span class="badge bg-dark text-white rounded-pill px-3">
+-                                Total left: <?= $user->saldo ?>$
+-                            </span>
+-                        </div>
+-                    </div>
+-                </div>
+-            <?php endif; ?>
+-            
+-
+-            <div class="card generate-card shadow-lg">
+-                <div class="card-header generate-header d-flex justify-content-between align-items-center">
+-                    <h5 class="text-white mb-0 fw-bold">Create New License</h5>
+-                    <a class="btn btn-sm btn-outline-light rounded-pill px-3" href="<?= site_url('keys') ?>">
+-                        <i class="bi bi-list-ul me-1"></i> View All
+-                    </a>
+-                </div>
+-                <div class="card-body p-4 p-md-5">
+-                    <?= form_open() ?>
+-                    
+-                    <div class="row">
+-                        <div class="col-md-6 mb-3">
+-                            <label class="form-label">Select Game</label>
+-                            <?= form_dropdown(['class' => 'form-select', 'name' => 'game', 'id' => 'game'], $game, old('game') ?: '') ?>
+-                            <?php if ($validation->hasError('game')) : ?>
+-                                <small class="text-danger small fw-bold"><?= $validation->getError('game') ?></small>
+-                            <?php endif; ?>
+-                        </div>
+-                        <div class="col-md-6 mb-3">
+-                            <label class="form-label">Max Devices</label>
+-                            <input type="number" name="max_devices" id="max_devices" class="form-control" value="<?= old('max_devices') ?: 1 ?>">
+-                        </div>
+-                    </div>
+-
+-                    <div class="row">
+-                        <div class="col-md-6 mb-3">
+-                            <label class="form-label">Duration</label>
+-                            <?= form_dropdown(['class' => 'form-select', 'name' => 'duration', 'id' => 'duration'], $duration, old('duration') ?: '') ?>
+-                        </div>
+-                        <div class="col-md-6 mb-3">
+-                            <label class="form-label">Quantity</label>
+-                            <input type="number" name="quantity" id="quantity" class="form-control" value="<?= old('quantity') ?: 1 ?>">
+-                        </div>
+-                    </div>
+-
+-                    <div class="mb-4">
+-                        <label class="form-label text-primary">Estimated Cost ($)</label>
+-                        <input type="text" id="estimation" class="form-control" readonly value="0">
+-                        <small class="text-muted text-center d-block mt-2 font-italic">The amount will be deducted from your saldo.</small>
+-                    </div>
+-
+-                    <div class="d-grid">
+-                        <button type="submit" class="btn btn-generate shadow-sm">
+-                            <i class="bi bi- lightning-charge-fill me-2"></i> Generate License
+-                        </button>
+-                    </div>
+-                    <?= form_close() ?>
+-                </div>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-
+-<?= $this->endSection() ?>
+-
+-<?= $this->section('js') ?>
+-<script>
+-    $(document).ready(function() {
+-        var priceData = JSON.parse('<?= $price ?>');
+-        
+-        function updatePrice() {
+-            var device = parseInt($("#max_devices").val()) || 0;
+-            var durate = $("#duration").val();
+-            var quantity = parseInt($("#quantity").val()) || 0;
+-            var gprice = priceData[durate] || 0;
+-            
+-            if (gprice > 0) {
+-                var result = (device * gprice * quantity);
+-                $("#estimation").val(result.toFixed(2));
+-            } else {
+-                $("#estimation").val('0.00');
+-            }
+-        }
+-
+-        $("#max_devices, #duration, #game, #quantity").on('change keyup', updatePrice);
+-        updatePrice(); // Initial call
+-    });
+-</script>
+-<?= $this->endSection() ?>
+diff -ruN /tmp/orig_app/BACKUP/Views/Keys/key_edit.php app/BACKUP/Views/Keys/key_edit.php
+--- /tmp/orig_app/BACKUP/Views/Keys/key_edit.php	2026-08-24 23:02:52.496030193 +0000
++++ app/BACKUP/Views/Keys/key_edit.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,216 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-<?= $this->section('content') ?>
+-
+-<style>
+-    /* تنظیمات عمومی تم */
+-    body { 
+-        font-family: 'Inter', sans-serif; 
+-        background-color: var(--bg-body) !important; 
+-        color: var(--text-main) !important; 
+-    }
+-    
+-    .edit-card { 
+-        border: none; 
+-        border-radius: 20px; 
+-        overflow: hidden; 
+-        background-color: var(--bg-card) !important;
+-        border: 1px solid var(--border-color) !important;
+-    }
+-    .edit-header { background: #1a1d20; padding: 1.25rem 1.5rem; border: none; }
+-    
+-    /* استایل فرم‌ها هماهنگ با تم */
+-    .form-label { font-size: 0.85rem; font-weight: 600; color: var(--text-main); }
+-
+-/* تنظیم تراز عمودی دکمه‌های هدر کارت */
+-.edit-header .d-flex.gap-2 .btn {
+-    display: inline-flex;
+-    align-items: center;
+-    justify-content: center;
+-    height: 31px; /* هماهنگ کردن ارتفاع دقیق دکمه‌ها */
+-    line-height: 1;
+-}
+-
+-/* اصلاح تراز آیکون پلاس */
+-.edit-header .bi-plus-lg {
+-    margin-top: 1px; /* تنظیم جزئی برای وسط‌چینی بصری */
+-}
+-
+-    .form-control, .form-select {
+-        border-radius: 12px;
+-        padding: 0.75rem 1rem;
+-        border: 1px solid var(--border-color);
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-        transition: all 0.3s;
+-    }
+-
+-    /* اصلاح رنگ آیکون فلش در Select برای حالت تاریک */
+-    .form-select {
+-        background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%236c757d' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M2 5l6 6 6-6'/%3e%3c/svg%3e");
+-    }
+-
+-    .form-control:focus, .form-select:focus {
+-        border-color: #ff4d4d; /* قرمز برند ZERO */
+-        background-color: var(--input-bg) !important;
+-        box-shadow: 0 0 0 0.25rem rgba(255, 77, 77, 0.1);
+-        outline: none;
+-    }
+-
+-    /* استایل فیلدهای غیرفعال در حالت تاریک */
+-    .form-control:disabled { 
+-        background-color: rgba(255, 255, 255, 0.05) !important; 
+-        border-color: var(--border-color);
+-        color: var(--text-muted) !important;
+-        cursor: not-allowed; 
+-    }
+-
+-    /* استایل بخش دیوایس‌ها */
+-    .device-count-badge {
+-        font-size: 0.75rem;
+-        padding: 4px 10px;
+-        border-radius: 50px;
+-    }
+-
+-    .btn-update {
+-        border-radius: 12px;
+-        padding: 0.8rem;
+-        font-weight: 700;
+-        transition: all 0.2s;
+-    }
+-    
+-    .section-title {
+-        font-size: 0.8rem;
+-        text-transform: uppercase;
+-        letter-spacing: 1px;
+-        color: var(--text-muted); /* تغییر رنگ متناسب با تم */
+-        margin-bottom: 15px;
+-        display: block;
+-        font-weight: 800;
+-    }
+-
+-    /* جداکننده افقی */
+-    hr {
+-        border-top: 1px solid var(--border-color);
+-        opacity: 0.2;
+-    }
+-</style>
+-
+-
+-<div class="container py-5">
+-    <div class="row justify-content-center">
+-        <div class="col-lg-9">
+-            <?= $this->include('Layout/msgStatus') ?>
+-
+-            <div class="card edit-card shadow-lg">
+-                <div class="card-header edit-header d-flex justify-content-between align-items-center">
+-                    <h5 class="text-white mb-0 fw-bold">
+-                        <i class="bi bi-pencil-square me-2"></i>Edit Key Details
+-                    </h5>
+-                    <div class="d-flex gap-2">
+-                        <a class="btn btn-sm btn-outline-light rounded-pill px-3" href="<?= site_url('keys/generate') ?>">
+-                            <i class="bi bi-plus-lg"></i>
+-                        </a>
+-                        <a class="btn btn-sm btn-outline-light rounded-pill px-3" href="<?= site_url('keys') ?>">
+-                            <i class="bi bi-arrow-left"></i> Back
+-                        </a>
+-                    </div>
+-                </div>
+-
+-                <div class="card-body p-4 p-md-5">
+-                    <?= form_open('keys/edit') ?>
+-                    <input type="hidden" name="id_keys" value="<?= $key->id_keys ?>">
+-
+-                    <?php if ($user->level == 1) : ?>
+-                    <span class="section-title">Core Configuration</span>
+-                    <div class="row mb-4">
+-                        <div class="col-lg-6 mb-3">
+-                            <label class="form-label">Game Name</label>
+-                            <input type="text" name="game" class="form-control" value="<?= old('game') ?: $key->game ?>">
+-                        </div>
+-                        <div class="col-lg-6 mb-3">
+-                            <label class="form-label">License Key String</label>
+-                            <input type="text" name="user_key" class="form-control fw-bold text-primary" value="<?= old('user_key') ?: $key->user_key ?>">
+-                        </div>
+-                        <div class="col-lg-6 mb-3">
+-                            <label class="form-label">Duration <small>(Hours)</small></label>
+-                            <input type="number" name="duration" id="duration" class="form-control" value="<?= old('duration') ?: $key->duration ?>">
+-                        </div>
+-                        <div class="col-lg-6 mb-3">
+-                            <label class="form-label">Max Devices Allowed</label>
+-                            <input type="number" name="max_devices" id="max_devices" class="form-control" value="<?= old('max_devices') ?: $key->max_devices ?>">
+-                        </div>
+-                    </div>
+-                    <hr class="my-4 opacity-10">
+-                    <?php endif; ?>
+-
+-                    <span class="section-title">Access & Status</span>
+-                    <div class="row mb-4">
+-                        <div class="col-md-6 mb-3">
+-                            <label class="form-label">Key Status</label>
+-                            <?php $sel_status = ['' => 'Select Status', '0' => '⛔ Banned/Blocked', '1' => '✅ Active']; ?>
+-                            <?= form_dropdown(['class' => 'form-select', 'name' => 'status', 'id' => 'status'], $sel_status, $key->status) ?>
+-                        </div>
+-                        <div class="col-md-6 mb-3">
+-                            <label class="form-label">Registrator Name</label>
+-                            <input type="text" name="registrator" id="registrator" class="form-control" value="<?= old('registrator') ?: $key->registrator ?>">
+-                        </div>
+-                        <div class="col-md-12 mb-3">
+-                            <label class="form-label">
+-                                Expiration Date 
+-                                <span class="badge <?= !$key->expired_date ? 'bg-warning text-dark' : 'bg-info' ?> ms-2">
+-                                    <?= !$key->expired_date ? 'Not activated yet' : 'Activated' ?>
+-                                </span>
+-                            </label>
+-                            <input type="text" name="expired_date" id="expired_date" class="form-control" value="<?= old('expired_date') ?: $key->expired_date ?>" placeholder="YYYY-MM-DD HH:MM:SS">
+-                        </div>
+-                    </div>
+-
+-                    <span class="section-title">Connected Devices</span>
+-                    <div class="mb-4">
+-                        <label class="form-label d-flex justify-content-between">
+-                            Device List
+-                            <span class="badge bg-dark device-count-badge maxDev">
+-                                <?= $key_info->total ?> / <?= $key->max_devices ?>
+-                            </span>
+-                        </label>
+-                        <textarea class="form-control" name="devices" id="devices" rows="<?= ($key_info->total > $key->max_devices) ? 4 : ($key_info->total ?: 2) ?>" placeholder="Each device ID in a new line..."><?= old('devices') ?: ($key_info->total ? $key_info->devices : '') ?></textarea>
+-                        <small class="text-muted mt-2 d-block">Modify registered HWIDs manually if needed.</small>
+-                    </div>
+-
+-                    <div class="d-grid mt-5">
+-                        <button class="btn btn-dark btn-update btnUpdate" disabled>
+-                            <i class="bi bi-save me-2"></i> Save Changes
+-                        </button>
+-                    </div>
+-                    <?= form_close() ?>
+-                </div>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-
+-<?= $this->endSection() ?>
+-
+-<?= $this->section('js') ?>
+-<script>
+-    $(document).ready(function() {
+-        var level = "<?= $user->level ?>";
+-        // غیرفعال سازی فیلدها برای غیر ادمین
+-        if (level != 1) {
+-            $("#registrator, #expired_date, #devices").attr('disabled', true);
+-        }
+-
+-        // فعال کردن دکمه آپدیت فقط در صورت تغییر
+-        $("input, select, textarea").on('input change', function() {
+-            $(".btnUpdate").attr('disabled', false).removeClass('btn-dark').addClass('btn-primary shadow');
+-        });
+-
+-        // آپدیت زنده تعداد دیوایس در لیبل
+-        var total = "<?= $key_info->total ?>";
+-        $("#max_devices").on('input change', function() {
+-            $(".maxDev").html(total + ' / ' + $(this).val());
+-            $("#devices").attr('rows', Math.max(2, $(this).val()));
+-        });
+-    });
+-</script>
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/Keys/list.php app/BACKUP/Views/Keys/list.php
+--- /tmp/orig_app/BACKUP/Views/Keys/list.php	2026-08-24 23:02:52.497460043 +0000
++++ app/BACKUP/Views/Keys/list.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,183 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-<div class="row justify-content-center">
+-    <div class="row">
+-        <div class="col-lg-12">
+-            <?= $this->include('Layout/msgStatus') ?>
+-        </div>
+-        <div class="col-lg-12">
+-            <div class="card shadow-sm">
+-                <div class="card-header p3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+-                    <div class="pt-1 text-nowrap">
+-                        <i class="bi bi-card-list me-2"></i>Keys Registered
+-                    </div>
+-                    <div class="text-end">
+-                        <a class="btn btn-outline-light btn-sm" href="<?= site_url('keys/generate') ?>"><i class="bi bi-person-plus"></i> KEY</a>
+-                        <button class="btn btn-secondary btn-sm ms-1" id="blur-out" data-bs-toggle="tooltip" data-bs-placement="top" title="Eye Protect"><i class="bi bi-eye-slash"></i></button>
+-                    </div>
+-                </div>
+-                <div class="card-body">
+-                    <?php if ($keylist) : ?>
+-                        <div class="table-responsive">
+-                            <table id="datatable" class="table table-bordered table-hover text-center" style="width:100%">
+-                                <thead>
+-                                    <tr>
+-                                        <th>#</th>
+-                                        <th>Game</th>
+-                                        <th>User Keys</th>
+-                                        <th>Devices</th>
+-                                        <th>Duration</th>
+-                                        <th>Expired</th>
+-                                        <th>Action</th>
+-                                    </tr>
+-                                </thead>
+-                            </table>
+-                        </div>
+-                    <?php else : ?>
+-                        <p class="text-center">Nothing keys to show</p>
+-                    <?php endif; ?>
+-                </div>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-<?= $this->endSection() ?>
+-
+-<?= $this->section('css') ?>
+-<?= link_tag("https://cdn.datatables.net/1.10.25/css/dataTables.bootstrap5.min.css") ?>
+-
+-<?= $this->endSection() ?>
+-
+-<?= $this->section('js') ?>
+-<?= script_tag("https://cdn.datatables.net/1.10.25/js/jquery.dataTables.min.js") ?>
+-
+-<?= script_tag("https://cdn.datatables.net/1.10.25/js/dataTables.bootstrap5.min.js") ?>
+-<script>
+-    $(document).ready(function() {
+-        // ── تنها تنظیمِ صفحه‌بندی ──
+-        // این عدد = تعداد شماره‌صفحه‌ها (پیش‌فرض ۷). تعدادِ عددهای پشت‌سرهمِ اولِ لیست
+-        // برابرِ (این عدد − ۲) ئه. پس ۵ ⇒ «۱ ۲ ۳ … ۳۴۶»، ۶ ⇒ «۱ ۲ ۳ ۴ … ۳۴۶» و…
+-        // کمترش کنی ردیف کوتاه‌تر می‌شه، بیشترش کنی شماره‌های بیشتری میاد.
+-        $.fn.dataTable.ext.pager.numbers_length = 5;
+-        var table = $('#datatable').DataTable({
+-            processing: true,
+-            serverSide: true,
+-            order: [
+-                [0, "desc"]
+-            ],
+-            ajax: "<?= site_url('keys/api') ?>",
+-            columns: [{
+-                    data: 'id',
+-                    name: 'id_keys'
+-                },
+-                {
+-                    data: 'game',
+-                },
+-                {
+-                    data: 'user_key',
+-                    render: function(data, type, row, meta) {
+-                        var is_valid = (row.status == 'Active') ? "text-success" : "text-danger";
+-                        return `<span class="${is_valid} keyBlur key-sensi">${(row.user_key ? row.user_key : '&mdash;')}</span> `;
+-                    }
+-                },
+-                {
+-                    data: 'devices',
+-                    render: function(data, type, row, meta) {
+-                        var totalDevice = (row.devices ? row.devices : 0);
+-                        return `<span id="devMax-${row.user_key}">${totalDevice}/${row.max_devices}</span>`;
+-                    }
+-                },
+-                {
+-                    data: 'duration',
+-                    render: function(data, type, row, meta) {
+-                        return row.duration;
+-                    }
+-                },
+-                {
+-                    data: 'expired',
+-                    name: 'expired_date',
+-                    render: function(data, type, row, meta) {
+-                        return row.expired ? `<span class="badge text-dark">${row.expired}</span>` : '(not started yet)';
+-                    }
+-                },
+-                {
+-                    data: null,
+-                    render: function(data, type, row, meta) {
+-                        var btnReset = `<button class="btn btn-outline-danger btn-sm" onclick="resetUserKey('${row.user_key}')"
+-                        data-bs-toggle="tooltip" data-bs-placement="left" title="Reset key?"><i class="bi bi-bootstrap-reboot"></i></button>`;
+-                        var btnEdits = `<a href="${window.location.origin}/keys/${row.id}" class="btn btn-outline-primary btn-sm"
+-                        data-bs-toggle="tooltip" data-bs-placement="left" title="Edit key information?"><i class="bi bi-person"></i></a>`;
+-                        return `<div class="d-grid gap-2 d-md-block">${btnReset} ${btnEdits}</div>`;
+-                    }
+-                }
+-            ]
+-        });
+-
+-        $("#blur-out").click(function() {
+-            if ($(".keyBlur").hasClass("key-sensi")) {
+-                $(".keyBlur").removeClass("key-sensi");
+-                $("#blur-out").html(`<i class="bi bi-eye"></i>`);
+-            } else {
+-                $(".keyBlur").addClass("key-sensi");
+-                $("#blur-out").html(`<i class="bi bi-eye-slash"></i>`);
+-            }
+-        });
+-    });
+-
+-    function resetUserKey(keys) {
+-        Swal.fire({
+-            title: 'Are you sure?',
+-            text: "You won't be able to revert this!",
+-            icon: 'warning',
+-            showCancelButton: true,
+-            confirmButtonColor: '#f4725a',
+-            cancelButtonColor: '#332420',
+-            confirmButtonText: 'Yes, reset'
+-        }).then((result) => {
+-            if (result.isConfirmed) {
+-                Toast.fire({
+-                    icon: 'info',
+-                    title: 'Please wait...'
+-                })
+-
+-                var base_url = window.location.origin;
+-                var api_url = `${base_url}/keys/reset`;
+-                $.getJSON(api_url, {
+-                        pass: 't██████',
+-                        userkey: keys,
+-                        reset: 1
+-                    },
+-                    function(data, textStatus, jqXHR) {
+-                        if (textStatus == 'success') {
+-                            if (data.registered) {
+-                                if (data.reset) {
+-                                    $(`#devMax-${keys}`).html(`0/${data.devices_max}`);
+-                                    Swal.fire(
+-                                        'Reset!',
+-                                        'Your device key has been reset.',
+-                                        'success'
+-                                    )
+-                                } else {
+-                                    Swal.fire(
+-                                        'Failed!',
+-                                        data.devices_total ? "You don't have any access to this user." : "User key devices already reset.",
+-                                        data.devices_total ? 'error' : 'warning'
+-                                    )
+-                                }
+-                            } else {
+-                                Swal.fire(
+-                                    'Failed!',
+-                                    "User key no longer exists.",
+-                                    'error'
+-                                )
+-                            }
+-                        }
+-                    }
+-                );
+-            }
+-        });
+-    }
+-</script>
+-
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/Layout/Header.php app/BACKUP/Views/Layout/Header.php
+--- /tmp/orig_app/BACKUP/Views/Layout/Header.php	2026-08-24 23:02:52.498400228 +0000
++++ app/BACKUP/Views/Layout/Header.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,213 +0,0 @@
+-<style>
+-    /* --- تنظیمات نوبار --- */
+-    .navbar {
+-        background-color: #1a1d20 !important;
+-        padding: 0.5rem 1rem; /* پدینگ کمتر برای ظرافت */
+-        backdrop-filter: blur(10px);
+-        z-index: 1050 !important; 
+-        position: relative;
+-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+-    }
+-    
+-    .navbar-brand {
+-        font-weight: 800;
+-        letter-spacing: -0.5px;
+-        display: flex;
+-        align-items: center;
+-        gap: 8px;
+-        color: #ff4d4d !important; 
+-    }
+-
+-    .navbar-brand i {
+-        color: #ff4d4d;
+-        font-size: 1.4rem;
+-    }
+-
+-    /* --- رفع مشکل تیک زدن در اندروید (اصلاح اصلی) --- */
+-    .navbar-collapse {
+-        /* پدینگ مستقیم را حذف کردیم */
+-        padding: 0 !important; 
+-        background-color: #1a1d20;
+-        border-radius: 0 0 15px 15px;
+-        overflow: hidden; /* ضروری برای انیمیشن نرم */
+-    }
+-
+-    /* اعمال پدینگ به لیست داخلی به جای ظرف اصلی */
+-    .navbar-nav {
+-        padding: 10px 0; 
+-    }
+-
+-    /* نرم‌تر کردن انیمیشن در موبایل */
+-    .collapsing {
+-        transition: height 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
+-    }
+-
+-    /* --- استایل دراپ‌داون --- */
+-    .dropdown-menu {
+-        border: 1px solid var(--border-color);
+-        border-radius: 15px;
+-        box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+-        padding: 8px;
+-        margin-top: 10px !important;
+-        background-color: var(--bg-card) !important;
+-        z-index: 2000 !important; 
+-    }
+-
+-    /* اصلاح استایل دراپ‌داون برای خوانایی در هر دو تم */
+-    .dropdown-item {
+-        border-radius: 8px;
+-        padding: 8px 15px;
+-        font-weight: 500;
+-        font-size: 0.85rem;
+-        display: flex;
+-        align-items: center;
+-        gap: 10px;
+-        /* تغییر اصلی: استفاده از رنگ ثابت روشن برای زمانی که نوبار تیره است */
+-        color: rgba(255, 255, 255, 0.85) !important; 
+-        transition: all 0.2s;
+-    }
+-
+-    .dropdown-item i {
+-        font-size: 1.1rem;
+-        color: rgba(255, 255, 255, 0.5); /* آیکون‌ها کمی کمرنگ‌تر */
+-    }
+-
+-    .dropdown-item:hover {
+-        background-color: rgba(255, 77, 77, 0.15) !important;
+-        color: #ff4d4d !important;
+-    }
+-
+-    .dropdown-item:hover i {
+-        color: #ff4d4d;
+-    }
+-
+-    /* اصلاح رنگ متن Logout */
+-    .dropdown-item.text-danger {
+-        color: #ff4d4d !important;
+-    }
+-
+-    .dropdown-item.text-danger i {
+-        color: #ff4d4d !important;
+-    }
+-
+-    /* اصلاح لیبل مدیریت ادمین */
+-    .admin-label {
+-        font-size: 0.65rem;
+-        text-transform: uppercase;
+-        letter-spacing: 1px;
+-        font-weight: 800;
+-        color: rgba(255, 255, 255, 0.4); /* رنگ متن راهنما در تم تیره */
+-        padding: 10px 15px 5px;
+-    }
+-
+-    .dropdown-divider {
+-        border-top: 1px solid rgba(255, 255, 255, 0.1);
+-    }
+-
+-    .navbar-toggler {
+-        border: none !important;
+-        padding: 0;
+-    }
+-
+-    .navbar-toggler:focus {
+-        box-shadow: none !important;
+-    }
+-
+-    /* بهینه‌سازی دراپ‌داون در حالت موبایل */
+-    @media (max-width: 767.98px) {
+-        .dropdown-menu {
+-            background-color: rgba(255, 255, 255, 0.03) !important;
+-            border: none;
+-            box-shadow: none;
+-            margin: 0 !important;
+-            padding-left: 20px;
+-        }
+-    }
+-
+-    @media (max-width: 767.98px) {
+-        .dropdown-menu {
+-            background-color: rgba(255, 255, 255, 0.05) !important;
+-            border: none !important;
+-            box-shadow: none !important;
+-            margin: 0 !important;
+-            padding-left: 15px !important;
+-        }
+-        /* اطمینان از رنگ متن در منوی همبرگری موبایل */
+-        .dropdown-item {
+-            color: rgba(255, 255, 255, 0.9) !important;
+-        }
+-    }
+-</style>
+-
+-<header>
+-    <nav class="navbar navbar-expand-md navbar-dark shadow-sm">
+-        <div class="container">
+-            <a class="navbar-brand" href="<?= site_url() ?>">
+-                <i class="bi bi-slack"></i>
+-                <span class="text-white"><?= BASE_NAME ?></span>
+-            </a>
+-
+-            <?php if (session()->has('userid')) : ?>
+-                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNavbar">
+-                    <span class="navbar-toggler-icon"></span>
+-                </button>
+-
+-                <div class="collapse navbar-collapse" id="mainNavbar">
+-                    <ul class="navbar-nav me-auto mb-0 ms-lg-4">
+-                        <li class="nav-item">
+-                            <a class="nav-link text-danger" href="<?= site_url('keys') ?>">
+-                                <i class="bi bi-key-fill me-1 small"></i> Keys
+-                            </a>
+-                        </li>
+-                        <li class="nav-item">
+-                            <a class="nav-link text-danger" href="<?= site_url('keys/generate') ?>">
+-                                <i class="bi bi-plus-circle-fill me-1 small"></i> Generate
+-                            </a>
+-                        </li>
+-                    </ul>
+-
+-                    <ul class="navbar-nav">
+-                        <li class="nav-item dropdown">
+-                            <a class="nav-link dropdown-toggle text-danger d-flex align-items-center" href="#" id="userDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+-                                <div class="bg-danger text-white rounded-circle d-flex align-items-center justify-content-center me-2 shadow-sm" style="width: 28px; height: 28px; font-size: 0.75rem; font-weight: bold;">
+-                                    <?= strtoupper(substr(getName($user), 0, 1)) ?>
+-                                </div>
+-                                <span class="fw-bold"><?= getName($user) ?></span>
+-                            </a>
+-                            
+-                            <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="userDropdown">
+-                                <li>
+-                                    <a class="dropdown-item" href="<?= site_url('settings') ?>">
+-                                        <i class="bi bi-gear"></i> Settings
+-                                    </a>
+-                                </li>
+-                                
+-                                <?php if ($user->level == 1) : ?>
+-                                    <li><hr class="dropdown-divider"></li>
+-                                    <div class="admin-label">Admin Management</div>
+-                                    <li>
+-                                        <a class="dropdown-item" href="<?= site_url('admin/manage-users') ?>">
+-                                            <i class="bi bi-person-check"></i> Manage Users
+-                                        </a>
+-                                    </li>
+-                                    <li>
+-                                        <a class="dropdown-item" href="<?= site_url('admin/create-referral') ?>">
+-                                            <i class="bi bi-person-plus"></i> Create Referral
+-                                        </a>
+-                                    </li>
+-                                <?php endif; ?>
+-                                
+-                                <li><hr class="dropdown-divider"></li>
+-                                <li>
+-                                    <a class="dropdown-item text-danger" href="<?= site_url('logout') ?>">
+-                                        <i class="bi bi-box-arrow-left"></i> Logout
+-                                    </a>
+-                                </li>
+-                            </ul>
+-                        </li>
+-                    </ul>
+-                </div>
+-            <?php endif; ?>
+-        </div>
+-    </nav>
+-</header>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/Layout/Starter.php app/BACKUP/Views/Layout/Starter.php
+--- /tmp/orig_app/BACKUP/Views/Layout/Starter.php	2026-08-24 23:02:52.499467780 +0000
++++ app/BACKUP/Views/Layout/Starter.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,181 +0,0 @@
+-<!doctype html>
+-<html lang="en">
+-
+-<link rel="preconnect" href="https://fonts.googleapis.com">
+-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+-
+-<style>
+-    /* --- متغیرهای CSS سراسری --- */
+-    :root {
+-        --bg-body: #f4f7f6;
+-        --bg-card: #ffffff;
+-        --text-main: #1a1d20;
+-        --text-muted: #6c757d;
+-        --border-color: #e9ecef;
+-        --input-bg: #ffffff;
+-        --table-header: #f8f9fa;
+-    }
+-
+-    /* --- تنظیمات حالت تاریک (Dark Mode) --- */
+-    [data-theme="dark"] {
+-        --bg-body: #000000;
+-        --bg-card: #121212;
+-        --text-main: #e0e0e0;
+-        --text-muted: #a0a0a0;
+-        --border-color: #252525;
+-        --input-bg: #1a1a1a;
+-        --table-header: #1a1d20;
+-    }
+-
+-    body {
+-        font-family: 'Inter', sans-serif;
+-        background-color: var(--bg-body) !important;
+-        color: var(--text-main) !important;
+-        letter-spacing: -0.01em;
+-        transition: background 0.3s ease, color 0.3s ease;
+-    }
+-
+-    /* اعمال سراسری بر روی کارت‌ها و جداول */
+-    .card {
+-        background-color: var(--bg-card) !important;
+-        border-color: var(--border-color) !important;
+-    }
+-
+-    .table { color: var(--text-main) !important; }
+-    .table thead th { 
+-        background-color: var(--table-header) !important; 
+-        color: var(--text-muted) !important; 
+-        border: none !important; 
+-    }
+-    .table td { border-bottom-color: var(--border-color) !important; }
+-
+-    .form-control, .dataTables_filter input {
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-        border-color: var(--border-color) !important;
+-    }
+-
+-    /* افکت شیشه‌ای (سازگار با هر دو تم) */
+-    .register-link-container {
+-        background: rgba(var(--bg-card), 0.8) !important;
+-        backdrop-filter: blur(8px);
+-        border: 1px solid var(--border-color);
+-    }
+-
+-    .text-danger.small {
+-        font-size: 0.8rem;
+-        font-weight: 500;
+-        padding-left: 5px;
+-    }
+-
+-    .alert-modern {
+-        border: none;
+-        border-radius: 12px;
+-        padding: 1rem 1.25rem;
+-        display: flex;
+-        align-items: center;
+-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+-        margin-bottom: 1.5rem;
+-        position: relative;
+-        overflow: hidden;
+-        /* استفاده از متغیر برای پس‌زمینه و متن */
+-        background-color: var(--bg-card) !important;
+-        color: var(--text-main) !important;
+-    }
+-
+-    /* هماهنگی آیکون‌ها در حالت تاریک */
+-    [data-theme="dark"] .alert-modern i {
+-        opacity: 0.9;
+-    }
+-
+-    /* دکمه بستن در حالت تاریک */
+-    [data-theme="dark"] .btn-close {
+-        filter: invert(1) grayscale(100%) brightness(200%);
+-    }
+-
+-    .alert-modern i {
+-        font-size: 1.5rem;
+-        margin-right: 12px;
+-    }
+-
+-    .alert-modern::before {
+-        content: "";
+-        position: absolute;
+-        left: 0;
+-        top: 0;
+-        height: 100%;
+-        width: 4px;
+-    }
+-
+-    /* رنگ‌بندی خط کناری */
+-    .alert-danger.alert-modern::before { background: #dc3545; }
+-    .alert-success.alert-modern::before { background: #198754; }
+-    .alert-warning.alert-modern::before { background: #ffc107; }
+-    .alert-secondary.alert-modern::before { background: #6c757d; }
+-
+-    /* روشن‌تر کردن متن در حالت تاریک برای خوانایی بهتر */
+-    [data-theme="dark"] .alert-modern strong {
+-        color: #fff;
+-    }
+-</style>
+-
+-<head>
+-    <meta charset="utf-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1">
+-
+-    <script>
+-        (function() {
+-            const currentTheme = localStorage.getItem('theme');
+-            if (currentTheme === 'dark') {
+-                document.documentElement.setAttribute('data-theme', 'dark');
+-            }
+-        })();
+-    </script>
+-
+-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+-
+-    <title><?= BASE_NAME ?> - <?= isset($title) ? $title : 'Panel' ?></title>
+-    <?= $this->renderSection('css') ?>
+-    <?= link_tag('assets/css/natacode.css') ?>
+-
+-    <script src="https://code.jquery.com/jquery-3.6.0.js"></script>
+-</head>
+-
+-<body>
+-    <?= $this->include('Layout/Header') ?>
+-    
+-    <main>
+-        <div class="container p-3 py-4 mb-3" id="content">
+-            <?= $this->renderSection('content') ?>
+-        </div>
+-    </main>
+-
+-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js"></script>
+-    <script src="https://cdnjs.cloudflare.com/ajax/libs/limonte-sweetalert2/11.1.0/sweetalert2.all.min.js"></script>
+-
+-    <?= script_tag('assets/js/natacode.js') ?>
+-    <?= $this->renderSection('js') ?>
+-
+-    <script>
+-        $(document).ready(function() {
+-            // اگر در صفحه تنظیمات سوییچ وجود داشت، وضعیت را ست کن
+-            if (localStorage.getItem('theme') === 'dark') {
+-                $('#darkModeSwitch').prop('checked', true);
+-            }
+-
+-            // گوش دادن به تغییرات سوییچ (اگر در هر صفحه‌ای وجود داشت)
+-            $(document).on('change', '#darkModeSwitch', function() {
+-                if ($(this).is(':checked')) {
+-                    $('html').attr('data-theme', 'dark');
+-                    localStorage.setItem('theme', 'dark');
+-                } else {
+-                    $('html').removeAttr('data-theme');
+-                    localStorage.setItem('theme', 'light');
+-                }
+-            });
+-        });
+-    </script>
+-</body>
+-</html>
+diff -ruN /tmp/orig_app/BACKUP/Views/Layout/msgStatus.php app/BACKUP/Views/Layout/msgStatus.php
+--- /tmp/orig_app/BACKUP/Views/Layout/msgStatus.php	2026-08-24 23:02:52.500093471 +0000
++++ app/BACKUP/Views/Layout/msgStatus.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,82 +0,0 @@
+-<style>
+-    /* استایل پایه برای باکس پیام‌ها */
+-    .status-msg {
+-        border: none;
+-        border-radius: 15px;
+-        padding: 1rem 1.25rem;
+-        margin-bottom: 1.5rem;
+-        display: flex;
+-        align-items: center;
+-        gap: 12px;
+-        font-weight: 600;
+-        font-size: 0.9rem;
+-        backdrop-filter: blur(8px);
+-        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+-        border: 1px solid transparent;
+-        transition: all 0.3s ease;
+-    }
+-
+-/* اصلاح تراز عمودی دکمه بستن */
+-.status-msg.alert-dismissible {
+-    position: relative;
+-    padding-right: 3.5rem; /* ایجاد فضا برای دکمه در سمت راست */
+-}
+-
+-.status-msg .btn-close {
+-    position: absolute;
+-    top: 50%;
+-    right: 15px;
+-    transform: translateY(-50%); /* انتقال دقیق به مرکز عمودی */
+-    margin: 0;
+-    padding: 1.25rem; /* افزایش ناحیه کلیک */
+-}
+-
+-    /* استایل اختصاصی برای هر وضعیت */
+-    .msg-danger { background: rgba(255, 77, 77, 0.1) !important; color: #ff4d4d !important; border-color: rgba(255, 77, 77, 0.2) !important; }
+-    .msg-success { background: rgba(40, 167, 69, 0.1) !important; color: #28a745 !important; border-color: rgba(40, 167, 69, 0.2) !important; }
+-    .msg-warning { background: rgba(255, 193, 7, 0.1) !important; color: #ffc107 !important; border-color: rgba(255, 193, 7, 0.2) !important; }
+-    .msg-secondary { background: rgba(108, 117, 125, 0.1) !important; color: var(--text-muted) !important; border-color: var(--border-color) !important; }
+-
+-    .status-msg.fade-in { animation: slideInDown 0.4s ease-out; }
+-    @keyframes slideInDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+-    .msg-icon { font-size: 1.2rem; }
+-
+-    /* هماهنگی دکمه ضربدر در تم دارک */
+-    [data-theme="dark"] .btn-close { filter: invert(1) grayscale(1) brightness(2); }
+-</style>
+-
+-<?php if (session()->getFlashdata('msgDanger')) : ?>
+-    <div class="alert alert-dismissible status-msg msg-danger fade-in shadow-sm" role="alert">
+-        <i class="bi bi-x-circle-fill msg-icon"></i>
+-        <span><?= session()->getFlashdata('msgDanger') ?></span>
+-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" style="font-size: 0.7rem;"></button>
+-    </div>
+-
+-<?php elseif (session()->getFlashdata('msgSuccess')) : ?>
+-    <div class="alert alert-dismissible status-msg msg-success fade-in shadow-sm" role="alert">
+-        <i class="bi bi-check-circle-fill msg-icon"></i>
+-        <span><?= session()->getFlashdata('msgSuccess') ?></span>
+-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" style="font-size: 0.7rem;"></button>
+-    </div>
+-
+-<?php elseif (session()->getFlashdata('msgWarning')) : ?>
+-    <div class="alert alert-dismissible status-msg msg-warning fade-in shadow-sm" role="alert">
+-        <i class="bi bi-exclamation-triangle-fill msg-icon"></i>
+-        <span><?= session()->getFlashdata('msgWarning') ?></span>
+-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" style="font-size: 0.7rem;"></button>
+-    </div>
+-
+-<?php else : ?>
+-    <?php if (session()->has('userid')) : ?>
+-        <div class="alert alert-dismissible status-msg msg-secondary fade-in shadow-sm" role="alert">
+-            <i class="bi bi-shield-check msg-icon" style="color: #ff4d4d !important;"></i>
+-            
+-            <div class="d-flex flex-column">
+-                <span class="text-muted small" style="font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;">Account Authorized</span>
+-                <span>Welcome back, <strong class="text-main" style="color: var(--text-main) !important;"><?= getName($user) ?></strong></span>
+-            </div>
+-
+-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" style="font-size: 0.7rem;"></button>
+-        </div>
+-   <?php endif; ?>
+-<?php endif; ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/User/dashboard.php app/BACKUP/Views/User/dashboard.php
+--- /tmp/orig_app/BACKUP/Views/User/dashboard.php	2026-08-24 23:02:52.501751955 +0000
++++ app/BACKUP/Views/User/dashboard.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,209 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-
+-<style>
+-    /* تنظیمات عمومی تم */
+-    body { 
+-        font-family: 'Inter', sans-serif; 
+-        background-color: var(--bg-body) !important; 
+-        color: var(--text-main) !important; 
+-    }
+-    
+-    /* اصلاح کارت‌های آماری */
+-    .stat-card {
+-        border: 1px solid var(--border-color) !important;
+-        border-radius: 15px;
+-        transition: transform 0.3s ease;
+-        background: var(--bg-card) !important;
+-        color: var(--text-main) !important;
+-    }
+-    .stat-card:hover { transform: translateY(-5px); }
+-    
+-    .icon-box {
+-        width: 45px;
+-        height: 45px;
+-        border-radius: 12px;
+-        display: flex;
+-        align-items: center;
+-        justify-content: center;
+-        font-size: 1.2rem;
+-    }
+-
+-    /* استایل کارت اصلی و جدول */
+-    .dashboard-card { 
+-        border: 1px solid var(--border-color) !important; 
+-        border-radius: 20px; 
+-        overflow: hidden; 
+-        background-color: var(--bg-card) !important;
+-    }
+-
+-    .dashboard-card .card-header {
+-        background-color: var(--bg-card) !important;
+-        color: var(--text-main) !important;
+-        border-bottom: 1px solid var(--border-color) !important;
+-    }
+-
+-    .table thead th {
+-        background-color: var(--table-header) !important;
+-        text-transform: uppercase;
+-        font-size: 0.75rem;
+-        letter-spacing: 0.05em;
+-        color: var(--text-muted) !important;
+-        border: none;
+-        padding: 15px;
+-    }
+-
+-    .table tbody td {
+-        padding: 15px;
+-        vertical-align: middle;
+-        border-color: var(--border-color) !important;
+-        font-size: 0.85rem;
+-        color: var(--text-main) !important;
+-    }
+-
+-    /* اصلاح نشانگرهای داخل جدول */
+-    .table .badge.bg-light {
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-        border: 1px solid var(--border-color) !important;
+-    }
+-    
+-    .info-list-item {
+-        border: none;
+-        padding: 12px 0;
+-        border-bottom: 1px solid var(--border-color) !important;
+-        background: transparent !important;
+-        color: var(--text-main) !important;
+-    }
+-    .info-list-item:last-child { border: none; }
+-
+-    /* باکس هشدار انقضای نشست هوشمند */
+-    .session-warning-box {
+-        padding: 1rem;
+-        border-radius: 12px;
+-        font-size: 0.85rem;
+-        display: flex;
+-        align-items: center;
+-        transition: all 0.3s ease;
+-        background: #fff8e6; 
+-        border: 1px solid #ffeeba;
+-        color: #856404;
+-    }
+-
+-    [data-theme="dark"] .session-warning-box {
+-        background: rgba(255, 193, 7, 0.05) !important;
+-        border: 1px solid rgba(255, 193, 7, 0.2) !important;
+-        color: #ffc107 !important;
+-    }
+-</style>
+-
+-<div class="container-fluid py-4">
+-    <div class="row mb-4">
+-        <div class="col-lg-12">
+-            <?= $this->include('Layout/msgStatus') ?>
+-            <h3 class="fw-bold">Welcome back, <?= session('unames') ?>! 👋</h3>
+-            <p class="text-muted small">Here's what's happening with your account today.</p>
+-        </div>
+-    </div>
+-
+-    <div class="row mb-4">
+-        <div class="col-md-3">
+-            <div class="card stat-card shadow-sm p-3">
+-                <div class="d-flex align-items-center">
+-                    <div class="icon-box me-3" style="background: rgba(255, 77, 77, 0.1); color: #ff4d4d;">
+-                        <i class="bi bi-wallet2"></i>
+-                    </div>
+-                    <div>
+-                        <small class="text-muted d-block">Current Saldo</small>
+-                        <span class="fw-bold h5 mb-0">$<?= $user->saldo ?></span>
+-                    </div>
+-                </div>
+-            </div>
+-        </div>
+-        <div class="col-md-3">
+-            <div class="card stat-card shadow-sm p-3">
+-                <div class="d-flex align-items-center">
+-                    <div class="icon-box me-3" style="background: rgba(13, 110, 253, 0.1); color: #0d6efd;">
+-                        <i class="bi bi-shield-check"></i>
+-                    </div>
+-                    <div>
+-                        <small class="text-muted d-block">Role Level</small>
+-                        <span class="fw-bold h6 mb-0"><?= getLevel($user->level) ?></span>
+-                    </div>
+-                </div>
+-            </div>
+-        </div>
+-    </div>
+-
+-    <div class="row">
+-        <div class="col-lg-8">
+-            <div class="card dashboard-card shadow-sm">
+-                <div class="card-header border-0 py-3">
+-                    <h6 class="mb-0 fw-bold"><i class="bi bi-clock-history me-2"></i> Registration History</h6>
+-                </div>
+-                <div class="card-body p-0">
+-                    <div class="table-responsive">
+-                        <table class="table mb-0">
+-                            <thead>
+-                                <tr>
+-                                    <th>ID</th>
+-                                    <th>Info</th>
+-                                    <th>Type</th>
+-                                    <th>Duration</th>
+-                                    <th>Devices</th>
+-                                    <th>Created</th>
+-                                </tr>
+-                            </thead>
+-                            <tbody>
+-                                <?php foreach ($history as $h) : ?>
+-                                    <?php $in = explode("|", $h->info) ?>
+-                                    <tr>
+-                                        <td><span class="text-muted">#<?= $h->id_history ?></span></td>
+-                                        <td class="fw-semibold"><?= $in[0] ?></td>
+-                                        <td><span class="badge bg-light text-info border"><?= $in[1] ?></span></td>
+-                                        <td><span><?= $in[2] ?> Hours</span></td>
+-                                        <td><span class="badge bg-light text-primary"><?= $in[3] ?> Devs</span></td>
+-                                        <td><span class="text-muted small"><?= $time::parse($h->created_at)->humanize() ?></span></td>
+-                                    </tr>
+-                                <?php endforeach; ?>
+-                            </tbody>
+-                        </table>
+-                    </div>
+-                </div>
+-            </div>
+-        </div>
+-
+-        <div class="col-lg-4">
+-            <div class="card dashboard-card shadow-sm mb-4">
+-                <div class="card-header bg-dark text-white py-3">
+-                    <h6 class="mb-0 fw-bold"><i class="bi bi-cpu me-2"></i> Session Details</h6>
+-                </div>
+-                <div class="card-body">
+-                    <div class="list-group list-group-flush">
+-                        <div class="info-list-item d-flex justify-content-between align-items-center">
+-                            <span class="text-muted small"><i class="bi bi-box-arrow-in-right me-2"></i> Login Since</span>
+-                            <span class="fw-bold small"><?= $time::parse(session()->time_since)->humanize() ?></span>
+-                        </div>
+-                        <div class="info-list-item d-flex justify-content-between align-items-center">
+-                            <span class="text-muted small"><i class="bi bi-hourglass-split me-2"></i> Auto Logout</span>
+-                            <span class="text-danger fw-bold small">
+-                                <?= $time::now()->difference($time::parse(session()->time_login))->humanize() ?>
+-                            </span>
+-                        </div>
+-                    </div>
+-                    
+-                    <div class="session-warning-box mt-4">
+-                        <small class="d-block">
+-                            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+-                            Your session will expire automatically for security.
+-                        </small>
+-                    </div>
+-
+-                </div>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/User/settings.php app/BACKUP/Views/User/settings.php
+--- /tmp/orig_app/BACKUP/Views/User/settings.php	2026-08-24 23:02:52.502600742 +0000
++++ app/BACKUP/Views/User/settings.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,201 +0,0 @@
+-<?= $this->extend('Layout/Starter') ?>
+-
+-<?= $this->section('content') ?>
+-
+-<style>
+-    /* --- متغیرهای رنگی برای حالت روشن و تاریک --- */
+-    :root {
+-        --bg-body: #f4f7f6;
+-        --bg-card: #ffffff;
+-        --text-main: #212529;
+-        --text-muted: #6c757d;
+-        --border-color: #e0e0e0;
+-        --input-bg: #f8f9fa;
+-    }
+-
+-    [data-theme="dark"] {
+-        --bg-body: #000000; /* مشکی مطلق برای پس‌زمینه */
+-        --bg-card: #121212; /* خاکستری بسیار تیره برای کارت‌ها */
+-        --text-main: #e0e0e0;
+-        --text-muted: #a0a0a0;
+-        --border-color: #252525;
+-        --input-bg: #1a1a1a;
+-    }
+-
+-    body {
+-        font-family: 'Inter', sans-serif;
+-        background-color: var(--bg-body) !important;
+-        color: var(--text-main) !important;
+-        transition: all 0.3s ease;
+-    }
+-
+-    .settings-card {
+-        border: 1px solid var(--border-color) !important;
+-        border-radius: 20px;
+-        overflow: hidden;
+-        background-color: var(--bg-card) !important;
+-    }
+-
+-    .settings-header {
+-        background: #1a1d20; /* هدر کارت‌ها همیشه تیره می‌ماند */
+-        padding: 1.25rem 1rem;
+-        border: none;
+-    }
+-
+-    .form-control {
+-        border-radius: 12px;
+-        padding: 0.7rem 1rem;
+-        border: 1px solid var(--border-color);
+-        background-color: var(--input-bg) !important;
+-        color: var(--text-main) !important;
+-    }
+-
+-    .form-control:focus {
+-        border-color: #1a1d20;
+-        box-shadow: 0 0 0 0.25rem rgba(26, 29, 32, 0.1);
+-    }
+-
+-    .btn-action {
+-        border-radius: 12px;
+-        padding: 0.7rem;
+-        font-weight: 600;
+-        background-color: #1a1d20;
+-        color: white;
+-        border: none;
+-    }
+-
+-    .form-label {
+-        color: var(--text-main);
+-    }
+-
+-    #darkModeSwitch:checked {
+-        background-color: #ff4d4d !important;
+-        border-color: #ff4d4d !important;
+-    }
+-
+-    #darkModeSwitch:focus {
+-        box-shadow: 0 0 0 0.25rem rgba(255, 77, 77, 0.25) !important;
+-        border-color: #ff4d4d !important;
+-    }
+-
+-    /* استایل اختصاصی برای سوییچ دیزاین شده */
+-    .appearance-box {
+-        background: var(--input-bg);
+-        border: 1px solid var(--border-color);
+-        border-radius: 15px;
+-        padding: 1.5rem;
+-    }
+-</style>
+-
+-<div class="container py-5">
+-    <div class="row">
+-        <div class="col-lg-12 mb-4">
+-            <?= $this->include('Layout/msgStatus') ?>
+-            <h2 class="fw-bold">Account Settings</h2>
+-            <p class="text-muted">Manage your security and personal information</p>
+-        </div>
+-
+-        <div class="col-lg-12 mb-4">
+-            <div class="card settings-card shadow-sm border">
+-                <div class="card-body p-4">
+-                    <div class="row align-items-center">
+-                        <div class="col-md-8">
+-                            <h5 class="fw-bold mb-1"><i class="bi bi-palette me-2"></i> Appearance</h5>
+-                            <p class="text-muted small mb-0">Customize how the dashboard looks. Switch between Light and Dark themes.</p>
+-                        </div>
+-                        <div class="col-md-4 text-md-end mt-3 mt-md-0">
+-                            <div class="form-check form-switch d-inline-block">
+-                                <label class="form-check-label me-5 fw-bold" for="darkModeSwitch">Dark Mode</label>
+-                                <input class="form-check-input" type="checkbox" id="darkModeSwitch" style="width: 50px; height: 25px; cursor: pointer;">
+-                            </div>
+-                        </div>
+-                    </div>
+-                </div>
+-            </div>
+-        </div>
+-
+-        <div class="col-lg-6">
+-            <div class="card settings-card shadow-sm mb-4 border">
+-                <div class="card-header settings-header text-white">
+-                    <span class="fw-bold"><i class="bi bi-shield-lock settings-icon"></i> Change Password</span>
+-                </div>
+-                <div class="card-body p-4">
+-                    <?= form_open() ?>
+-                    <input type="hidden" name="password_form" value="1">
+-                    
+-                    <div class="mb-3">
+-                        <label for="current" class="form-label">Current Password</label>
+-                        <input type="password" name="current" id="current" class="form-control" placeholder="Current Password">
+-                    </div>
+-
+-                    <div class="mb-3">
+-                        <label for="password" class="form-label">New Password</label>
+-                        <input type="password" name="password" id="password" class="form-control" placeholder="New Password">
+-                    </div>
+-
+-                    <div class="mb-4">
+-                        <label for="password2" class="form-label">Confirm New Password</label>
+-                        <input type="password" name="password2" id="password2" class="form-control" placeholder="Confirm New Password">
+-                    </div>
+-
+-                    <div class="d-grid">
+-                        <button type="submit" class="btn btn-action">Update Password</button>
+-                    </div>
+-                    <?= form_close() ?>
+-                </div>
+-            </div>
+-        </div>
+-
+-        <div class="col-lg-6">
+-            <div class="card settings-card shadow-sm mb-4 border">
+-                <div class="card-header settings-header text-white">
+-                    <span class="fw-bold"><i class="bi bi-person-badge settings-icon"></i> Account Information</span>
+-                </div>
+-                <div class="card-body p-4">
+-                    <?= form_open() ?>
+-                    <input type="hidden" name="fullname_form" value="1">
+-                    
+-                    <div class="mb-4">
+-                        <label for="fullname" class="form-label">Full Name</label>
+-                        <input type="text" name="fullname" id="fullname" class="form-control" 
+-                               placeholder="Your Name" value="<?= old('fullname') ?: ($user->fullname ?: '') ?>">
+-                    </div>
+-
+-                    <div class="d-grid mt-auto">
+-                        <button type="submit" class="btn btn-action">Update Information</button>
+-                    </div>
+-                    <?= form_close() ?>
+-
+-                    <div class="mt-4 p-3 bg-light rounded-3 border" style="background-color: var(--input-bg) !important;">
+-                        <small class="text-muted d-block"><strong>Note:</strong> Keeping your profile updated helps us provide a better service for you.</small>
+-                    </div>
+-                </div>
+-            </div>
+-        </div>
+-    </div>
+-</div>
+-
+-<script>
+-    $(document).ready(function() {
+-        const darkModeSwitch = $('#darkModeSwitch');
+-        
+-        // چک کردن وضعیت ذخیره شده در LocalStorage
+-        if (localStorage.getItem('theme') === 'dark') {
+-            $('body').attr('data-theme', 'dark');
+-            darkModeSwitch.prop('checked', true);
+-        }
+-
+-        // رویداد تغییر وضعیت سوییچ
+-        darkModeSwitch.on('change', function() {
+-            if ($(this).is(':checked')) {
+-                $('body').attr('data-theme', 'dark');
+-                localStorage.setItem('theme', 'dark');
+-            } else {
+-                $('body').removeAttr('data-theme');
+-                localStorage.setItem('theme', 'light');
+-            }
+-        });
+-    });
+-</script>
+-
+-<?= $this->endSection() ?>
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/errors/cli/error_404.php app/BACKUP/Views/errors/cli/error_404.php
+--- /tmp/orig_app/BACKUP/Views/errors/cli/error_404.php	2026-08-24 23:02:52.503642822 +0000
++++ app/BACKUP/Views/errors/cli/error_404.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,7 +0,0 @@
+-<?php
+-
+-use CodeIgniter\CLI\CLI;
+-
+-CLI::error('ERROR: ' . $code);
+-CLI::write($message);
+-CLI::newLine();
+diff -ruN /tmp/orig_app/BACKUP/Views/errors/cli/error_exception.php app/BACKUP/Views/errors/cli/error_exception.php
+--- /tmp/orig_app/BACKUP/Views/errors/cli/error_exception.php	2026-08-24 23:02:52.504895461 +0000
++++ app/BACKUP/Views/errors/cli/error_exception.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,72 +0,0 @@
+-<?php
+-
+-use CodeIgniter\CLI\CLI;
+-
+-// The main Exception
+-CLI::newLine();
+-CLI::write('[' . get_class($exception) . ']', 'light_gray', 'red');
+-CLI::newLine();
+-CLI::write($message);
+-CLI::newLine();
+-CLI::write('at ' . CLI::color(clean_path($exception->getFile()) . ':' . $exception->getLine(), 'green'));
+-CLI::newLine();
+-
+-// The backtrace
+-if (defined('SHOW_DEBUG_BACKTRACE') && SHOW_DEBUG_BACKTRACE)
+-{
+-	$backtraces = $exception->getTrace();
+-
+-	if ($backtraces)
+-	{
+-		CLI::write('Backtrace:', 'green');
+-	}
+-
+-	foreach ($backtraces as $i => $error)
+-	{
+-		$padFile  = '    '; // 4 spaces
+-		$padClass = '       '; // 7 spaces
+-		$c        = str_pad($i + 1, 3, ' ', STR_PAD_LEFT);
+-
+-		if (isset($error['file']))
+-		{
+-			$filepath = clean_path($error['file']) . ':' . $error['line'];
+-
+-			CLI::write($c . $padFile . CLI::color($filepath, 'yellow'));
+-		}
+-		else
+-		{
+-			CLI::write($c . $padFile . CLI::color('[internal function]', 'yellow'));
+-		}
+-
+-		$function = '';
+-
+-		if (isset($error['class']))
+-		{
+-			$type = ($error['type'] === '->') ? '()' . $error['type'] : $error['type'];
+-			$function .= $padClass . $error['class'] . $type . $error['function'];
+-		}
+-		elseif (! isset($error['class']) && isset($error['function']))
+-		{
+-			$function .= $padClass . $error['function'];
+-		}
+-
+-		$args = implode(', ', array_map(function ($value) {
+-			switch (true)
+-			{
+-				case is_object($value):
+-					return 'Object(' . get_class($value) . ')';
+-				case is_array($value):
+-					return count($value) ? '[...]' : '[]';
+-				case is_null($value):
+-					return 'null'; // return the lowercased version
+-				default:
+-					return var_export($value, true);
+-			}
+-		}, array_values($error['args'] ?? [])));
+-
+-		$function .= '(' . $args . ')';
+-
+-		CLI::write($function);
+-		CLI::newLine();
+-	}
+-}
+diff -ruN /tmp/orig_app/BACKUP/Views/errors/cli/production.php app/BACKUP/Views/errors/cli/production.php
+--- /tmp/orig_app/BACKUP/Views/errors/cli/production.php	2026-08-24 23:02:52.505246554 +0000
++++ app/BACKUP/Views/errors/cli/production.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,5 +0,0 @@
+-<?php
+-
+-// On the CLI, we still want errors in productions
+-// so just use the exception template.
+-include __DIR__ . '/error_exception.php';
+diff -ruN /tmp/orig_app/BACKUP/Views/errors/html/debug.css app/BACKUP/Views/errors/html/debug.css
+--- /tmp/orig_app/BACKUP/Views/errors/html/debug.css	2026-08-24 23:02:52.506116708 +0000
++++ app/BACKUP/Views/errors/html/debug.css	1970-01-01 00:00:00.000000000 +0000
+@@ -1,197 +0,0 @@
+-:root {
+-	--main-bg-color: #fff;
+-	--main-text-color: #555;
+-	--dark-text-color: #222;
+-	--light-text-color: #c7c7c7;
+-	--brand-primary-color: #E06E3F;
+-	--light-bg-color: #ededee;
+-	--dark-bg-color: #404040;
+-}
+-
+-body {
+-	height: 100%;
+-	background: var(--main-bg-color);
+-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+-	color: var(--main-text-color);
+-	font-weight: 300;
+-	margin: 0;
+-	padding: 0;
+-}
+-h1 {
+-	font-weight: lighter;
+-	letter-spacing: 0.8;
+-	font-size: 3rem;
+-	color: var(--dark-text-color);
+-	margin: 0;
+-}
+-h1.headline {
+-	margin-top: 20%;
+-	font-size: 5rem;
+-}
+-.text-center {
+-	text-align: center;
+-}
+-p.lead {
+-	font-size: 1.6rem;
+-}
+-.container {
+-	max-width: 75rem;
+-	margin: 0 auto;
+-	padding: 1rem;
+-}
+-.header {
+-	background: var(--light-bg-color);
+-	color: var(--dark-text-color);
+-}
+-.header .container {
+-	padding: 1rem 1.75rem 1.75rem 1.75rem;
+-}
+-.header h1 {
+-	font-size: 2.5rem;
+-	font-weight: 500;
+-}
+-.header p {
+-	font-size: 1.2rem;
+-	margin: 0;
+-	line-height: 2.5;
+-}
+-.header a {
+-	color: var(--brand-primary-color);
+-	margin-left: 2rem;
+-	display: none;
+-	text-decoration: none;
+-}
+-.header:hover a {
+-	display: inline;
+-}
+-
+-.footer {
+-	background: var(--dark-bg-color);
+-	color: var(--light-text-color);
+-}
+-.footer .container {
+-	border-top: 1px solid #e7e7e7;
+-	margin-top: 1rem;
+-	text-align: center;
+-}
+-
+-.source {
+-	background: #343434;
+-	color: var(--light-text-color);
+-	padding: 0.5em 1em;
+-	border-radius: 5px;
+-	font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+-	font-size: 0.85rem;
+-	margin: 0;
+-	overflow-x: scroll;
+-}
+-.source span.line {
+-	line-height: 1.4;
+-}
+-.source span.line .number {
+-	color: #666;
+-}
+-.source .line .highlight {
+-	display: block;
+-	background: var(--dark-text-color);
+-	color: var(--light-text-color);
+-}
+-.source span.highlight .number {
+-	color: #fff;
+-}
+-
+-.tabs {
+-	list-style: none;
+-	list-style-position: inside;
+-	margin: 0;
+-	padding: 0;
+-	margin-bottom: -1px;
+-}
+-.tabs li {
+-	display: inline;
+-}
+-.tabs a:link,
+-.tabs a:visited {
+-	padding: 0rem 1rem;
+-	line-height: 2.7;
+-	text-decoration: none;
+-	color: var(--dark-text-color);
+-	background: var(--light-bg-color);
+-	border: 1px solid rgba(0,0,0,0.15);
+-	border-bottom: 0;
+-	border-top-left-radius: 5px;
+-	border-top-right-radius: 5px;
+-	display: inline-block;
+-}
+-.tabs a:hover {
+-	background: var(--light-bg-color);
+-	border-color: rgba(0,0,0,0.15);
+-}
+-.tabs a.active {
+-	background: var(--main-bg-color);
+-	color: var(--main-text-color);
+-}
+-.tab-content {
+-	background: var(--main-bg-color);
+-	border: 1px solid rgba(0,0,0,0.15);
+-}
+-.content {
+-	padding: 1rem;
+-}
+-.hide {
+-	display: none;
+-}
+-
+-.alert {
+-	margin-top: 2rem;
+-	display: block;
+-	text-align: center;
+-	line-height: 3.0;
+-	background: #d9edf7;
+-	border: 1px solid #bcdff1;
+-	border-radius: 5px;
+-	color: #31708f;
+-}
+-ul, ol {
+-	line-height: 1.8;
+-}
+-
+-table {
+-	width: 100%;
+-	overflow: hidden;
+-}
+-th {
+-	text-align: left;
+-	border-bottom: 1px solid #e7e7e7;
+-	padding-bottom: 0.5rem;
+-}
+-td {
+-	padding: 0.2rem 0.5rem 0.2rem 0;
+-}
+-tr:hover td {
+-	background: #f1f1f1;
+-}
+-td pre {
+-	white-space: pre-wrap;
+-}
+-
+-.trace a {
+-	color: inherit;
+-}
+-.trace table {
+-	width: auto;
+-}
+-.trace tr td:first-child {
+-	min-width: 5em;
+-	font-weight: bold;
+-}
+-.trace td {
+-	background: var(--light-bg-color);
+-	padding: 0 1rem;
+-}
+-.trace td pre {
+-	margin: 0;
+-}
+-.args {
+-	display: none;
+-}
+diff -ruN /tmp/orig_app/BACKUP/Views/errors/html/debug.js app/BACKUP/Views/errors/html/debug.js
+--- /tmp/orig_app/BACKUP/Views/errors/html/debug.js	2026-08-24 23:02:52.506879043 +0000
++++ app/BACKUP/Views/errors/html/debug.js	1970-01-01 00:00:00.000000000 +0000
+@@ -1,128 +0,0 @@
+-//--------------------------------------------------------------------
+-// Tabs
+-//--------------------------------------------------------------------
+-
+-var tabLinks    = new Array();
+-var contentDivs = new Array();
+-
+-function init()
+-{
+-	// Grab the tab links and content divs from the page
+-	var tabListItems = document.getElementById('tabs').childNodes;
+-	console.log(tabListItems);
+-	for (var i = 0; i < tabListItems.length; i ++)
+-	{
+-		if (tabListItems[i].nodeName == "LI")
+-		{
+-			var tabLink     = getFirstChildWithTagName(tabListItems[i], 'A');
+-			var id          = getHash(tabLink.getAttribute('href'));
+-			tabLinks[id]    = tabLink;
+-			contentDivs[id] = document.getElementById(id);
+-		}
+-	}
+-
+-	// Assign onclick events to the tab links, and
+-	// highlight the first tab
+-	var i = 0;
+-
+-	for (var id in tabLinks)
+-	{
+-		tabLinks[id].onclick = showTab;
+-		tabLinks[id].onfocus = function () {
+-			this.blur()
+-		};
+-		if (i == 0)
+-		{
+-			tabLinks[id].className = 'active';
+-		}
+-		i ++;
+-	}
+-
+-	// Hide all content divs except the first
+-	var i = 0;
+-
+-	for (var id in contentDivs)
+-	{
+-		if (i != 0)
+-		{
+-			console.log(contentDivs[id]);
+-			contentDivs[id].className = 'content hide';
+-		}
+-		i ++;
+-	}
+-}
+-
+-//--------------------------------------------------------------------
+-
+-function showTab()
+-{
+-	var selectedId = getHash(this.getAttribute('href'));
+-
+-	// Highlight the selected tab, and dim all others.
+-	// Also show the selected content div, and hide all others.
+-	for (var id in contentDivs)
+-	{
+-		if (id == selectedId)
+-		{
+-			tabLinks[id].className    = 'active';
+-			contentDivs[id].className = 'content';
+-		}
+-		else
+-		{
+-			tabLinks[id].className    = '';
+-			contentDivs[id].className = 'content hide';
+-		}
+-	}
+-
+-	// Stop the browser following the link
+-	return false;
+-}
+-
+-//--------------------------------------------------------------------
+-
+-function getFirstChildWithTagName(element, tagName)
+-{
+-	for (var i = 0; i < element.childNodes.length; i ++)
+-	{
+-		if (element.childNodes[i].nodeName == tagName)
+-		{
+-			return element.childNodes[i];
+-		}
+-	}
+-}
+-
+-//--------------------------------------------------------------------
+-
+-function getHash(url)
+-{
+-	var hashPos = url.lastIndexOf('#');
+-	return url.substring(hashPos + 1);
+-}
+-
+-//--------------------------------------------------------------------
+-
+-function toggle(elem)
+-{
+-	elem = document.getElementById(elem);
+-
+-	if (elem.style && elem.style['display'])
+-	{
+-		// Only works with the "style" attr
+-		var disp = elem.style['display'];
+-	}
+-	else if (elem.currentStyle)
+-	{
+-		// For MSIE, naturally
+-		var disp = elem.currentStyle['display'];
+-	}
+-	else if (window.getComputedStyle)
+-	{
+-		// For most other browsers
+-		var disp = document.defaultView.getComputedStyle(elem, null).getPropertyValue('display');
+-	}
+-
+-	// Toggle the state of the "display" style
+-	elem.style.display = disp == 'block' ? 'none' : 'block';
+-
+-	return false;
+-}
+\ No newline at end of file
+diff -ruN /tmp/orig_app/BACKUP/Views/errors/html/error_404.php app/BACKUP/Views/errors/html/error_404.php
+--- /tmp/orig_app/BACKUP/Views/errors/html/error_404.php	2026-08-24 23:02:52.507321530 +0000
++++ app/BACKUP/Views/errors/html/error_404.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,84 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-	<meta charset="utf-8">
+-	<title>404 Page Not Found</title>
+-
+-	<style>
+-		div.logo {
+-			height: 200px;
+-			width: 155px;
+-			display: inline-block;
+-			opacity: 0.08;
+-			position: absolute;
+-			top: 2rem;
+-			left: 50%;
+-			margin-left: -73px;
+-		}
+-		body {
+-			height: 100%;
+-			background: #fafafa;
+-			font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+-			color: #777;
+-			font-weight: 300;
+-		}
+-		h1 {
+-			font-weight: lighter;
+-			letter-spacing: 0.8;
+-			font-size: 3rem;
+-			margin-top: 0;
+-			margin-bottom: 0;
+-			color: #222;
+-		}
+-		.wrap {
+-			max-width: 1024px;
+-			margin: 5rem auto;
+-			padding: 2rem;
+-			background: #fff;
+-			text-align: center;
+-			border: 1px solid #efefef;
+-			border-radius: 0.5rem;
+-			position: relative;
+-		}
+-		pre {
+-			white-space: normal;
+-			margin-top: 1.5rem;
+-		}
+-		code {
+-			background: #fafafa;
+-			border: 1px solid #efefef;
+-			padding: 0.5rem 1rem;
+-			border-radius: 5px;
+-			display: block;
+-		}
+-		p {
+-			margin-top: 1.5rem;
+-		}
+-		.footer {
+-			margin-top: 2rem;
+-			border-top: 1px solid #efefef;
+-			padding: 1em 2em 0 2em;
+-			font-size: 85%;
+-			color: #999;
+-		}
+-		a:active,
+-		a:link,
+-		a:visited {
+-			color: #dd4814;
+-		}
+-	</style>
+-</head>
+-<body>
+-	<div class="wrap">
+-		<h1>404 - File Not Found</h1>
+-
+-		<p>
+-			<?php if (! empty($message) && $message !== '(null)') : ?>
+-				<?= nl2br(esc($message)) ?>
+-			<?php else : ?>
+-				Sorry! Cannot seem to find the page you were looking for.
+-			<?php endif ?>
+-		</p>
+-	</div>
+-</body>
+-</html>
+diff -ruN /tmp/orig_app/BACKUP/Views/errors/html/error_exception.php app/BACKUP/Views/errors/html/error_exception.php
+--- /tmp/orig_app/BACKUP/Views/errors/html/error_exception.php	2026-08-24 23:02:52.507731094 +0000
++++ app/BACKUP/Views/errors/html/error_exception.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,400 +0,0 @@
+-<?php $error_id = uniqid('error', true); ?>
+-<!doctype html>
+-<html>
+-<head>
+-	<meta charset="UTF-8">
+-	<meta name="robots" content="noindex">
+-
+-	<title><?= esc($title) ?></title>
+-	<style type="text/css">
+-		<?= preg_replace('#[\r\n\t ]+#', ' ', file_get_contents(__DIR__ . DIRECTORY_SEPARATOR . 'debug.css')) ?>
+-	</style>
+-
+-	<script type="text/javascript">
+-		<?= file_get_contents(__DIR__ . DIRECTORY_SEPARATOR . 'debug.js') ?>
+-	</script>
+-</head>
+-<body onload="init()">
+-
+-	<!-- Header -->
+-	<div class="header">
+-		<div class="container">
+-			<h1><?= esc($title), esc($exception->getCode() ? ' #' . $exception->getCode() : '') ?></h1>
+-			<p>
+-				<?= nl2br(esc($exception->getMessage())) ?>
+-				<a href="https://www.duckduckgo.com/?q=<?= urlencode($title . ' ' . preg_replace('#\'.*\'|".*"#Us', '', $exception->getMessage())) ?>"
+-				   rel="noreferrer" target="_blank">search &rarr;</a>
+-			</p>
+-		</div>
+-	</div>
+-
+-	<!-- Source -->
+-	<div class="container">
+-		<p><b><?= esc(static::cleanPath($file, $line)) ?></b> at line <b><?= esc($line) ?></b></p>
+-
+-		<?php if (is_file($file)) : ?>
+-			<div class="source">
+-				<?= static::highlightFile($file, $line, 15); ?>
+-			</div>
+-		<?php endif; ?>
+-	</div>
+-
+-	<div class="container">
+-
+-		<ul class="tabs" id="tabs">
+-			<li><a href="#backtrace">Backtrace</a></li>
+-			<li><a href="#server">Server</a></li>
+-			<li><a href="#request">Request</a></li>
+-			<li><a href="#response">Response</a></li>
+-			<li><a href="#files">Files</a></li>
+-			<li><a href="#memory">Memory</a></li>
+-		</ul>
+-
+-		<div class="tab-content">
+-
+-			<!-- Backtrace -->
+-			<div class="content" id="backtrace">
+-
+-				<ol class="trace">
+-				<?php foreach ($trace as $index => $row) : ?>
+-
+-					<li>
+-						<p>
+-							<!-- Trace info -->
+-							<?php if (isset($row['file']) && is_file($row['file'])) :?>
+-								<?php
+-								if (isset($row['function']) && in_array($row['function'], ['include', 'include_once', 'require', 'require_once'], true))
+-								{
+-									echo esc($row['function'] . ' ' . static::cleanPath($row['file']));
+-								}
+-								else
+-								{
+-									echo esc(static::cleanPath($row['file']) . ' : ' . $row['line']);
+-								}
+-								?>
+-							<?php else : ?>
+-								{PHP internal code}
+-							<?php endif; ?>
+-
+-							<!-- Class/Method -->
+-							<?php if (isset($row['class'])) : ?>
+-								&nbsp;&nbsp;&mdash;&nbsp;&nbsp;<?= esc($row['class'] . $row['type'] . $row['function']) ?>
+-								<?php if (! empty($row['args'])) : ?>
+-									<?php $args_id = $error_id . 'args' . $index ?>
+-									( <a href="#" onclick="return toggle('<?= esc($args_id, 'attr') ?>');">arguments</a> )
+-									<div class="args" id="<?= esc($args_id, 'attr') ?>">
+-										<table cellspacing="0">
+-
+-										<?php
+-										$params = null;
+-										// Reflection by name is not available for closure function
+-										if (substr($row['function'], -1) !== '}')
+-										{
+-											$mirror = isset($row['class']) ? new \ReflectionMethod($row['class'], $row['function']) : new \ReflectionFunction($row['function']);
+-											$params = $mirror->getParameters();
+-										}
+-										foreach ($row['args'] as $key => $value) : ?>
+-											<tr>
+-												<td><code><?= esc(isset($params[$key]) ? '$' . $params[$key]->name : "#$key") ?></code></td>
+-												<td><pre><?= esc(print_r($value, true)) ?></pre></td>
+-											</tr>
+-										<?php endforeach ?>
+-
+-										</table>
+-									</div>
+-								<?php else : ?>
+-									()
+-								<?php endif; ?>
+-							<?php endif; ?>
+-
+-							<?php if (! isset($row['class']) && isset($row['function'])) : ?>
+-								&nbsp;&nbsp;&mdash;&nbsp;&nbsp;	<?= esc($row['function']) ?>()
+-							<?php endif; ?>
+-						</p>
+-
+-						<!-- Source? -->
+-						<?php if (isset($row['file']) && is_file($row['file']) && isset($row['class'])) : ?>
+-							<div class="source">
+-								<?= static::highlightFile($row['file'], $row['line']) ?>
+-							</div>
+-						<?php endif; ?>
+-					</li>
+-
+-				<?php endforeach; ?>
+-				</ol>
+-
+-			</div>
+-
+-			<!-- Server -->
+-			<div class="content" id="server">
+-				<?php foreach (['_SERVER', '_SESSION'] as $var) : ?>
+-					<?php if (empty($GLOBALS[$var]) || ! is_array($GLOBALS[$var]))
+-					{
+-						continue;
+-					} ?>
+-
+-					<h3>$<?= esc($var) ?></h3>
+-
+-					<table>
+-						<thead>
+-							<tr>
+-								<th>Key</th>
+-								<th>Value</th>
+-							</tr>
+-						</thead>
+-						<tbody>
+-						<?php foreach ($GLOBALS[$var] as $key => $value) : ?>
+-							<tr>
+-								<td><?= esc($key) ?></td>
+-								<td>
+-									<?php if (is_string($value)) : ?>
+-										<?= esc($value) ?>
+-									<?php else: ?>
+-										<pre><?= esc(print_r($value, true)) ?></pre>
+-									<?php endif; ?>
+-								</td>
+-							</tr>
+-						<?php endforeach; ?>
+-						</tbody>
+-					</table>
+-
+-				<?php endforeach ?>
+-
+-				<!-- Constants -->
+-				<?php $constants = get_defined_constants(true); ?>
+-				<?php if (! empty($constants['user'])) : ?>
+-					<h3>Constants</h3>
+-
+-					<table>
+-						<thead>
+-							<tr>
+-								<th>Key</th>
+-								<th>Value</th>
+-							</tr>
+-						</thead>
+-						<tbody>
+-						<?php foreach ($constants['user'] as $key => $value) : ?>
+-							<tr>
+-								<td><?= esc($key) ?></td>
+-								<td>
+-									<?php if (is_string($value)) : ?>
+-										<?= esc($value) ?>
+-									<?php else: ?>
+-										<pre><?= esc(print_r($value, true)) ?></pre>
+-									<?php endif; ?>
+-								</td>
+-							</tr>
+-						<?php endforeach; ?>
+-						</tbody>
+-					</table>
+-				<?php endif; ?>
+-			</div>
+-
+-			<!-- Request -->
+-			<div class="content" id="request">
+-				<?php $request = \Config\Services::request(); ?>
+-
+-				<table>
+-					<tbody>
+-						<tr>
+-							<td style="width: 10em">Path</td>
+-							<td><?= esc($request->uri) ?></td>
+-						</tr>
+-						<tr>
+-							<td>HTTP Method</td>
+-							<td><?= esc($request->getMethod(true)) ?></td>
+-						</tr>
+-						<tr>
+-							<td>IP Address</td>
+-							<td><?= esc($request->getIPAddress()) ?></td>
+-						</tr>
+-						<tr>
+-							<td style="width: 10em">Is AJAX Request?</td>
+-							<td><?= $request->isAJAX() ? 'yes' : 'no' ?></td>
+-						</tr>
+-						<tr>
+-							<td>Is CLI Request?</td>
+-							<td><?= $request->isCLI() ? 'yes' : 'no' ?></td>
+-						</tr>
+-						<tr>
+-							<td>Is Secure Request?</td>
+-							<td><?= $request->isSecure() ? 'yes' : 'no' ?></td>
+-						</tr>
+-						<tr>
+-							<td>User Agent</td>
+-							<td><?= esc($request->getUserAgent()->getAgentString()) ?></td>
+-						</tr>
+-
+-					</tbody>
+-				</table>
+-
+-
+-				<?php $empty = true; ?>
+-				<?php foreach (['_GET', '_POST', '_COOKIE'] as $var) : ?>
+-					<?php if (empty($GLOBALS[$var]) || ! is_array($GLOBALS[$var]))
+-					{
+-						continue;
+-					} ?>
+-
+-					<?php $empty = false; ?>
+-
+-					<h3>$<?= esc($var) ?></h3>
+-
+-					<table style="width: 100%">
+-						<thead>
+-							<tr>
+-								<th>Key</th>
+-								<th>Value</th>
+-							</tr>
+-						</thead>
+-						<tbody>
+-						<?php foreach ($GLOBALS[$var] as $key => $value) : ?>
+-							<tr>
+-								<td><?= esc($key) ?></td>
+-								<td>
+-									<?php if (is_string($value)) : ?>
+-										<?= esc($value) ?>
+-									<?php else: ?>
+-										<pre><?= esc(print_r($value, true)) ?></pre>
+-									<?php endif; ?>
+-								</td>
+-							</tr>
+-						<?php endforeach; ?>
+-						</tbody>
+-					</table>
+-
+-				<?php endforeach ?>
+-
+-				<?php if ($empty) : ?>
+-
+-					<div class="alert">
+-						No $_GET, $_POST, or $_COOKIE Information to show.
+-					</div>
+-
+-				<?php endif; ?>
+-
+-				<?php $headers = $request->getHeaders(); ?>
+-				<?php if (! empty($headers)) : ?>
+-
+-					<h3>Headers</h3>
+-
+-					<table>
+-						<thead>
+-							<tr>
+-								<th>Header</th>
+-								<th>Value</th>
+-							</tr>
+-						</thead>
+-						<tbody>
+-						<?php foreach ($headers as $value) : ?>
+-							<?php if (empty($value))
+-							{
+-								continue;
+-							} ?>
+-							<?php if (! is_array($value))
+-							{
+-								$value = [$value];
+-							} ?>
+-							<?php foreach ($value as $h) : ?>
+-								<tr>
+-									<td><?= esc($h->getName(), 'html') ?></td>
+-									<td><?= esc($h->getValueLine(), 'html') ?></td>
+-								</tr>
+-							<?php endforeach; ?>
+-						<?php endforeach; ?>
+-						</tbody>
+-					</table>
+-
+-				<?php endif; ?>
+-			</div>
+-
+-			<!-- Response -->
+-			<?php
+-				$response = \Config\Services::response();
+-				$response->setStatusCode(http_response_code());
+-			?>
+-			<div class="content" id="response">
+-				<table>
+-					<tr>
+-						<td style="width: 15em">Response Status</td>
+-						<td><?= esc($response->getStatusCode() . ' - ' . $response->getReason()) ?></td>
+-					</tr>
+-				</table>
+-
+-				<?php $headers = $response->getHeaders(); ?>
+-				<?php if (! empty($headers)) : ?>
+-					<?php natsort($headers) ?>
+-
+-					<h3>Headers</h3>
+-
+-					<table>
+-						<thead>
+-							<tr>
+-								<th>Header</th>
+-								<th>Value</th>
+-							</tr>
+-						</thead>
+-						<tbody>
+-						<?php foreach ($headers as $name => $value) : ?>
+-							<tr>
+-								<td><?= esc($name, 'html') ?></td>
+-								<td><?= esc($response->getHeaderLine($name), 'html') ?></td>
+-							</tr>
+-						<?php endforeach; ?>
+-						</tbody>
+-					</table>
+-
+-				<?php endif; ?>
+-			</div>
+-
+-			<!-- Files -->
+-			<div class="content" id="files">
+-				<?php $files = get_included_files(); ?>
+-
+-				<ol>
+-				<?php foreach ($files as $file) :?>
+-					<li><?= esc(static::cleanPath($file)) ?></li>
+-				<?php endforeach ?>
+-				</ol>
+-			</div>
+-
+-			<!-- Memory -->
+-			<div class="content" id="memory">
+-
+-				<table>
+-					<tbody>
+-						<tr>
+-							<td>Memory Usage</td>
+-							<td><?= esc(static::describeMemory(memory_get_usage(true))) ?></td>
+-						</tr>
+-						<tr>
+-							<td style="width: 12em">Peak Memory Usage:</td>
+-							<td><?= esc(static::describeMemory(memory_get_peak_usage(true))) ?></td>
+-						</tr>
+-						<tr>
+-							<td>Memory Limit:</td>
+-							<td><?= esc(ini_get('memory_limit')) ?></td>
+-						</tr>
+-					</tbody>
+-				</table>
+-
+-			</div>
+-
+-		</div>  <!-- /tab-content -->
+-
+-	</div> <!-- /container -->
+-
+-	<div class="footer">
+-		<div class="container">
+-
+-			<p>
+-				Displayed at <?= esc(date('H:i:sa')) ?> &mdash;
+-				PHP: <?= esc(phpversion()) ?>  &mdash;
+-				CodeIgniter: <?= esc(\CodeIgniter\CodeIgniter::CI_VERSION) ?>
+-			</p>
+-
+-		</div>
+-	</div>
+-
+-</body>
+-</html>
+diff -ruN /tmp/orig_app/BACKUP/Views/errors/html/production.php app/BACKUP/Views/errors/html/production.php
+--- /tmp/orig_app/BACKUP/Views/errors/html/production.php	2026-08-24 23:02:52.508289776 +0000
++++ app/BACKUP/Views/errors/html/production.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,25 +0,0 @@
+-<!doctype html>
+-<html>
+-<head>
+-	<meta charset="UTF-8">
+-	<meta name="robots" content="noindex">
+-
+-	<title>Whoops!</title>
+-
+-	<style type="text/css">
+-		<?= preg_replace('#[\r\n\t ]+#', ' ', file_get_contents(__DIR__ . DIRECTORY_SEPARATOR . 'debug.css')) ?>
+-	</style>
+-</head>
+-<body>
+-
+-	<div class="container text-center">
+-
+-		<h1 class="headline">Whoops!</h1>
+-
+-		<p class="lead">We seem to have hit a snag. Please try again later...</p>
+-
+-	</div>
+-
+-</body>
+-
+-</html>
+diff -ruN /tmp/orig_app/BACKUP/Views/welcome_message.php app/BACKUP/Views/welcome_message.php
+--- /tmp/orig_app/BACKUP/Views/welcome_message.php	2026-08-24 23:02:52.508776768 +0000
++++ app/BACKUP/Views/welcome_message.php	1970-01-01 00:00:00.000000000 +0000
+@@ -1,324 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-	<meta charset="UTF-8">
+-	<title>Welcome to CodeIgniter 4!</title>
+-	<meta name="description" content="The small framework with powerful features">
+-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+-	<link rel="shortcut icon" type="image/png" href="/favicon.ico"/>
+-
+-	<!-- STYLES -->
+-
+-	<style {csp-style-nonce}>
+-		* {
+-			transition: background-color 300ms ease, color 300ms ease;
+-		}
+-		*:focus {
+-			background-color: rgba(221, 72, 20, .2);
+-			outline: none;
+-		}
+-		html, body {
+-			color: rgba(33, 37, 41, 1);
+-			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+-			font-size: 16px;
+-			margin: 0;
+-			padding: 0;
+-			-webkit-font-smoothing: antialiased;
+-			-moz-osx-font-smoothing: grayscale;
+-			text-rendering: optimizeLegibility;
+-		}
+-		header {
+-			background-color: rgba(247, 248, 249, 1);
+-			padding: .4rem 0 0;
+-		}
+-		.menu {
+-			padding: .4rem 2rem;
+-		}
+-		header ul {
+-			border-bottom: 1px solid rgba(242, 242, 242, 1);
+-			list-style-type: none;
+-			margin: 0;
+-			overflow: hidden;
+-			padding: 0;
+-			text-align: right;
+-		}
+-		header li {
+-			display: inline-block;
+-		}
+-		header li a {
+-			border-radius: 5px;
+-			color: rgba(0, 0, 0, .5);
+-			display: block;
+-			height: 44px;
+-			text-decoration: none;
+-		}
+-		header li.menu-item a {
+-			border-radius: 5px;
+-			margin: 5px 0;
+-			height: 38px;
+-			line-height: 36px;
+-			padding: .4rem .65rem;
+-			text-align: center;
+-		}
+-		header li.menu-item a:hover,
+-		header li.menu-item a:focus {
+-			background-color: rgba(221, 72, 20, .2);
+-			color: rgba(221, 72, 20, 1);
+-		}
+-		header .logo {
+-			float: left;
+-			height: 44px;
+-			padding: .4rem .5rem;
+-		}
+-		header .menu-toggle {
+-			display: none;
+-			float: right;
+-			font-size: 2rem;
+-			font-weight: bold;
+-		}
+-		header .menu-toggle button {
+-			background-color: rgba(221, 72, 20, .6);
+-			border: none;
+-			border-radius: 3px;
+-			color: rgba(255, 255, 255, 1);
+-			cursor: pointer;
+-			font: inherit;
+-			font-size: 1.3rem;
+-			height: 36px;
+-			padding: 0;
+-			margin: 11px 0;
+-			overflow: visible;
+-			width: 40px;
+-		}
+-		header .menu-toggle button:hover,
+-		header .menu-toggle button:focus {
+-			background-color: rgba(221, 72, 20, .8);
+-			color: rgba(255, 255, 255, .8);
+-		}
+-		header .heroe {
+-			margin: 0 auto;
+-			max-width: 1100px;
+-			padding: 1rem 1.75rem 1.75rem 1.75rem;
+-		}
+-		header .heroe h1 {
+-			font-size: 2.5rem;
+-			font-weight: 500;
+-		}
+-		header .heroe h2 {
+-			font-size: 1.5rem;
+-			font-weight: 300;
+-		}
+-		section {
+-			margin: 0 auto;
+-			max-width: 1100px;
+-			padding: 2.5rem 1.75rem 3.5rem 1.75rem;
+-		}
+-		section h1 {
+-			margin-bottom: 2.5rem;
+-		}
+-		section h2 {
+-			font-size: 120%;
+-			line-height: 2.5rem;
+-			padding-top: 1.5rem;
+-		}
+-		section pre {
+-			background-color: rgba(247, 248, 249, 1);
+-			border: 1px solid rgba(242, 242, 242, 1);
+-			display: block;
+-			font-size: .9rem;
+-			margin: 2rem 0;
+-			padding: 1rem 1.5rem;
+-			white-space: pre-wrap;
+-			word-break: break-all;
+-		}
+-		section code {
+-			display: block;
+-		}
+-		section a {
+-			color: rgba(221, 72, 20, 1);
+-		}
+-		section svg {
+-			margin-bottom: -5px;
+-			margin-right: 5px;
+-			width: 25px;
+-		}
+-		.further {
+-			background-color: rgba(247, 248, 249, 1);
+-			border-bottom: 1px solid rgba(242, 242, 242, 1);
+-			border-top: 1px solid rgba(242, 242, 242, 1);
+-		}
+-		.further h2:first-of-type {
+-			padding-top: 0;
+-		}
+-		footer {
+-			background-color: rgba(221, 72, 20, .8);
+-			text-align: center;
+-		}
+-		footer .environment {
+-			color: rgba(255, 255, 255, 1);
+-			padding: 2rem 1.75rem;
+-		}
+-		footer .copyrights {
+-			background-color: rgba(62, 62, 62, 1);
+-			color: rgba(200, 200, 200, 1);
+-			padding: .25rem 1.75rem;
+-		}
+-		@media (max-width: 559px) {
+-			header ul {
+-				padding: 0;
+-			}
+-			header .menu-toggle {
+-				padding: 0 1rem;
+-			}
+-			header .menu-item {
+-				background-color: rgba(244, 245, 246, 1);
+-				border-top: 1px solid rgba(242, 242, 242, 1);
+-				margin: 0 15px;
+-				width: calc(100% - 30px);
+-			}
+-			header .menu-toggle {
+-				display: block;
+-			}
+-			header .hidden {
+-				display: none;
+-			}
+-			header li.menu-item a {
+-				background-color: rgba(221, 72, 20, .1);
+-			}
+-			header li.menu-item a:hover,
+-			header li.menu-item a:focus {
+-				background-color: rgba(221, 72, 20, .7);
+-				color: rgba(255, 255, 255, .8);
+-			}
+-		}
+-	</style>
+-</head>
+-<body>
+-
+-<!-- HEADER: MENU + HEROE SECTION -->
+-<header>
+-
+-	<div class="menu">
+-		<ul>
+-			<li class="logo"><a href="https://codeigniter.com" target="_blank"><img height="44" title="CodeIgniter Logo"
+-																					alt="Visit CodeIgniter.com official website!"
+-																					src="data:image/png;base64,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"></a>
+-			</li>
+-			<li class="menu-toggle">
+-				<button onclick="toggleMenu();">&#9776;</button>
+-			</li>
+-			<li class="menu-item hidden"><a href="#">Home</a></li>
+-			<li class="menu-item hidden"><a href="https://codeigniter4.github.io/userguide/" target="_blank">Docs</a>
+-			</li>
+-			<li class="menu-item hidden"><a href="https://forum.codeigniter.com/" target="_blank">Community</a></li>
+-			<li class="menu-item hidden"><a
+-					href="https://github.com/codeigniter4/CodeIgniter4/blob/develop/CONTRIBUTING.md" target="_blank">Contribute</a>
+-			</li>
+-		</ul>
+-	</div>
+-
+-	<div class="heroe">
+-
+-		<h1>Welcome to CodeIgniter <?= CodeIgniter\CodeIgniter::CI_VERSION ?></h1>
+-
+-		<h2>The small framework with powerful features</h2>
+-
+-	</div>
+-
+-</header>
+-
+-<!-- CONTENT -->
+-
+-<section>
+-
+-	<h1>About this page</h1>
+-
+-	<p>The page you are looking at is being generated dynamically by CodeIgniter.</p>
+-
+-	<p>If you would like to edit this page you will find it located at:</p>
+-
+-	<pre><code>app/Views/welcome_message.php</code></pre>
+-
+-	<p>The corresponding controller for this page can be found at:</p>
+-
+-	<pre><code>app/Controllers/Home.php</code></pre>
+-
+-</section>
+-
+-<div class="further">
+-
+-	<section>
+-
+-		<h1>Go further</h1>
+-
+-		<h2>
+-			<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect x='32' y='96' width='64' height='368' rx='16' ry='16' style='fill:none;stroke:#000;stroke-linejoin:round;stroke-width:32px'/><line x1='112' y1='224' x2='240' y2='224' style='fill:none;stroke:#000;stroke-linecap:round;stroke-linejoin:round;stroke-width:32px'/><line x1='112' y1='400' x2='240' y2='400' style='fill:none;stroke:#000;stroke-linecap:round;stroke-linejoin:round;stroke-width:32px'/><rect x='112' y='160' width='128' height='304' rx='16' ry='16' style='fill:none;stroke:#000;stroke-linejoin:round;stroke-width:32px'/><rect x='256' y='48' width='96' height='416' rx='16' ry='16' style='fill:none;stroke:#000;stroke-linejoin:round;stroke-width:32px'/><path d='M422.46,96.11l-40.4,4.25c-11.12,1.17-19.18,11.57-17.93,23.1l34.92,321.59c1.26,11.53,11.37,20,22.49,18.84l40.4-4.25c11.12-1.17,19.18-11.57,17.93-23.1L445,115C443.69,103.42,433.58,94.94,422.46,96.11Z' style='fill:none;stroke:#000;stroke-linejoin:round;stroke-width:32px'/></svg>
+-			Learn
+-		</h2>
+-
+-		<p>The User Guide contains an introduction, tutorial, a number of "how to"
+-			guides, and then reference documentation for the components that make up
+-			the framework. Check the <a href="https://codeigniter4.github.io/userguide"
+-			target="_blank">User Guide</a> !</p>
+-
+-		<h2>
+-			<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><path d='M431,320.6c-1-3.6,1.2-8.6,3.3-12.2a33.68,33.68,0,0,1,2.1-3.1A162,162,0,0,0,464,215c.3-92.2-77.5-167-173.7-167C206.4,48,136.4,105.1,120,180.9a160.7,160.7,0,0,0-3.7,34.2c0,92.3,74.8,169.1,171,169.1,15.3,0,35.9-4.6,47.2-7.7s22.5-7.2,25.4-8.3a26.44,26.44,0,0,1,9.3-1.7,26,26,0,0,1,10.1,2L436,388.6a13.52,13.52,0,0,0,3.9,1,8,8,0,0,0,8-8,12.85,12.85,0,0,0-.5-2.7Z' style='fill:none;stroke:#000;stroke-linecap:round;stroke-miterlimit:10;stroke-width:32px'/><path d='M66.46,232a146.23,146.23,0,0,0,6.39,152.67c2.31,3.49,3.61,6.19,3.21,8s-11.93,61.87-11.93,61.87a8,8,0,0,0,2.71,7.68A8.17,8.17,0,0,0,72,464a7.26,7.26,0,0,0,2.91-.6l56.21-22a15.7,15.7,0,0,1,12,.2c18.94,7.38,39.88,12,60.83,12A159.21,159.21,0,0,0,284,432.11' style='fill:none;stroke:#000;stroke-linecap:round;stroke-miterlimit:10;stroke-width:32px'/></svg>
+-			Discuss
+-		</h2>
+-
+-		<p>CodeIgniter is a community-developed open source project, with several
+-			 venues for the community members to gather and exchange ideas. View all
+-			 the threads on <a href="https://forum.codeigniter.com/"
+-			 target="_blank">CodeIgniter's forum</a>, or <a href="https://codeigniterchat.slack.com/"
+-			 target="_blank">chat on Slack</a> !</p>
+-
+-		<h2>
+-			 <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><line x1='176' y1='48' x2='336' y2='48' style='fill:none;stroke:#000;stroke-linecap:round;stroke-miterlimit:10;stroke-width:32px'/><line x1='118' y1='304' x2='394' y2='304' style='fill:none;stroke:#000;stroke-linecap:round;stroke-miterlimit:10;stroke-width:32px'/><path d='M208,48v93.48a64.09,64.09,0,0,1-9.88,34.18L73.21,373.49C48.4,412.78,76.63,464,123.08,464H388.92c46.45,0,74.68-51.22,49.87-90.51L313.87,175.66A64.09,64.09,0,0,1,304,141.48V48' style='fill:none;stroke:#000;stroke-linecap:round;stroke-miterlimit:10;stroke-width:32px'/></svg>
+-			 Contribute
+-		</h2>
+-
+-		<p>CodeIgniter is a community driven project and accepts contributions
+-			 of code and documentation from the community. Why not
+-			 <a href="https://codeigniter.com/en/contribute" target="_blank">
+-			 join us</a> ?</p>
+-
+-	</section>
+-
+-</div>
+-
+-<!-- FOOTER: DEBUG INFO + COPYRIGHTS -->
+-
+-<footer>
+-	<div class="environment">
+-
+-		<p>Page rendered in {elapsed_time} seconds</p>
+-
+-		<p>Environment: <?= ENVIRONMENT ?></p>
+-
+-	</div>
+-
+-	<div class="copyrights">
+-
+-		<p>&copy; <?= date('Y') ?> CodeIgniter Foundation. CodeIgniter is open source project released under the MIT
+-			open source licence.</p>
+-
+-	</div>
+-
+-</footer>
+-
+-<!-- SCRIPTS -->
+-
+-<script>
+-	function toggleMenu() {
+-		var menuItems = document.getElementsByClassName('menu-item');
+-		for (var i = 0; i < menuItems.length; i++) {
+-			var menuItem = menuItems[i];
+-			menuItem.classList.toggle("hidden");
+-		}
+-	}
+-</script>
+-
+-<!-- -->
+-
+-</body>
+-</html>
+diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
+--- /tmp/orig_app/Config/Routes.php	2026-08-24 23:02:52.524373647 +0000
++++ app/Config/Routes.php	2026-08-24 23:04:47.407781185 +0000
+@@ -44,7 +44,7 @@
+ 	$routes->match(['get', 'post'], '/', 'Keys::index');
+ 	$routes->match(['get', 'post'], 'generate', 'Keys::generate');
+ 	$routes->get('(:num)', 'Keys::edit_key/$1');
+-	$routes->get('reset', 'Keys::api_key_reset');
++	$routes->post('reset', 'Keys::api_key_reset');
+ 	$routes->post('edit', 'Keys::edit_key');
+ 	$routes->match(['get', 'post'], 'api', 'Keys::api_get_keys');
+ });
+diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
+--- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
++++ app/Controllers/Auth.php	2026-08-24 23:05:42.853101565 +0000
+@@ -311,9 +311,73 @@
+     /**
+      * Real client IP (Cloudflare header first — the site is behind Cloudflare).
+      */
++    /**
++     * Cloudflare's published edge ranges. Only a request that actually
++     * arrives from one of these is allowed to speak for its client via
++     * CF-Connecting-IP. Refresh from https://www.cloudflare.com/ips/
++     */
++    private const CF_RANGES = [
++        '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
++        '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
++        '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
++        '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
++        '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
++        '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
++    ];
++
+     private function clientIp(): string
+     {
+-        $cf = $this->request->getServer('HTTP_CF_CONNECTING_IP');
+-        return ! empty($cf) ? (string) $cf : (string) $this->request->getIPAddress();
++        $remote = (string) $this->request->getIPAddress();
++
++        // Anyone can send a CF-Connecting-IP header. Trusting it without
++        // checking the peer means every forged value looks like a fresh IP,
++        // which makes the login throttle below meaningless.
++        if (! $this->fromCloudflare($remote)) {
++            return $remote;
++        }
++
++        $cf = (string) $this->request->getServer('HTTP_CF_CONNECTING_IP');
++
++        return filter_var($cf, FILTER_VALIDATE_IP) ? $cf : $remote;
++    }
++
++    private function fromCloudflare(string $ip): bool
++    {
++        foreach (self::CF_RANGES as $cidr) {
++            if ($this->ipInCidr($ip, $cidr)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private function ipInCidr(string $ip, string $cidr): bool
++    {
++        [$subnet, $bits] = array_pad(explode('/', $cidr, 2), 2, null);
++        $bits = (int) $bits;
++
++        $ipBin     = @inet_pton($ip);
++        $subnetBin = @inet_pton($subnet);
++        if ($ipBin === false || $subnetBin === false) {
++            return false;
++        }
++        // v4 and v6 are different lengths; never compare across families.
++        if (strlen($ipBin) !== strlen($subnetBin)) {
++            return false;
++        }
++
++        $whole = intdiv($bits, 8);
++        $rest  = $bits % 8;
++
++        if ($whole > 0 && strncmp($ipBin, $subnetBin, $whole) !== 0) {
++            return false;
++        }
++        if ($rest === 0) {
++            return true;
++        }
++
++        $mask = chr(0xFF << (8 - $rest) & 0xFF);
++
++        return (($ipBin[$whole] ?? "\0") & $mask) === (($subnetBin[$whole] ?? "\0") & $mask);
+     }
+ }
+diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
+--- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
++++ app/Controllers/Keys.php	2026-08-24 23:11:48.704835471 +0000
+@@ -64,16 +64,18 @@
+         $model = $this->model;
+         $user = $this->user;
+ 
+-        if ($user->level != 1) {
+-            $keys = $model->where('registrator', $user->username)->findAll();
+-        } else {
+-            $keys = $model->findAll();
++        // The view only asks "are there any?" - the table itself is filled
++        // by the server-side DataTables endpoint. findAll() was loading
++        // every row with every column and discarding it on each page load.
++        if ((int) $user->level !== 1) {
++            $model->where('registrator', $user->username);
+         }
++        $keyCount = $model->countAllResults();
+ 
+         $data = [
+             'title' => 'Keys',
+             'user' => $user,
+-            'keylist' => $keys,
++            'keylist' => $keyCount,
+             'time' => $this->time,
+         ];
+         return view('Keys/list', $data);
+@@ -88,35 +90,52 @@
+ 
+     public function api_key_reset()
+     {
+-        sleep(1);
+         $model = $this->model;
+-        $pass = $this->request->getGet('pass');
+-        $keys = $this->request->getGet('userkey');
+-        $reset = $this->request->getGet('reset');
++        $user  = $this->user;
++
++        // POST only: a GET carrying key identifiers lands in access logs,
++        // Cloudflare logs, browser history and Referer headers.
++        $keys  = (string) $this->request->getPost('userkey');
++        $reset = $this->request->getPost('reset');
++
++        // Identical response for every rejection, so nothing about a key
++        // can be inferred from a failed call.
++        $deny = ['registered' => false, 'keys' => $keys, 'csrf' => csrf_hash()];
++
++        // The old shared secret was hardcoded in Views/Keys/list.php and
++        // therefore shipped to every browser - it protected nothing. This
++        // route already sits behind the auth filter and the CSRF filter,
++        // so the session identifies the caller and ownership is enforced
++        // below. No shared secret is needed or wanted.
++        if ($keys === '') {
++            return $this->response->setJSON($deny);
++        }
++
++        // Scope the lookup to the caller unless they are an admin, so the
++        // endpoint cannot be used to probe other sellers' keys.
+         $db_key = $model->getKeys($keys);
++        if ($db_key && (int) $user->level !== 1 && $db_key->registrator !== $user->username) {
++            $db_key = null;
++        }
+ 
+-        $rules = [];
+-        if ($pass == 't██████' and $db_key) {
+-            $total = $db_key->devices ? explode(',', $db_key->devices) : [];
+-            $rules = ['devices_total' => count($total), 'devices_max' => (int) $db_key->max_devices];
+-            $user = $this->user;
+-            if ($db_key->devices and $reset) {
+-                if ($user->level == 1 or $db_key->registrator == $user->username) {
+-                    $model->set('devices', NULL)
+-                        ->where('user_key', $keys)
+-                        ->update();
+-                    $rules = ['reset' => true, 'devices_total' => 0, 'devices_max' => $db_key->max_devices];
+-                }
+-            }
++        if (! $db_key) {
++            return $this->response->setJSON($deny);
+         }
+ 
+-        $data = [
+-            'registered' => $db_key ? true : false,
+-            'keys' => $keys,
+-        ];
++        $total = $db_key->devices ? explode(',', $db_key->devices) : [];
++        $rules = ['devices_total' => count($total), 'devices_max' => (int) $db_key->max_devices];
++
++        if ($db_key->devices && $reset) {
++            $model->set('devices', null)
++                ->where('user_key', $keys)
++                ->update();
++            $rules = ['reset' => true, 'devices_total' => 0, 'devices_max' => (int) $db_key->max_devices];
++        }
+ 
+-        $real_response = array_merge($data, $rules);
+-        return $this->response->setJSON($real_response);
++        return $this->response->setJSON(array_merge(
++            ['registered' => true, 'keys' => $keys, 'csrf' => csrf_hash()],
++            $rules
++        ));
+     }
+ 
+     public function edit_key($key = false)
+diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
+--- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
++++ app/Controllers/User.php	2026-08-24 23:08:50.867783896 +0000
+@@ -114,7 +114,10 @@
+         $data = [
+             'title' => 'Users',
+             'user' => $user,
+-            'user_list' => $model->getUserList(),
++            // Table is filled by the server-side DataTables endpoint.
++            // getUserList() loaded every user row for a check that lives
++            // inside an HTML comment in the view.
++            'user_list' => $model->countAllResults(),
+             'time' => $this->time,
+             'validation' => $validation
+         ];
+@@ -137,7 +140,6 @@
+             'title' => 'Settings',
+             'user' => $user,
+             'target' => $model->getUser($userid),
+-            'user_list' => $model->getUserList(),
+             'time' => $this->time,
+             'validation' => $validation,
+         ];
+@@ -213,7 +215,7 @@
+ 
+             $data_update = [
+                 'username' => $username,
+-                'fullname' => esc($fullname),
++                'fullname' => $fullname,   // escaped on output, not stored escaped
+                 'level' => $level,
+                 'status' => $status,
+                 'saldo' => (($saldo < 1) ? 0 : $saldo),
+@@ -222,7 +224,7 @@
+ 
+             $update = $model->update($userid, $data_update);
+             if ($update) {
+-                return redirect()->back()->with('msgSuccess', "Successfuly update $target->username.");
++                return redirect()->back()->with('msgSuccess', "Successfuly update " . esc($target->username) . ".");
+             }
+         }
+     }
+@@ -315,7 +317,7 @@
+         if (!$this->validate($form_rules)) {
+             return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
+         } else {
+-            $this->model->update(session('userid'), ['fullname' => esc($newName)]);
++            $this->model->update(session('userid'), ['fullname' => $newName]);
+             return redirect()->back()->with('msgSuccess', 'Account Detail Successfuly Changed.');
+         }
+     }
+diff -ruN /tmp/orig_app/Filters/AdminFilter.php app/Filters/AdminFilter.php
+--- /tmp/orig_app/Filters/AdminFilter.php	2026-08-24 23:02:52.534608253 +0000
++++ app/Filters/AdminFilter.php	2026-08-24 23:03:16.698933587 +0000
+@@ -1,30 +1,35 @@
+-<?php
+-
+-namespace App\Filters;
+-
+-use App\Models\UserModel;
+-use CodeIgniter\HTTP\RequestInterface;
+-use CodeIgniter\HTTP\ResponseInterface;
+-use CodeIgniter\Filters\FilterInterface;
+-
+-class AdminFilter implements FilterInterface
+-{
+-    public function before(RequestInterface $request, $arguments = null)
+-    {
+-        $session = session();
+-        if ($session->userid and $session->time_login) {
+-            $userModel = new UserModel();
+-            $user = $userModel->getUser($session->userid);
+-            if ($user) {
+-                if ($user->level != 1) {
+-                    return redirect()->to('dashboard')->with('msgWarning', "Access Denied!");
+-                }
+-            }
+-        }
+-    }
+-
+-    public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
+-    {
+-        // Do something here
+-    }
+-}
++<?php
++
++namespace App\Filters;
++
++use App\Models\UserModel;
++use CodeIgniter\HTTP\RequestInterface;
++use CodeIgniter\HTTP\ResponseInterface;
++use CodeIgniter\Filters\FilterInterface;
++
++class AdminFilter implements FilterInterface
++{
++    public function before(RequestInterface $request, $arguments = null)
++    {
++        $session = session();
++
++        // Deny by default. Previously this only denied from inside a nested
++        // if, so any path that skipped those checks - no session, or a user
++        // row deleted mid-session - returned null and was ALLOWED.
++        $user = null;
++        if ($session->userid && $session->time_login) {
++            $user = (new UserModel())->getUser($session->userid);
++        }
++
++        if (! $user || (int) $user->level !== 1) {
++            return redirect()->to('dashboard')->with('msgWarning', "Access Denied!");
++        }
++
++        // Only a confirmed admin reaches this point.
++    }
++
++    public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
++    {
++        // Do something here
++    }
++}
+diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
+--- /tmp/orig_app/Filters/AuthFilter.php	2026-08-24 23:02:52.534788935 +0000
++++ app/Filters/AuthFilter.php	2026-08-24 23:03:16.698767277 +0000
+@@ -1,27 +1,30 @@
+-<?php
+-
+-namespace App\Filters;
+-
+-use App\Models\UserModel;
+-use CodeIgniter\HTTP\RequestInterface;
+-use CodeIgniter\HTTP\ResponseInterface;
+-use CodeIgniter\Filters\FilterInterface;
+-
+-class AuthFilter implements FilterInterface
+-{
+-    public function before(RequestInterface $request, $arguments = null)
+-    {
+-        $session = session();
+-        if (!$session->userid and !$session->time_login) {
+-            return redirect()->to('/login')->with('msgWarning', "Please login first");
+-        } else {
+-            $userModel = new UserModel();
+-            return $userModel->checkAuthFilter();
+-        }
+-    }
+-
+-    public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
+-    {
+-        // Do something here
+-    }
+-}
++<?php
++
++namespace App\Filters;
++
++use App\Models\UserModel;
++use CodeIgniter\HTTP\RequestInterface;
++use CodeIgniter\HTTP\ResponseInterface;
++use CodeIgniter\Filters\FilterInterface;
++
++class AuthFilter implements FilterInterface
++{
++    public function before(RequestInterface $request, $arguments = null)
++    {
++        $session = session();
++
++        // Deny unless BOTH halves of the session are present.
++        // Was `and`, which let half a session through.
++        if (! $session->userid || ! $session->time_login) {
++            return redirect()->to('/login')->with('msgWarning', "Please login first");
++        }
++
++        $userModel = new UserModel();
++        return $userModel->checkAuthFilter();
++    }
++
++    public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
++    {
++        // Do something here
++    }
++}
+diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
+--- /tmp/orig_app/Helpers/nata_helper.php	2026-08-24 23:02:52.536343011 +0000
++++ app/Helpers/nata_helper.php	2026-08-24 23:08:28.293569628 +0000
+@@ -1,97 +1,104 @@
+-<?php
+-
+-/**
+- * create_password
+- *
+- * @param  mixed $password
+- * @param  mixed $enc
+- * @return string
+- */
+-function create_password($password, $enc = true)
+-{
+-    $optn = ['cost' => 8];
+-    $patt = "X███████████████";
+-    $hash = md5($patt . $password);
+-    $pass = password_hash($hash, PASSWORD_DEFAULT, $optn);
+-    return ($enc ? $pass : $hash);
+-}
+-
+-function create_passwordV2(string $password): string 
+-{
+-    return password_hash($password, PASSWORD_ARGON2ID, [
+-        'memory_cost' => 65536, 
+-        'time_cost'   => 4,
+-        'threads'     => 2
+-    ]);
+-}
+-
+-
+-function getName($user)
+-{
+-    if ($user->fullname) {
+-        return word_limiter($user->fullname, 1, '');
+-    } else {
+-        return $user->username;
+-    }
+-}
+-
+-function getLevel($level = 0)
+-{
+-    switch ($level) {
+-        case '1':
+-            $a = 'Admin';
+-            break;
+-        case '2':
+-            $a = 'Reseller';
+-            break;
+-        default:
+-            $a = 'Unknown';
+-            break;
+-    }
+-    return $a;
+-}
+-
+-function setMessage($msg, $color = 'secondary')
+-{
+-    return [$msg, $color];
+-}
+-
+-function getDevice($devices)
+-{
+-    $total = 0;
+-    $listDevice = "";
+-    if ($devices) {
+-        $clean_comma = reduce_multiples($devices, ",", true);
+-        $ex = explode(',', $clean_comma);
+-        $listDevice = "";
+-        foreach ($ex as $ld) {
+-            $listDevice .= "$ld\n";
+-        }
+-        $total = count($ex);
+-    }
+-    return (object) ['total' => $total, 'devices' => trim($listDevice)];
+-}
+-
+-function setDevice($devicesPost, $max)
+-{
+-    // dont touch this forever please -_-
+-    if ($devicesPost) {
+-        $clean_enter = reduce_multiples($devicesPost, "\n", true);
+-        $ez = [''];
+-        $ef = array_unique(array_filter(preg_replace("/[^A-Za-z0-9-]/", "", explode("\n", $clean_enter))));
+-        $ex = array_filter(array_merge($ez, $ef));
+-        foreach ($ex as $k => $item) {
+-            if ($k <= $max) {
+-                $result[] = trim($item);
+-            }
+-        }
+-        return implode(",", array_unique($result));
+-    }
+-}
+-
+-function getPrice($price, $duration, $device_max)
+-{
+-    $priceReal = $price[$duration];
+-    $result = ($priceReal * $device_max);
+-    return ($result <= 0) ? false : $result;
+-}
++<?php
++
++/**
++ * create_password
++ *
++ * @param  mixed $password
++ * @param  mixed $enc
++ * @return string
++ */
++function create_password($password, $enc = true)
++{
++    $optn = ['cost' => 8];
++    $patt = "X███████████████";
++    $hash = md5($patt . $password);
++    $pass = password_hash($hash, PASSWORD_DEFAULT, $optn);
++    return ($enc ? $pass : $hash);
++}
++
++function create_passwordV2(string $password): string 
++{
++    return password_hash($password, PASSWORD_ARGON2ID, [
++        'memory_cost' => 65536, 
++        'time_cost'   => 4,
++        'threads'     => 2
++    ]);
++}
++
++
++/**
++ * Display name for a user. Escapes, because every caller drops the
++ * result straight into a view with <?= ?>. Values are no longer stored
++ * pre-escaped, so escaping has to happen here at the output boundary.
++ */
++function getName($user)
++{
++    if (! $user) {
++        return '';
++    }
++    if ($user->fullname) {
++        return esc(word_limiter($user->fullname, 1, ''));
++    }
++    return esc($user->username);
++}
++
++function getLevel($level = 0)
++{
++    switch ($level) {
++        case '1':
++            $a = 'Admin';
++            break;
++        case '2':
++            $a = 'Reseller';
++            break;
++        default:
++            $a = 'Unknown';
++            break;
++    }
++    return $a;
++}
++
++function setMessage($msg, $color = 'secondary')
++{
++    return [$msg, $color];
++}
++
++function getDevice($devices)
++{
++    $total = 0;
++    $listDevice = "";
++    if ($devices) {
++        $clean_comma = reduce_multiples($devices, ",", true);
++        $ex = explode(',', $clean_comma);
++        $listDevice = "";
++        foreach ($ex as $ld) {
++            $listDevice .= "$ld\n";
++        }
++        $total = count($ex);
++    }
++    return (object) ['total' => $total, 'devices' => trim($listDevice)];
++}
++
++function setDevice($devicesPost, $max)
++{
++    // dont touch this forever please -_-
++    if ($devicesPost) {
++        $clean_enter = reduce_multiples($devicesPost, "\n", true);
++        $ez = [''];
++        $ef = array_unique(array_filter(preg_replace("/[^A-Za-z0-9-]/", "", explode("\n", $clean_enter))));
++        $ex = array_filter(array_merge($ez, $ef));
++        foreach ($ex as $k => $item) {
++            if ($k <= $max) {
++                $result[] = trim($item);
++            }
++        }
++        return implode(",", array_unique($result));
++    }
++}
++
++function getPrice($price, $duration, $device_max)
++{
++    $priceReal = $price[$duration];
++    $result = ($priceReal * $device_max);
++    return ($result <= 0) ? false : $result;
++}
+diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
+--- /tmp/orig_app/Models/UserModel.php	2026-08-24 23:02:52.607940552 +0000
++++ app/Models/UserModel.php	2026-08-24 23:03:35.541581662 +0000
+@@ -57,9 +57,14 @@
+         $time = new \CodeIgniter\I18n\Time;
+         $session = session();
+         $time_ex = $session->time_login;
+-        if ($time::now()->isBefore($time_ex)) {
++        if ($time_ex && $time::now()->isBefore($time_ex)) {
+             $userCek = $this->getUser($session->userid);
+-            if ($userCek->level > 2) {
++            // getUser() legitimately returns null when the row is gone.
++            // Reading ->level on null is a fatal in PHP 8.
++            if (! $userCek) {
++                return $this->AuthSessionLogout('Account no longer exists!');
++            }
++            if ($userCek->level > 2 || $userCek->level < 1) {
+                 $msg = 'Level account invalid!';
+             } elseif ($userCek->status != 1) {
+                 $msg = 'Status account changed!';
+diff -ruN /tmp/orig_app/Views/Admin/referral.php app/Views/Admin/referral.php
+--- /tmp/orig_app/Views/Admin/referral.php	2026-08-24 23:02:52.610578496 +0000
++++ app/Views/Admin/referral.php	2026-08-24 23:07:43.047526877 +0000
+@@ -36,7 +36,7 @@
+         <?php if ($code) : ?>
+             <div class="card">
+                 <div class="card-header p-3">
+-                    <i class="bi bi-clock-history me-2"></i>History Generate - Total <?= $total_code ?>
++                    <i class="bi bi-clock-history me-2"></i>History Generate - Total <?= (int) $total_code ?>
+                 </div>
+                 <div class="card-body">
+                     <div class="table-responsive">
+@@ -53,11 +53,11 @@
+                             <tbody>
+                                 <?php foreach ($code as $c) : ?>
+                                     <tr>
+-                                        <td><?= $c->id_reff ?></td>
++                                        <td><?= (int) $c->id_reff ?></td>
+                                         <td><?= substr($c->code, 1, 15) ?></td>
+-                                        <td>$<?= $c->set_saldo ?></td>
++                                        <td>$<?= esc($c->set_saldo) ?></td>
+                                         <td><?= $c->used_by ?: '&mdash;' ?></td>
+-                                        <td><?= $c->created_by ?></td>
++                                        <td><?= esc($c->created_by) ?></td>
+                                     </tr>
+                                 <?php endforeach; ?>
+                             </tbody>
+diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
+--- /tmp/orig_app/Views/Admin/user_edit.php	2026-08-24 23:02:52.611222252 +0000
++++ app/Views/Admin/user_edit.php	2026-08-24 23:07:43.047807182 +0000
+@@ -12,7 +12,7 @@
+             </div>
+             <div class="card-body">
+                 <?= form_open() ?>
+-                <input type="hidden" name="user_id" value="<?= $target->id_users ?>">
++                <input type="hidden" name="user_id" value="<?= (int) $target->id_users ?>">
+                 <div class="row">
+                     <div class="col-md-6 mb-2">
+                         <label for="username" class="form-label">Username</label>
+diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
+--- /tmp/orig_app/Views/Keys/generate.php	2026-08-24 23:02:52.614808324 +0000
++++ app/Views/Keys/generate.php	2026-08-24 23:07:43.048430122 +0000
+@@ -43,7 +43,7 @@
+                     <i>&#9203; Your time starts only after your first login.</i><br>
+                     <i class="bi bi-wallet"></i> Saldo Reduce :
+                     <span class="text-danger">-<?= esc(session()->getFlashdata('fees')) ?></span>
+-                    (Total left <?= $user->saldo ?>$)
++                    (Total left <?= esc($user->saldo) ?>$)
+                 </small>
+             </div>
+         <?php endif; ?>
+@@ -183,7 +183,7 @@
+ <?= $this->section('js') ?>
+ <script>
+     $(document).ready(function() {
+-        var price = JSON.parse('<?= $price ?>');
++        var price = JSON.parse('<?= esc($price) ?>');
+         getPrice(price);
+         // When selected
+         $("#max_devices, #duration, #game, #quantity").on('change keyup', function() {
+diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
+--- /tmp/orig_app/Views/Keys/key_edit.php	2026-08-24 23:02:52.615642502 +0000
++++ app/Views/Keys/key_edit.php	2026-08-24 23:07:43.048753343 +0000
+@@ -32,7 +32,7 @@
+                 <?= form_open('keys/edit') ?>
+ 
+                 <div class="row">
+-                    <input type="hidden" name="id_keys" value="<?= $key->id_keys ?>">
++                    <input type="hidden" name="id_keys" value="<?= (int) $key->id_keys ?>">
+                     <?php if ($user->level == 1) : ?>
+                         <div class="col-lg-6 mb-3">
+                             <label for="game" class="form-label">Games</label>
+@@ -86,7 +86,7 @@
+                         <?php endif; ?>
+                     </div>
+                     <div class="col-lg-12 mb-3">
+-                        <label for="devices" class="form-label">Devices <span class="bg-dark text-white px-1 rounded maxDev"><?= $key_info->total ?>/<?= $key->max_devices ?></span> <small class="text-muted">(Separately with enter)</small></label>
++                        <label for="devices" class="form-label">Devices <span class="bg-dark text-white px-1 rounded maxDev"><?= (int) $key_info->total ?>/<?= (int) $key->max_devices ?></span> <small class="text-muted">(Separately with enter)</small></label>
+                         <textarea class="form-control" name="devices" id="devices" rows="<?= ($key_info->total > $key->max_devices) ? 3 : $key_info->total ?>"><?= old('devices') ?: ($key_info->total ? $key_info->devices : '') ?></textarea>
+                         <?php if ($validation->hasError('devices')) : ?>
+                             <small id="help-devices" class="text-danger"><?= $validation->getError('devices') ?></small>
+@@ -153,13 +153,13 @@
+ <?= $this->section('js') ?>
+ <script>
+     $(document).ready(function() {
+-        var level = "<?= $user->level ?>";
++        var level = "<?= (int) $user->level ?>";
+         if (level != 1) $("#registrator, #expired_date, #devices").attr('disabled', true);
+         $("input, select, textarea").change(function() {
+             $(".btnUpdate").attr('disabled', false);
+         });
+     });
+-    var total = "<?= $key_info->total ?>";
++    var total = "<?= (int) $key_info->total ?>";
+     $("#max_devices").change(function() {
+         $(".maxDev").html(total + '/' + $(this).val());
+         $("#devices").attr('rows', $(this).val());
+diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
+--- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
++++ app/Views/Keys/list.php	2026-08-24 23:11:48.705126649 +0000
+@@ -143,12 +143,19 @@
+ 
+                 var base_url = window.location.origin;
+                 var api_url = `${base_url}/keys/reset`;
+-                $.getJSON(api_url, {
+-                        pass: 't██████',
+-                        userkey: keys,
+-                        reset: 1
+-                    },
++                var csrfPayload = {};
++                csrfPayload[$('meta[name="csrf-name"]').attr('content')] =
++                    $('meta[name="csrf-hash"]').attr('content');
++                csrfPayload.userkey = keys;
++                csrfPayload.reset = 1;
++
++                $.post(api_url, csrfPayload,
+                     function(data, textStatus, jqXHR) {
++                        // security.regenerate rotates the hash per request;
++                        // without this the second reset would be rejected.
++                        if (data && data.csrf) {
++                            $('meta[name="csrf-hash"]').attr('content', data.csrf);
++                        }
+                         if (textStatus == 'success') {
+                             if (data.registered) {
+                                 if (data.reset) {
+diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
+--- /tmp/orig_app/Views/Layout/Starter.php	2026-08-24 23:02:52.618152290 +0000
++++ app/Views/Layout/Starter.php	2026-08-24 23:11:32.794991069 +0000
+@@ -6,11 +6,23 @@
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+ 
+-    <!-- Bootstrap CSS -->
+-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-EVSTQN3/azprG1Anm3QDgpJLIm9Nao0Yz1ztcQTwFspd3yD65VohhpuuCOmLASjC" crossorigin="anonymous">
+-
+-    <link rel="preconnect" href="https://fonts.googleapis.com">
+-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
++    <!-- CSRF token for AJAX POSTs. CodeIgniter regenerates the hash each
++         request (security.regenerate = true), so any script doing a POST
++         must read it from here rather than caching it. -->
++    <meta name="csrf-name" content="<?= csrf_token() ?>">
++    <meta name="csrf-hash" content="<?= csrf_hash() ?>">
++
++    <!-- Self-hosted vendor assets. Previously four external origins
++         (jsdelivr, fonts.googleapis, code.jquery, cdnjs) meant four DNS
++         lookups and four TLS handshakes before first paint, and gave each
++         of them the IP of every visitor. -->
++    <link rel="preload" href="<?= base_url('assets/vendor/fonts/poppins-400.woff2') ?>" as="font" type="font/woff2" crossorigin>
++    <link rel="preload" href="<?= base_url('assets/vendor/fonts/poppins-600.woff2') ?>" as="font" type="font/woff2" crossorigin>
++
++    <link href="<?= base_url('assets/vendor/css/bootstrap.min.css') ?>" rel="stylesheet">
++    <link href="<?= base_url('assets/vendor/css/bootstrap-icons.min.css') ?>" rel="stylesheet">
++    <link href="<?= base_url('assets/vendor/css/sweetalert2.min.css') ?>" rel="stylesheet">
++    <link href="<?= base_url('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
+ 
+     <title><?= BASE_NAME ?> - <?= isset($title) ? $title : 'Panel' ?></title>
+     <?= $this->renderSection('css') ?>
+@@ -679,7 +691,7 @@
+         }
+     </style>
+ 
+-    <script src="https://code.jquery.com/jquery-3.6.0.js" integrity="sha256-H+K7U5CnXl1h5ywQfKtSj8PCmoN9aaq30gDh27Xc0jk=" crossorigin="anonymous"></script>
++    <script src="<?= base_url('assets/vendor/js/jquery.min.js') ?>"></script>
+ </head>
+ 
+ <body>
+@@ -701,8 +713,8 @@
+         </div>
+     </footer>
+ 
+-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-MrcW6ZMFYlzcLA8Nl+NtUVF0sA7MsXsP1UyJoMp4YLEuNSfAP+JcXn/tWtIaxVXM" crossorigin="anonymous"></script>
+-    <script src="https://cdnjs.cloudflare.com/ajax/libs/limonte-sweetalert2/11.1.0/sweetalert2.all.min.js" integrity="sha512-0UUEaq/z58JSHpPgPv8bvdhHFRswZzxJUT9y+Kld5janc9EWgGEVGfWV1hXvIvAJ8MmsR5d4XV9lsuA90xXqUQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
++    <script src="<?= base_url('assets/vendor/js/bootstrap.bundle.min.js') ?>" defer></script>
++    <script src="<?= base_url('assets/vendor/js/sweetalert2.min.js') ?>" defer></script>
+ 
+     <?= script_tag('assets/js/natacode.js') ?>
+ 
+diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
+--- /tmp/orig_app/Views/User/dashboard.php	2026-08-24 23:02:52.619981516 +0000
++++ app/Views/User/dashboard.php	2026-08-24 23:07:43.048116182 +0000
+@@ -58,7 +58,7 @@
+                     <li class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+                         Saldo
+                         <span class="badge text-danger">
+-                            $<?= $user->saldo ?>
++                            $<?= esc($user->saldo) ?>
+                         </span>
+                     </li>
+                 </ul>
+--- /tmp/orig_index.php	2026-08-24 23:02:52.630388750 +0000
++++ index.php	2026-08-24 23:05:21.374443161 +0000
+@@ -3,11 +3,6 @@
+ // Path to the front controller (this file)
+ define('FCPATH', __DIR__ . DIRECTORY_SEPARATOR);
+ 
+-// 🔴 جلوگیری از حملات LFI (جلوگیری از "../" و "/")
+-if (strpos($filename, '..') !== false || strpos($filename, '/') !== false) {
+-    die("Access Denied!");
+-}
+-
+ /*
+  *---------------------------------------------------------------
+  * BOOTSTRAP THE APPLICATION
+--- /tmp/orig_htaccess	2026-08-24 23:02:52.634921270 +0000
++++ .htaccess	2026-08-24 23:07:58.376885230 +0000
+@@ -24,8 +24,11 @@
+     RewriteEngine On
+     RewriteBase /
+ 
+-    # A) API & Data Exception (Highest Priority)
+-    RewriteRule ^.*zezr_connector.*$ - [L,NC]
++    # A) API & Data Exception
++    # Anchored to the real route. The old pattern matched the string
++    # anywhere in the URL and carried [L], so any path containing it
++    # skipped rules B-F below, including the injection filter.
++    RewriteRule ^data/zezr_connector/?$ - [L,NC]
+ 
+     # B) Block direct IP access (Ensures traffic comes through Cloudflare)
+     RewriteCond %{HTTP:CF-IPCountry} ^$
