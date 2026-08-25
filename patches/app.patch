@@ -4518,8 +4518,8 @@ diff -ruN /tmp/orig_app/Views/Admin/referral.php app/Views/Admin/referral.php
                              </tbody>
 diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
 --- /tmp/orig_app/Views/Admin/user_edit.php	2026-08-24 23:02:52.611222252 +0000
-+++ app/Views/Admin/user_edit.php	2026-08-24 23:07:43.047807182 +0000
-@@ -12,7 +12,7 @@
++++ app/Views/Admin/user_edit.php	2026-08-25 21:52:27.137347618 +0000
+@@ -12,18 +12,18 @@
              </div>
              <div class="card-body">
                  <?= form_open() ?>
@@ -4528,26 +4528,104 @@ diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
                  <div class="row">
                      <div class="col-md-6 mb-2">
                          <label for="username" class="form-label">Username</label>
+-                        <input type="text" name="username" id="username" class="form-control" placeholder="" aria-describedby="help-username" value="<?= old('username') ?: $target->username ?>">
++                        <input type="text" name="username" id="username" class="form-control" placeholder="" aria-describedby="help-username" value="<?= old('username') ?: esc($target->username, 'attr') ?>">
+                         <?php if ($validation->hasError('username')) : ?>
+                             <small id="help-username" class="form-text text-danger"><?= $validation->getError('username') ?></small>
+                         <?php endif; ?>
+                     </div>
+                     <div class="col-md-6 mb-2">
+                         <label for="fullname" class="form-label">Fullname</label>
+-                        <input type="text" name="fullname" id="fullname" class="form-control" placeholder="" aria-describedby="help-fullname" value="<?= old('fullname') ?: $target->fullname ?>">
++                        <input type="text" name="fullname" id="fullname" class="form-control" placeholder="" aria-describedby="help-fullname" value="<?= old('fullname') ?: esc($target->fullname, 'attr') ?>">
+                         <?php if ($validation->hasError('fullname')) : ?>
+                             <small id="help-fullname" class="form-text text-danger"><?= $validation->getError('fullname') ?></small>
+                         <?php endif; ?>
+@@ -40,14 +40,14 @@
+                     </div>
+                     <div class="col-md-6 mb-2">
+                         <label for="saldo" class="form-label">Saldo</label>
+-                        <input type="number" name="saldo" id="saldo" class="form-control" placeholder="" aria-describedby="help-saldo" value="<?= old('saldo') ?: $target->saldo ?>">
++                        <input type="number" name="saldo" id="saldo" class="form-control" placeholder="" aria-describedby="help-saldo" value="<?= old('saldo') ?: esc($target->saldo, 'attr') ?>">
+                         <?php if ($validation->hasError('saldo')) : ?>
+                             <small id="help-saldo" class="form-text text-danger"><?= $validation->getError('saldo') ?></small>
+                         <?php endif; ?>
+                     </div>
+                     <div class="col-md-6 mb-2">
+                         <label for="uplink" class="form-label">Uplink</label>
+-                        <input type="text" name="uplink" id="uplink" class="form-control" placeholder="" aria-describedby="help-uplink" value="<?= old('uplink') ?: $target->uplink ?>">
++                        <input type="text" name="uplink" id="uplink" class="form-control" placeholder="" aria-describedby="help-uplink" value="<?= old('uplink') ?: esc($target->uplink, 'attr') ?>">
+                         <?php if ($validation->hasError('uplink')) : ?>
+                             <small id="help-uplink" class="form-text text-danger"><?= $validation->getError('uplink') ?></small>
+                         <?php endif; ?>
 diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 --- /tmp/orig_app/Views/Admin/users.php	2026-08-24 23:02:52.611664182 +0000
-+++ app/Views/Admin/users.php	2026-08-24 23:32:17.535290659 +0000
-@@ -40,13 +40,13 @@
++++ app/Views/Admin/users.php	2026-08-25 21:53:26.934430148 +0000
+@@ -40,22 +40,60 @@
  <?= $this->endSection() ?>
  
  <?= $this->section('css') ?>
 -<?= link_tag("https://cdn.datatables.net/1.10.25/css/dataTables.bootstrap5.min.css") ?>
-+<?= link_tag("<?= base_url('assets/vendor/css/dataTables.bootstrap5.min.css') ?>") ?>
++<?= link_tag('assets/vendor/css/dataTables.bootstrap5.min.css') ?>
  <?= $this->endSection() ?>
  
  <?= $this->section('js') ?>
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/jquery.dataTables.min.js") ?>
-+<?= script_tag("<?= base_url('assets/vendor/js/jquery.dataTables.min.js') ?>") ?>
++<?= script_tag('assets/vendor/js/jquery.dataTables.min.js') ?>
  
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/dataTables.bootstrap5.min.js") ?>
-+<?= script_tag("<?= base_url('assets/vendor/js/dataTables.bootstrap5.min.js') ?>") ?>
++<?= script_tag('assets/vendor/js/dataTables.bootstrap5.min.js') ?>
  <script>
      $(document).ready(function() {
++        // ── Weak / high-latency connections ──────────────────────────
++        // A dropped request used to leave the table permanently empty with
++        // no way back except a manual reload. Retry twice with a widening
++        // gap, then say plainly what happened and offer a retry.
++        $.fn.dataTable.ext.errMode = 'none';
++
++        function dtAjax(url) {
++            return function (data, callback, settings) {
++                var tries = 0;
++                (function attempt() {
++                    $.ajax({
++                        url: url, data: data, type: 'GET', dataType: 'json',
++                        timeout: 20000,
++                        success: function (json) { callback(json); },
++                        error: function (xhr, status) {
++                            // A real server answer (403/500) will not improve
++                            // on retry; only network-level failures will.
++                            var worthRetry = (status === 'timeout' || xhr.status === 0);
++                            if (worthRetry && ++tries <= 2) {
++                                setTimeout(attempt, tries * 1500);
++                                return;
++                            }
++                            $('#dt-neterr').remove();
++                            $('#datatable').before(
++                                '<div id="dt-neterr" class="alert alert-warning d-flex align-items-center gap-2">' +
++                                '<i class="bi bi-exclamation-triangle-fill"></i>' +
++                                '<div>Could not load the list. Check your connection.</div>' +
++                                '<button class="btn btn-sm btn-outline-light ms-auto" ' +
++                                'onclick="$(\'#dt-neterr\').remove();$(\'#datatable\').DataTable().ajax.reload()">' +
++                                'Try again</button></div>'
++                            );
++                        }
++                    });
++                })();
++            };
++        }
++
          var table = $('#datatable').DataTable({
+             processing: true,
+             serverSide: true,
++            deferRender: true,
+             order: [
+                 [0, "desc"]
+             ],
+-            ajax: "<?= site_url('admin/api/users') ?>",
++            ajax: dtAjax("<?= site_url('admin/api/users') ?>"),
+             columns: [{
+                     data: 'id',
+                 },
 diff -ruN /tmp/orig_app/Views/Auth/login.php app/Views/Auth/login.php
 --- /tmp/orig_app/Views/Auth/login.php	2026-08-24 23:02:52.612791444 +0000
 +++ app/Views/Auth/login.php	2026-08-24 23:31:42.866400878 +0000
@@ -4599,8 +4677,8 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
          $("#max_devices, #duration, #game, #quantity").on('change keyup', function() {
 diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
 --- /tmp/orig_app/Views/Keys/key_edit.php	2026-08-24 23:02:52.615642502 +0000
-+++ app/Views/Keys/key_edit.php	2026-08-24 23:07:43.048753343 +0000
-@@ -32,7 +32,7 @@
++++ app/Views/Keys/key_edit.php	2026-08-25 21:52:42.727526281 +0000
+@@ -32,32 +32,32 @@
                  <?= form_open('keys/edit') ?>
  
                  <div class="row">
@@ -4609,7 +4687,51 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
                      <?php if ($user->level == 1) : ?>
                          <div class="col-lg-6 mb-3">
                              <label for="game" class="form-label">Games</label>
-@@ -86,7 +86,7 @@
+-                            <input type="text" name="game" id="game" class="form-control" placeholder="RandomKey" aria-describedby="help-game" value="<?= old('game') ?: $key->game ?>">
++                            <input type="text" name="game" id="game" class="form-control" placeholder="RandomKey" aria-describedby="help-game" value="<?= old('game') ?: esc($key->game, 'attr') ?>">
+                             <?php if ($validation->hasError('game')) : ?>
+                                 <small id="help-game" class="text-danger"><?= $validation->getError('game') ?></small>
+                             <?php endif; ?>
+                         </div>
+                         <div class="col-lg-6 mb-3">
+                             <label for="user_key" class="form-label">User Key</label>
+-                            <input type="text" name="user_key" id="user_key" class="form-control" placeholder="RandomKey" aria-describedby="help-user_key" value="<?= old('user_key') ?: $key->user_key ?>">
++                            <input type="text" name="user_key" id="user_key" class="form-control" placeholder="RandomKey" aria-describedby="help-user_key" value="<?= old('user_key') ?: esc($key->user_key, 'attr') ?>">
+                             <?php if ($validation->hasError('user_key')) : ?>
+                                 <small id="help-user_key" class="text-danger"><?= $validation->getError('user_key') ?></small>
+                             <?php endif; ?>
+                         </div>
+                         <div class="col-lg-6 mb-3">
+                             <label for="duration" class="form-label">Duration <small class="text-muted">(in hours)</small></label>
+-                            <input type="number" name="duration" id="duration" class="form-control" placeholder="3" aria-describedby="help-duration" value="<?= old('duration') ?: $key->duration ?>">
++                            <input type="number" name="duration" id="duration" class="form-control" placeholder="3" aria-describedby="help-duration" value="<?= old('duration') ?: esc($key->duration, 'attr') ?>">
+                             <?php if ($validation->hasError('duration')) : ?>
+                                 <small id="help-duration" class="text-danger"><?= $validation->getError('duration') ?></small>
+                             <?php endif; ?>
+                         </div>
+                         <div class="col-lg-6 mb-3">
+                             <label for="max_devices" class="form-label">Max Devices</label>
+-                            <input type="number" name="max_devices" id="max_devices" class="form-control" placeholder="3" aria-describedby="help-max_devices" value="<?= old('max_devices') ?: $key->max_devices ?>">
++                            <input type="number" name="max_devices" id="max_devices" class="form-control" placeholder="3" aria-describedby="help-max_devices" value="<?= old('max_devices') ?: esc($key->max_devices, 'attr') ?>">
+                             <?php if ($validation->hasError('max_devices')) : ?>
+                                 <small id="help-max_devices" class="text-danger"><?= $validation->getError('max_devices') ?></small>
+                             <?php endif; ?>
+@@ -73,20 +73,20 @@
+                     </div>
+                     <div class="col-md-6 mb-3">
+                         <label for="registrator" class="form-label">Registrator</label>
+-                        <input type="text" name="registrator" id="registrator" class="form-control" placeholder="nata" aria-describedby="help-registrator" value="<?= old('registrator') ?: $key->registrator ?>">
++                        <input type="text" name="registrator" id="registrator" class="form-control" placeholder="nata" aria-describedby="help-registrator" value="<?= old('registrator') ?: esc($key->registrator, 'attr') ?>">
+                         <?php if ($validation->hasError('registrator')) : ?>
+                             <small id="help-registrator" class="text-danger"><?= $validation->getError('registrator') ?></small>
+                         <?php endif; ?>
+                     </div>
+                     <div class="col-md-12 mb-3">
+                         <label for="expired_date" class="form-label">Expired <?= !$key->expired_date ? '(Not started yet)' : ''  ?></label>
+-                        <input type="text" name="expired_date" id="expired_date" class="form-control" placeholder="<?= $time::now() ?>" aria-describedby="help-expired_date" value="<?= old('expired_date') ?: $key->expired_date ?>">
++                        <input type="text" name="expired_date" id="expired_date" class="form-control" placeholder="<?= $time::now() ?>" aria-describedby="help-expired_date" value="<?= old('expired_date') ?: esc($key->expired_date, 'attr') ?>">
+                         <?php if ($validation->hasError('expired_date')) : ?>
+                             <small id="help-expired_date" class="text-danger"><?= $validation->getError('expired_date') ?></small>
                          <?php endif; ?>
                      </div>
                      <div class="col-lg-12 mb-3">
@@ -4636,26 +4758,78 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
          $("#devices").attr('rows', $(this).val());
 diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 --- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
-+++ app/Views/Keys/list.php	2026-08-24 23:32:17.536850473 +0000
-@@ -45,14 +45,14 @@
++++ app/Views/Keys/list.php	2026-08-25 21:53:26.934107285 +0000
+@@ -45,16 +45,53 @@
  <?= $this->endSection() ?>
  
  <?= $this->section('css') ?>
 -<?= link_tag("https://cdn.datatables.net/1.10.25/css/dataTables.bootstrap5.min.css") ?>
-+<?= link_tag("<?= base_url('assets/vendor/css/dataTables.bootstrap5.min.css') ?>") ?>
++<?= link_tag('assets/vendor/css/dataTables.bootstrap5.min.css') ?>
  
  <?= $this->endSection() ?>
  
  <?= $this->section('js') ?>
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/jquery.dataTables.min.js") ?>
-+<?= script_tag("<?= base_url('assets/vendor/js/jquery.dataTables.min.js') ?>") ?>
++<?= script_tag('assets/vendor/js/jquery.dataTables.min.js') ?>
  
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/dataTables.bootstrap5.min.js") ?>
-+<?= script_tag("<?= base_url('assets/vendor/js/dataTables.bootstrap5.min.js') ?>") ?>
++<?= script_tag('assets/vendor/js/dataTables.bootstrap5.min.js') ?>
  <script>
      $(document).ready(function() {
++        // ── Weak / high-latency connections ──────────────────────────
++        // A dropped request used to leave the table permanently empty with
++        // no way back except a manual reload. Retry twice with a widening
++        // gap, then say plainly what happened and offer a retry.
++        $.fn.dataTable.ext.errMode = 'none';
++
++        function dtAjax(url) {
++            return function (data, callback, settings) {
++                var tries = 0;
++                (function attempt() {
++                    $.ajax({
++                        url: url, data: data, type: 'GET', dataType: 'json',
++                        timeout: 20000,
++                        success: function (json) { callback(json); },
++                        error: function (xhr, status) {
++                            // A real server answer (403/500) will not improve
++                            // on retry; only network-level failures will.
++                            var worthRetry = (status === 'timeout' || xhr.status === 0);
++                            if (worthRetry && ++tries <= 2) {
++                                setTimeout(attempt, tries * 1500);
++                                return;
++                            }
++                            $('#dt-neterr').remove();
++                            $('#datatable').before(
++                                '<div id="dt-neterr" class="alert alert-warning d-flex align-items-center gap-2">' +
++                                '<i class="bi bi-exclamation-triangle-fill"></i>' +
++                                '<div>Could not load the list. Check your connection.</div>' +
++                                '<button class="btn btn-sm btn-outline-light ms-auto" ' +
++                                'onclick="$(\'#dt-neterr\').remove();$(\'#datatable\').DataTable().ajax.reload()">' +
++                                'Try again</button></div>'
++                            );
++                        }
++                    });
++                })();
++            };
++        }
++
          // ── تنها تنظیمِ صفحه‌بندی ──
-@@ -143,12 +143,19 @@
+         // این عدد = تعداد شماره‌صفحه‌ها (پیش‌فرض ۷). تعدادِ عددهای پشت‌سرهمِ اولِ لیست
+         // برابرِ (این عدد − ۲) ئه. پس ۵ ⇒ «۱ ۲ ۳ … ۳۴۶»، ۶ ⇒ «۱ ۲ ۳ ۴ … ۳۴۶» و…
+@@ -63,10 +100,11 @@
+         var table = $('#datatable').DataTable({
+             processing: true,
+             serverSide: true,
++            deferRender: true,
+             order: [
+                 [0, "desc"]
+             ],
+-            ajax: "<?= site_url('keys/api') ?>",
++            ajax: dtAjax("<?= site_url('keys/api') ?>"),
+             columns: [{
+                     data: 'id',
+                     name: 'id_keys'
+@@ -143,12 +181,19 @@
  
                  var base_url = window.location.origin;
                  var api_url = `${base_url}/keys/reset`;
@@ -4682,7 +4856,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
                                  if (data.reset) {
 diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
 --- /tmp/orig_app/Views/Layout/Starter.php	2026-08-24 23:02:52.618152290 +0000
-+++ app/Views/Layout/Starter.php	2026-08-24 23:11:32.794991069 +0000
++++ app/Views/Layout/Starter.php	2026-08-25 21:52:57.671686826 +0000
 @@ -6,11 +6,23 @@
      <meta charset="utf-8">
      <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -4712,21 +4886,26 @@ diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
  
      <title><?= BASE_NAME ?> - <?= isset($title) ? $title : 'Panel' ?></title>
      <?= $this->renderSection('css') ?>
-@@ -679,7 +691,7 @@
+@@ -679,7 +691,6 @@
          }
      </style>
  
 -    <script src="https://code.jquery.com/jquery-3.6.0.js" integrity="sha256-H+K7U5CnXl1h5ywQfKtSj8PCmoN9aaq30gDh27Xc0jk=" crossorigin="anonymous"></script>
-+    <script src="<?= base_url('assets/vendor/js/jquery.min.js') ?>"></script>
  </head>
  
  <body>
-@@ -701,8 +713,8 @@
+@@ -701,8 +712,14 @@
          </div>
      </footer>
  
 -    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-MrcW6ZMFYlzcLA8Nl+NtUVF0sA7MsXsP1UyJoMp4YLEuNSfAP+JcXn/tWtIaxVXM" crossorigin="anonymous"></script>
 -    <script src="https://cdnjs.cloudflare.com/ajax/libs/limonte-sweetalert2/11.1.0/sweetalert2.all.min.js" integrity="sha512-0UUEaq/z58JSHpPgPv8bvdhHFRswZzxJUT9y+Kld5janc9EWgGEVGfWV1hXvIvAJ8MmsR5d4XV9lsuA90xXqUQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
++    <!-- jQuery sits here, not in <head>: it used to block first paint.
++         It cannot carry defer, because natacode.js and each view's
++         section('js') call $ while the document is still parsing. At the
++         top of the footer the page has already painted. -->
++    <script src="<?= base_url('assets/vendor/js/jquery.min.js') ?>"></script>
++
 +    <script src="<?= base_url('assets/vendor/js/bootstrap.bundle.min.js') ?>" defer></script>
 +    <script src="<?= base_url('assets/vendor/js/sweetalert2.min.js') ?>" defer></script>
  
@@ -4772,7 +4951,7 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
   *---------------------------------------------------------------
   * BOOTSTRAP THE APPLICATION
 --- /tmp/orig_htaccess	2026-08-24 23:02:52.634921270 +0000
-+++ .htaccess	2026-08-24 23:31:11.817091967 +0000
++++ .htaccess	2026-08-25 21:55:39.361556776 +0000
 @@ -1,5 +1,20 @@
 -# 1. HARDEN SECURITY HEADERS
 -# Provides protection against XSS, Framing, and Content-Sniffing
@@ -4796,7 +4975,7 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
  <IfModule mod_headers.c>
      Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
      Header always set X-Frame-Options "SAMEORIGIN"
-@@ -10,67 +25,189 @@
+@@ -10,67 +25,197 @@
      Header always set Content-Security-Policy "default-src 'self' https: data:; script-src 'self' https: data: 'unsafe-inline'; style-src 'self' https: 'unsafe-inline'; font-src 'self' https: data:; img-src 'self' https: data:; connect-src 'self' https:; frame-ancestors 'self';"
      Header always unset X-Powered-By
      Header unset X-Powered-By
@@ -4871,6 +5050,14 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
 +    RewriteRule \.(css|js)$ %{REQUEST_URI}.gz [L]
 +</IfModule>
 +<IfModule mod_headers.c>
++    # Vary is mandatory whenever the response body depends on a request
++    # header. Without it a shared proxy can cache the brotli copy and hand
++    # it to a client that cannot decode it - the page arrives as garbage.
++    # Iranian ISPs run transparent proxies, so this is not theoretical.
++    <FilesMatch "\.(css|js)(\.br|\.gz)?$">
++        Header append Vary Accept-Encoding
++    </FilesMatch>
++
 +    <FilesMatch "\.css\.br$">
 +        Header set Content-Encoding br
 +        Header set Content-Type "text/css"
@@ -5008,7 +5195,7 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
  <RequireAny>
      Require ip 103.21.244.0/22
      Require ip 103.22.200.0/22
-@@ -95,3 +232,8 @@
+@@ -95,3 +240,8 @@
      Require ip 2a06:98c0::/29
      Require ip 2c0f:f248::/32
  </RequireAny>
