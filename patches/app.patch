@@ -4951,7 +4951,7 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
   *---------------------------------------------------------------
   * BOOTSTRAP THE APPLICATION
 --- /tmp/orig_htaccess	2026-08-24 23:02:52.634921270 +0000
-+++ .htaccess	2026-08-25 21:55:39.361556776 +0000
++++ .htaccess	2026-08-26 01:19:44.534230279 +0000
 @@ -1,5 +1,20 @@
 -# 1. HARDEN SECURITY HEADERS
 -# Provides protection against XSS, Framing, and Content-Sniffing
@@ -4975,7 +4975,7 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
  <IfModule mod_headers.c>
      Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
      Header always set X-Frame-Options "SAMEORIGIN"
-@@ -10,67 +25,197 @@
+@@ -10,67 +25,221 @@
      Header always set Content-Security-Policy "default-src 'self' https: data:; script-src 'self' https: data: 'unsafe-inline'; style-src 'self' https: 'unsafe-inline'; font-src 'self' https: data:; img-src 'self' https: data:; connect-src 'self' https:; frame-ancestors 'self';"
      Header always unset X-Powered-By
      Header unset X-Powered-By
@@ -4993,15 +4993,30 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
 +
 +# ---------------------------------------------------------------------
 +# 2. COMPRESSION — both modes
-+#    In MODE A Cloudflare also compresses, but the origin->edge hop
-+#    still benefits. In MODE B this is the single biggest speed win:
-+#    Bootstrap CSS drops from ~227 KB to ~31 KB on the wire.
++#
++#    YOUR SERVER IS LITESPEED, not Apache (confirmed from the live
++#    response header x-turbo-charged-by: LiteSpeed on Hostinger/hPanel).
++#
++#    LiteSpeed reads .htaccess, but it does NOT report Apache's module
++#    names, so the two <IfModule> blocks below are very likely SKIPPED on
++#    your host. They are kept because they cost nothing and make the file
++#    correct if you ever move to real Apache.
++#
++#    What actually compresses your responses today:
++#      MODE A - Cloudflare compresses at the edge (verified: the live
++#               site returns content-encoding: br).
++#      MODE B - LiteSpeed's own compression, switched on in hPanel, not
++#               here. hPanel -> Website -> Optimization.
++#
++#    Section 3's pre-compressed .br/.gz serving does NOT depend on any
++#    IfModule - it uses mod_rewrite and mod_headers, both of which
++#    LiteSpeed fully supports. That is the part that carries the weight.
 +# ---------------------------------------------------------------------
 +<IfModule mod_brotli.c>
 +    AddOutputFilterByType BROTLI_COMPRESS text/html text/plain text/xml text/css text/javascript
 +    AddOutputFilterByType BROTLI_COMPRESS application/javascript application/json application/xml
 +    AddOutputFilterByType BROTLI_COMPRESS image/svg+xml
-+</IfModule>
+ </IfModule>
 +<IfModule mod_deflate.c>
 +    AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css text/javascript
 +    AddOutputFilterByType DEFLATE application/javascript application/json application/xml
@@ -5010,7 +5025,9 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
 +    SetEnvIfNoCase Request_URI \.(?:woff2?|png|jpe?g|gif|webp|avif|ico|zip|gz)$ no-gzip dont-vary
 +</IfModule>
 +
-+
+ 
+-# 2. BASIC SERVER HARDENING
+-# Disable directory browsing and server signature
 +# ---------------------------------------------------------------------
 +# 3. STATIC ASSET CACHING — both modes
 +#    Files under /assets/vendor/ never change without a filename change,
@@ -5074,10 +5091,8 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
 +        Header set Content-Encoding gzip
 +        Header set Content-Type "application/javascript"
 +    </FilesMatch>
- </IfModule>
- 
--# 2. BASIC SERVER HARDENING
--# Disable directory browsing and server signature
++</IfModule>
++
 +
 +# ---------------------------------------------------------------------
 +# 4. SERVER HARDENING — both modes
@@ -5164,20 +5179,29 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
 +# ---------------------------------------------------------------------
 +# 6. SENSITIVE FILES — both modes
 +# ---------------------------------------------------------------------
-+<FilesMatch "^(\.env.*|\.git.*|passwd|shadow|.*\.log|.*\.sql|composer\..*|package.*\.json|.*\.sh|.*\.py|.*\.bak|.*\.old.*|config|.*\.ini|.*\.swp|.*\.dist|.*\.exe|.*\.md)$">
++<FilesMatch "^(\.env.*|\.git.*|passwd|shadow|.*\.log|.*\.sql|composer\..*|package.*\.json|.*\.sh|.*\.py|.*\.bak|.*\.old.*|config|.*\.ini|.*\.swp|.*\.dist|.*\.exe|.*\.md|.*\.lock|.*\.yml|.*\.yaml)$">
      Require all denied
  </FilesMatch>
  
 -# Block access to framework core folders
 -RewriteRule ^(system|app|tests|writable|vendor) - [F,L]
++# Any file with NO extension. Verified on the live site: /spark returned
++# its PHP source as plain text, and /LICENSE and /builds were served too,
++# because a blacklist only blocks the patterns someone remembered to add.
++# This closes the whole class instead. index.php keeps its extension, so
++# the front controller is unaffected.
++<FilesMatch "^[^.]+$">
++    Require all denied
++</FilesMatch>
+ 
+-# 5. DOS PROTECTION & IP WHITELISTING
+-# Limit request body size to 2MB to prevent large upload attacks
 +# Framework internals are never served directly.
 +<IfModule mod_rewrite.c>
 +    RewriteRule ^(system|app|tests|writable|vendor|tools)/ - [F,L]
 +</IfModule>
 +
- 
--# 5. DOS PROTECTION & IP WHITELISTING
--# Limit request body size to 2MB to prevent large upload attacks
++
 +# ---------------------------------------------------------------------
 +# 7. REQUEST SIZE — both modes
 +# ---------------------------------------------------------------------
@@ -5195,7 +5219,7 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
  <RequireAny>
      Require ip 103.21.244.0/22
      Require ip 103.22.200.0/22
-@@ -95,3 +240,8 @@
+@@ -95,3 +264,8 @@
      Require ip 2a06:98c0::/29
      Require ip 2c0f:f248::/32
  </RequireAny>
