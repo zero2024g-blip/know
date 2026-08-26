@@ -3874,6 +3874,43 @@ diff -ruN /tmp/orig_app/BACKUP/Views/welcome_message.php app/BACKUP/Views/welcom
 -
 -</body>
 -</html>
+diff -ruN /tmp/orig_app/Config/Boot/development.php app/Config/Boot/development.php
+--- /tmp/orig_app/Config/Boot/development.php	2026-08-24 23:02:52.512733447 +0000
++++ app/Config/Boot/development.php	2026-08-26 13:19:40.910060107 +0000
+@@ -8,7 +8,12 @@
+  | make sure they don't make it to production. And save us hours of
+  | painful debugging.
+  */
+-error_reporting(-1);
++// Not -1. CodeIgniter 4.1.5 raises PHP 8.1+ deprecations during a normal
++// request, and this framework's error handler promotes any reported
++// deprecation into an ErrorException — so with -1 every page in development
++// dies with a 500 before it renders. Everything except deprecations is still
++// reported, which is what development mode is actually for.
++error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
+ ini_set('display_errors', '0');
+ 
+ /*
+diff -ruN /tmp/orig_app/Config/Boot/production.php app/Config/Boot/production.php
+--- /tmp/orig_app/Config/Boot/production.php	2026-08-24 23:02:52.513127957 +0000
++++ app/Config/Boot/production.php	2026-08-26 13:19:40.909861632 +0000
+@@ -8,7 +8,15 @@
+  | it and display a generic error message.
+  */
+ ini_set('display_errors', '0');
+-error_reporting(E_ALL & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT & ~E_USER_NOTICE & ~E_USER_DEPRECATED);
++// E_STRICT is gone: PHP 8.0 reclassified every notice that used it, and 8.4
++// deprecated the constant itself. Naming it here emitted a deprecation on
++// every single request. There is no longer an E_STRICT level to mask.
++//
++// E_DEPRECATED stays masked on purpose. CodeIgniter 4.1.5 predates PHP 8.1's
++// "passing null to a non-nullable parameter" deprecation and trips it in
++// normal operation (Validation\FormatRules::valid_ip is one). Masking keeps
++// production quiet; it does not hide errors that matter.
++error_reporting(E_ALL & ~E_NOTICE & ~E_DEPRECATED & ~E_USER_NOTICE & ~E_USER_DEPRECATED);
+ 
+ /*
+  |--------------------------------------------------------------------------
 diff -ruN /tmp/orig_app/Config/Encryption.php app/Config/Encryption.php
 --- /tmp/orig_app/Config/Encryption.php	2026-08-24 23:02:52.517438475 +0000
 +++ app/Config/Encryption.php	2026-08-26 08:19:10.081993636 +0000

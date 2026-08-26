@@ -3,34 +3,68 @@
 ## 1. Back up first
 Keep your current copy. Every change here is reversible by restoring it.
 
-## 1b. PHP version — read this before anything else
+## 1b. PHP version — 8.5 now works
 
-**Run PHP 8.3. Not 8.4, not 8.5, and not 7.4 either.**
+**This build runs on PHP 8.5. It also still runs on 8.3 and 8.4.**
+Do not go back to 7.4: it has had no security patches since November 2022.
 
-This is not a preference, it is a hard incompatibility, and I reproduced it
-against your own code:
+Verified on PHP 8.5.9 against a real MariaDB, with the whole panel exercised:
 
-    PHP 8.4 : POST /login -> 500
-              Fatal error: Declaration of CodeIgniter\I18n\Time::createFromTimestamp(...)
-              must be compatible with DateTime::createFromTimestamp(int|float $timestamp)
-    PHP 8.3 : login OK, /dashboard OK, /keys OK, /admin/manage-users OK, zero errors
+    login .................. OK      generate keys ......... OK  (balance debited correctly)
+    dashboard .............. OK      register + referral ... OK  (second use refused)
+    keys / generate ........ OK      reset devices ......... OK  (CSRF rotation intact)
+    manage-users ........... OK      keys DataTables API ... OK  (5 rows of 14)
+    create-referral ........ OK
+    check / settings ....... OK      warnings/deprecations/fatals: 0
 
-PHP 8.4 added a native `DateTime::createFromTimestamp()`. CodeIgniter 4.1.5
-(what this project ships, released Sept 2021) declares its own method of the
-same name with a different signature on a class that extends `DateTime`. PHP
-refuses to load the class at all — and production mode cannot hide a fatal.
+### What was broken
 
-That is exactly the "some things crash" you saw: only the pages that touch
-`Time` die. Login is one of them, which is why it looked random.
+One method. PHP 8.4 added a native `DateTime::createFromTimestamp(int|float): static`.
+CodeIgniter 4.1.5's `Time` extends `DateTime` and declared the same method with a
+narrower `int` parameter and no return type. PHP rejects that as an incompatible
+override and raises a **fatal error while loading the class** — so every request
+touching `Time` died, login included. A fatal cannot be masked by production mode,
+which is why it looked like "some things crash at random".
 
-7.4 is the other end of the problem: it has had no security patches since
-November 2022. 8.3 is supported and is the newest version this framework
-version can run.
+Two changes fix it:
 
-To actually reach 8.4/8.5 the framework has to be upgraded — 4.7.4 is current
-and requires PHP ^8.2. That is a real migration (config layout, Time, model
-events all changed between 4.1 and 4.7), not a version bump. Worth planning;
-not worth doing in a hurry.
+1. `vendor/codeigniter4/framework/system/I18n/Time.php` — the parameter is widened
+   to `float|int` and the return type declared. This is exactly the signature
+   upstream ships in 4.7. Every existing caller passes an int, so behaviour is
+   unchanged.
+2. `app/Config/Boot/production.php` — stopped naming `E_STRICT`. PHP 8.0 removed
+   that error level and 8.4 deprecated the constant, so referencing it emitted a
+   deprecation on *every request*. `development.php` also no longer uses
+   `error_reporting(-1)`: CI 4.1.5 raises PHP 8.1+ deprecations during normal
+   work and this framework promotes any reported deprecation to an exception, so
+   `-1` made every page in development mode return 500 before rendering.
+
+### Important: the vendor edit is not permanent
+
+`composer update` restores `vendor/` from the package and drops change 1. If you
+ever run it, re-apply with:
+
+    php tools/patch-php85.php
+
+The script is idempotent (safe to run twice), verifies the file still compiles
+afterwards and reverts itself if not, and **refuses to touch a Time.php it does
+not recognise** — so if you later upgrade the framework it tells you instead of
+corrupting anything.
+
+### The real fix, when you have time
+
+Upgrading to CodeIgniter 4.7.4 (current, requires PHP ^8.2) removes the need for
+the patch. I tried it: `composer require codeigniter4/framework:^4.7` resolves
+cleanly and `hermawan/codeigniter4-datatables` moves to 0.5.4, but the app does
+not boot afterwards —
+
+    Error: Only arrays and Traversables can be unpacked, null given
+    Autoloader.php:140  (Config\Autoload::$helpers does not exist)
+
+— because every class in `app/Config/` is still the 4.1 layout. 4.7 expects new
+properties and has moved session, security and cookie settings into their own
+config classes; `Time` also became immutable. That is a migration to plan and
+test, not a version bump to rush. The patch above is a correct stopgap until then.
 
 ## 2. Delete these — they are removed, not replaced
     app/BACKUP/                  # stale view copies, still held the old secret
@@ -114,6 +148,8 @@ box until you rebuild it.
   sideways scrolling, and each key must show its expiry underneath it.
 - Reset a key's devices. The "Please wait…" toast must appear — if it does
   not, `Toast` is undefined and the script order regressed.
+- After switching PHP version in hPanel, sign in once. If login 500s, the
+  `Time` patch is missing — run `php tools/patch-php85.php`.
 
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
