@@ -78,6 +78,37 @@ public_html folder."* Two reasons to do as it asks: it names your hosting
 provider to anyone who requests it, and if your DirectoryIndex order ever
 changes, visitors get "site not yet uploaded" instead of your panel.
 
+## 2b. Your existing database — run MIGRATION.sql first
+
+**Your old database works with this build.** The four business tables
+(`users`, `keys_code`, `referral_code`, `history`) are untouched: no column
+added, renamed or dropped. But two things must be done before you go live,
+and `MIGRATION.sql` in the zip does both. Back up first.
+
+    mysqldump -u USER -p DBNAME > backup-before-migration.sql
+    mysql     -u USER -p DBNAME < MIGRATION.sql
+
+**Why it matters — I tested this against a database built the old way:**
+
+*Two tables are missing.* `auth_ratelimit` and `check_ratelimit` are new.
+Without them the panel **still runs perfectly**, which is the trap: every
+rate-limit query fails, the failure is caught so pages keep working, and
+there is no brute-force limit at all. Measured on an unmigrated database:
+**0 of 8 wrong passwords were blocked.** After the migration the 6th attempt
+is blocked, as intended. The code now also logs this at `critical`, so if it
+ever happens again you will find "Rate limiter unavailable" in
+`writable/logs/`.
+
+*Every old referral code is spendable again.* The old code called
+`useReferral($code)` without a username, so the guard inside never ran and
+`used_by` was never written — every referral row in your database reads as
+unused, whether or not somebody registered with it. The new code honours
+`used_by`, so on deploy day every code you have ever issued becomes valid
+again. I reproduced this: an already-used code created a fresh account and
+credited it $50. Nothing in the data distinguishes used from unused codes,
+so step 2 of the migration closes all of them. Issue new ones from the admin
+panel for anyone still waiting.
+
 ## 3. Upload the zip over your install
 Paths inside the zip mirror your project root. `public/assets/vendor/`
 is new — 912 KB of self-hosted Bootstrap, Bootstrap Icons, jQuery,
@@ -150,6 +181,43 @@ box until you rebuild it.
   not, `Toast` is undefined and the script order regressed.
 - After switching PHP version in hPanel, sign in once. If login 500s, the
   `Time` patch is missing — run `php tools/patch-php85.php`.
+- Get your password wrong six times. The sixth attempt must tell you to
+  wait. If it does not, `MIGRATION.sql` has not been run — check
+  `writable/logs/` for "Rate limiter unavailable".
+- Open Generate and change the duration. The Estimation box must fill in
+  with a figure. It was permanently blank before (see below).
+- On a phone, tap the username field on the login page. The page must not
+  zoom in.
+
+## Cross-platform check
+
+Every page was loaded on twelve device profiles — iPhone SE / 14 Pro / 14 Pro
+Max, iPad Mini, iPad Pro landscape, Galaxy S8, Pixel 7, Galaxy Tab, a 1366
+laptop, a 1920 desktop, MacBook Air 13 and MacBook Pro 16 — checking for
+sideways scrolling, tap targets under 44px, text under 11px and JavaScript
+errors. All twelve are clean. What that turned up and fixed:
+
+- **iOS zoomed the page when you tapped a login field.** Mobile Safari does
+  that whenever a focused input is under 16px; these were 15.2px. Touch
+  devices now get 16px inputs, desktop keeps the smaller ones.
+- **Tap targets were 32–38px** (dismiss button, pagination, DataTables search
+  and length, settings buttons, the two icon buttons on each key row). All
+  are 44px or larger on touch now. The icon buttons had a hit area grown by a
+  pseudo-element, but neighbouring buttons overlapped and ate each other's
+  edges — measured 39×41px. Now 45×45px.
+- **Labels at 10.56px** — the mono column headers and stat labels — are 11px,
+  and 11.5px on small screens.
+- **`100vh`** is joined by `100dvh`, which is the height iOS actually shows.
+- Grey tap-flash removed, notch insets honoured, momentum scrolling kept.
+
+One limit worth stating plainly: **WebKit and Firefox could not be installed
+in my environment**, so the above ran on Chromium — real for Android Chrome,
+Windows Chrome/Edge and Mac Chrome, and a good proxy for layout elsewhere,
+but not a substitute for opening Safari yourself. I audited the CSS against
+Safari's known gaps instead: `backdrop-filter` already carries its `-webkit-`
+prefix, `scrollbar-width` has a `::-webkit-scrollbar` fallback, and `:has()`
+(Safari 15.4+) is used only for a SweetAlert backdrop that degrades quietly.
+`gap` and `inset` need iOS 14.5+, which is the effective floor for this build.
 
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
@@ -160,5 +228,10 @@ box until you rebuild it.
       SELECT id_users, username FROM users WHERE password LIKE '$2y$08$%';
 
   then force a reset on those, and delete `create_password()`.
+- **The duration dropdown says "$test".** `Controllers/Keys.php` line 30
+  reads `1 => '1 Hours &mdash; $test/Device'` while the price table prices
+  that tier at 0. Your sellers see the word "test" in the menu. It is your
+  pricing copy, so I left it alone — change it to `$0` or drop the 1-hour
+  tier, whichever you meant.
 - **Connect.php** was empty in the archive. It is exempt from CSRF *and*
   auth, so it is the most exposed route in the app and still unreviewed.

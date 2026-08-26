@@ -3925,6 +3925,22 @@ diff -ruN /tmp/orig_app/Config/Encryption.php app/Config/Encryption.php
  
  	/**
  	 * --------------------------------------------------------------------------
+diff -ruN /tmp/orig_app/Config/Logger.php app/Config/Logger.php
+--- /tmp/orig_app/Config/Logger.php	2026-08-24 23:02:52.521567451 +0000
++++ app/Config/Logger.php	2026-08-26 13:41:01.609942698 +0000
+@@ -122,7 +122,11 @@
+ 			 * By default, logs are written to WRITEPATH . 'logs/'
+ 			 * Specify a different destination here, if desired.
+ 			 */
+-			'path'            => 'my_log/',
++			// Empty means WRITEPATH . 'logs/'. It used to say 'my_log/', a
++			// relative path resolved against the current working directory
++			// (public/), where no such folder exists - so every write failed
++			// silently and the panel had no error log at all.
++			'path'            => '',
+ 		],
+ 
+ 		/**
 diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 --- /tmp/orig_app/Config/Routes.php	2026-08-24 23:02:52.524373647 +0000
 +++ app/Config/Routes.php	2026-08-24 23:04:47.407781185 +0000
@@ -3939,7 +3955,7 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
  });
 diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 --- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
-+++ app/Controllers/Auth.php	2026-08-26 08:44:06.189279572 +0000
++++ app/Controllers/Auth.php	2026-08-26 13:41:10.466818656 +0000
 @@ -189,15 +189,44 @@
              'saldo'    => $rCheck->set_saldo ?: 0,
              'uplink'   => $rCheck->created_by,
@@ -3990,7 +4006,51 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      }
  
      private function registerFail(string $ipHash, string $reason)
-@@ -311,9 +340,4 @@
+@@ -241,6 +270,7 @@
+                 return (int) $row['blocked_until'] - $now;
+             }
+         } catch (\Throwable $e) {
++            $this->rateLimiterBroken($e);
+         }
+         return 0;
+     }
+@@ -279,6 +309,7 @@
+             }
+             return $remaining;
+         } catch (\Throwable $e) {
++            $this->rateLimiterBroken($e);
+             return 0;
+         }
+     }
+@@ -289,9 +320,27 @@
+         try {
+             db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete();
+         } catch (\Throwable $e) {
++            $this->rateLimiterBroken($e);
+         }
+     }
+ 
++    /**
++     * A rate-limit query failed.
++     *
++     * It must not take the page down — a login form that 500s because a
++     * counter table is missing is worse than one without a counter. But it
++     * must not pass silently either: if `auth_ratelimit` was never created,
++     * every call fails and brute-force protection is simply absent while the
++     * panel looks perfectly healthy. Logging at critical makes a missing
++     * migration visible instead.
++     */
++    private function rateLimiterBroken(\Throwable $e): void
++    {
++        log_message('critical', 'Rate limiter unavailable (' . self::RL_TABLE
++            . '): {msg}. Brute-force protection is NOT active. Run the migration '
++            . 'in DEPLOY.md.', ['msg' => $e->getMessage()]);
++    }
++
+     /** Human-friendly "try again in X" message. */
+     private function waitMessage(int $seconds): string
+     {
+@@ -311,9 +360,4 @@
      /**
       * Real client IP (Cloudflare header first — the site is behind Cloudflare).
       */
@@ -4097,8 +4157,24 @@ diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseContr
  }
 diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
 --- /tmp/orig_app/Controllers/KeyCheck.php	2026-08-24 23:02:52.530359402 +0000
-+++ app/Controllers/KeyCheck.php	2026-08-26 08:12:09.389130517 +0000
-@@ -178,13 +178,9 @@
++++ app/Controllers/KeyCheck.php	2026-08-26 13:36:09.327125375 +0000
+@@ -90,7 +90,14 @@
+                     }
+                 }
+             } catch (\Throwable $e) {
+-                $db = null; // fail open if the DB/table isn't reachable
++                // Fail open: a key check must still answer if the counter
++                // table is unreachable. Logged at critical because when this
++                // fires the key-enumeration limit is gone and nothing else
++                // would show it.
++                $db = null;
++                log_message('critical', 'Key-check rate limiter unavailable ('
++                    . self::TABLE . '): {msg}. Enumeration protection is NOT active. '
++                    . 'Run the migration in DEPLOY.md.', ['msg' => $e->getMessage()]);
+             }
+ 
+             if ($state['blocked_until'] > $now) {
+@@ -178,13 +185,9 @@
          return 'Too many attempts. Please try again in ' . $seconds . ' seconds.';
      }
  
@@ -4119,7 +4195,7 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-26 07:51:43.785591136 +0000
++++ app/Controllers/Keys.php	2026-08-26 13:48:44.279657014 +0000
 @@ -64,16 +64,18 @@
          $model = $this->model;
          $user = $this->user;
@@ -4220,7 +4296,19 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function edit_key($key = false)
-@@ -293,7 +312,11 @@
+@@ -279,7 +298,10 @@
+             'time' => $this->time,
+             'game' => $this->game_list,
+             'duration' => $user->level == 1 ? $this->duration_admin : $this->duration_seller,
+-            'price' => json_encode($this->price),
++            // The array itself. The view encodes it for a <script> context;
++            // encoding here produced a string that the view then had to
++            // escape again, which is what broke the estimate.
++            'price' => $this->price,
+             'messages' => $message,
+             'validation' => $validation,
+         ];
+@@ -293,7 +315,11 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -4233,7 +4321,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  
          $game_list = implode(",", array_keys($this->game_list));
          $form_rules = [
-@@ -306,15 +329,18 @@
+@@ -306,15 +332,18 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -4254,7 +4342,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +348,9 @@
+@@ -322,7 +351,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -4265,7 +4353,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +359,99 @@
+@@ -331,57 +362,99 @@
          ];
  
          $validation = Services::validation();
@@ -4889,8 +4977,8 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +}
 diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
 --- /tmp/orig_app/Models/CodeModel.php	2026-08-24 23:02:52.605921932 +0000
-+++ app/Models/CodeModel.php	2026-08-26 08:10:47.406331196 +0000
-@@ -18,14 +18,35 @@
++++ app/Models/CodeModel.php	2026-08-26 13:35:23.632960449 +0000
+@@ -18,14 +18,46 @@
          return $this->get()->getResultObject();
      }
  
@@ -4921,10 +5009,21 @@ diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
          }
 -        return false;
 +
++        // Claim the row and check it was this call that claimed it. Two
++        // registrations racing for the same code both reach here; only the
++        // one whose UPDATE matched a still-unclaimed row gets affectedRows 1.
++        //
++        // NULL *or* empty counts as unclaimed: whether the column is
++        // nullable depends on how the table was created, and a NOT NULL
++        // DEFAULT '' column would make a plain IS NULL test match nothing,
++        // which would reject every registration.
 +        $db = \Config\Database::connect();
 +        $db->table($this->table)
 +           ->where('id_reff', $row->id_reff)
-+           ->where('used_by', null)
++           ->groupStart()
++               ->where('used_by', null)
++               ->orWhere('used_by', '')
++           ->groupEnd()
 +           ->update(['used_by' => $username]);
 +
 +        return $db->affectedRows() === 1;
@@ -5362,7 +5461,7 @@ diff -ruN /tmp/orig_app/Views/Auth/register.php app/Views/Auth/register.php
      :root {
 diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 --- /tmp/orig_app/Views/Keys/generate.php	2026-08-24 23:02:52.614808324 +0000
-+++ app/Views/Keys/generate.php	2026-08-26 08:58:28.557034408 +0000
++++ app/Views/Keys/generate.php	2026-08-26 13:48:58.675668135 +0000
 @@ -3,6 +3,21 @@
  <?= $this->section('content') ?>
  <div class="row justify-content-center">
@@ -5422,15 +5521,57 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                      </button>
                  </div>
                  <?= form_close() ?>
-@@ -183,7 +193,7 @@
+@@ -183,7 +193,15 @@
  <?= $this->section('js') ?>
  <script>
      $(document).ready(function() {
 -        var price = JSON.parse('<?= $price ?>');
-+        var price = JSON.parse('<?= esc($price) ?>');
++        // A JS object literal, not a string to parse. esc() here HTML-encoded
++        // the quotes, so JSON.parse received {&quot;1&quot;:0} and threw on
++        // every load - which killed this whole handler and left the estimate
++        // permanently blank. The HEX flags escape < > & ' " as \uXXXX, so the
++        // value cannot terminate the script tag either.
++        var price = <?= json_encode(
++            $price,
++            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
++        ) ?>;
          getPrice(price);
          // When selected
          $("#max_devices, #duration, #game, #quantity").on('change keyup', function() {
+@@ -191,17 +209,23 @@
+         });
+         // try to get price
+         function getPrice(price) {
+-            var price = price;
+-            var device = $("#max_devices").val();
+-            var durate = $("#duration").val();
+-            var quantity = parseInt($("#quantity").val()) || 1;
+-            var gprice = price[durate];
+-            if (gprice != NaN) {
+-                var result = (device * gprice * quantity);
+-                $("#estimation").val(result);
+-            } else {
+-                $("#estimation").val('Estimation error');
++            var device   = parseInt($("#max_devices").val(), 10);
++            var durate   = $("#duration").val();
++            var quantity = parseInt($("#quantity").val(), 10);
++            var gprice   = price[durate];
++
++            // `gprice != NaN` was always true - NaN is not equal to anything,
++            // itself included - so the error branch never ran and an unknown
++            // duration quietly put the string "NaN" in the box. Test the
++            // inputs instead of comparing against NaN.
++            if (gprice === undefined || !isFinite(device) || !isFinite(quantity)
++                || device < 1 || quantity < 1) {
++                $("#estimation").val('');
++                return;
+             }
++
++            var total = device * gprice * quantity;
++            $("#estimation").val('$' + total.toFixed(2));
+         }
+     });
+ 
 diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
 --- /tmp/orig_app/Views/Keys/key_edit.php	2026-08-24 23:02:52.615642502 +0000
 +++ app/Views/Keys/key_edit.php	2026-08-25 21:52:42.727526281 +0000
