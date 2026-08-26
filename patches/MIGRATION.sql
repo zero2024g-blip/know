@@ -15,7 +15,7 @@
 
 
 -- ---------------------------------------------------------------------
--- 1. Two new tables: the rate limiters
+-- 1. Three new tables: the rate limiters
 -- ---------------------------------------------------------------------
 -- These did not exist before. WITHOUT THEM THE PANEL STILL RUNS, and
 -- that is the danger: every rate-limit query fails, the failure is
@@ -23,8 +23,9 @@
 -- at all while looking perfectly healthy. The code now logs this at
 -- 'critical', but creating the tables is the actual fix.
 --
---   auth_ratelimit  - failed logins and registrations, per IP
---   check_ratelimit - failed public key checks, per IP
+--   auth_ratelimit    - failed logins and registrations, per IP
+--   check_ratelimit   - failed public key checks, per IP
+--   connect_ratelimit - failed lookups from the app connector, per IP
 --
 -- Only a hash of the IP is stored, never the address itself.
 
@@ -44,6 +45,20 @@ CREATE TABLE IF NOT EXISTS `check_ratelimit` (
   `blocked_until` INT NOT NULL DEFAULT 0,
   PRIMARY KEY (`ip_hash`),
   KEY `idx_check_rl_stale` (`blocked_until`, `window_end`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- The connector's own limiter. Same shape, separate table on purpose: a
+-- burst of bad key lookups from one app must not lock the panel's login
+-- out for everyone behind the same carrier NAT, and the two want very
+-- different thresholds.
+
+CREATE TABLE IF NOT EXISTS `connect_ratelimit` (
+  `ip_hash`       CHAR(32) NOT NULL,
+  `fails`         INT NOT NULL DEFAULT 0,
+  `window_end`    INT NOT NULL DEFAULT 0,
+  `blocked_until` INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (`ip_hash`),
+  KEY `idx_connect_rl_stale` (`blocked_until`, `window_end`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 
@@ -238,3 +253,78 @@ SELECT u.`id_users`, u.`saldo`, u.`saldo`, 'opening', NULL,
 --     SELECT u.username, b.reason, b.delta, b.balance_after, b.actor, b.created_at
 --       FROM balance_log b JOIN users u ON u.id_users = b.user_id
 --      ORDER BY b.id_log DESC LIMIT 20;
+
+-- ---------------------------------------------------------------------
+-- 7. Sign-in history, and the session binding that makes it useful
+-- ---------------------------------------------------------------------
+-- One row per sign-in: when it started, from what device, and when it
+-- ended. A seller sees their own; an admin sees everyone's.
+--
+-- `session_id` is a hash of the CodeIgniter session id, never the id
+-- itself — a leaked backup of this table must not hand anyone a working
+-- session.
+--
+-- `fingerprint` is the anti-theft part. It is a hash of the browser's
+-- user agent plus a secret, checked on every request. A stolen session
+-- cookie replayed from a different browser produces a different
+-- fingerprint and the session is destroyed. See DEPLOY.md.
+
+CREATE TABLE IF NOT EXISTS `login_sessions` (
+  `id_session`   INT AUTO_INCREMENT PRIMARY KEY,
+  `user_id`      INT          NOT NULL,
+  `username`     VARCHAR(66)  NOT NULL,
+  `session_id`   CHAR(64)     NOT NULL,
+  `fingerprint`  CHAR(64)     NOT NULL,
+  `ip_hash`      CHAR(32)     NULL,
+  `user_agent`   VARCHAR(255) NULL,
+  `device`       VARCHAR(96)  NULL,
+  `login_at`     DATETIME     NOT NULL,
+  `last_seen_at` DATETIME     NULL,
+  `logout_at`    DATETIME     NULL,
+  `end_reason`   VARCHAR(24)  NULL,
+  `created_at`   DATETIME NULL,
+  `updated_at`   DATETIME NULL,
+  UNIQUE KEY `uniq_ls_session` (`session_id`),
+  KEY `idx_ls_user` (`user_id`, `id_session`),
+  KEY `idx_ls_open` (`user_id`, `logout_at`),
+  CONSTRAINT `fk_ls_user` FOREIGN KEY (`user_id`)
+      REFERENCES `users` (`id_users`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ---------------------------------------------------------------------
+-- 8. Deleted keys are archived, not erased
+-- ---------------------------------------------------------------------
+-- An admin can delete a key now, and the row moves here instead of
+-- vanishing. The history in `history` stays where it is and still refers
+-- to the key by id, so a deletion never leaves a gap in the record of
+-- what was sold.
+--
+-- Deletions are also rate limited per admin (see DEPLOY.md): an account
+-- that is taken over cannot wipe the table and walk away.
+
+CREATE TABLE IF NOT EXISTS `keys_deleted` (
+  `id_deleted`   INT AUTO_INCREMENT PRIMARY KEY,
+  `id_keys`      INT          NOT NULL,
+  `game`         VARCHAR(32)  NULL,
+  `user_key`     VARCHAR(32)  NULL,
+  `duration`     INT          NULL,
+  `expired_date` DATETIME     NULL,
+  `max_devices`  INT          NULL,
+  `devices`      MEDIUMTEXT   NULL,
+  `status`       TINYINT      NULL,
+  `registrator`  VARCHAR(32)  NULL,
+  `key_created`  DATETIME     NULL,
+  `deleted_by`   VARCHAR(66)  NOT NULL,
+  `reason`       VARCHAR(255) NULL,
+  `created_at`   DATETIME NULL,
+  `updated_at`   DATETIME NULL,
+  KEY `idx_kd_key`   (`id_keys`),
+  KEY `idx_kd_who`   (`deleted_by`, `id_deleted`),
+  KEY `idx_kd_when`  (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Check:
+--     SELECT username, device, login_at, logout_at, end_reason
+--       FROM login_sessions ORDER BY id_session DESC LIMIT 10;
+--     SELECT user_key, deleted_by, created_at FROM keys_deleted ORDER BY id_deleted DESC;

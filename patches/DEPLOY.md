@@ -90,14 +90,24 @@ and `MIGRATION.sql` in the zip does both. Back up first.
 
 **Why it matters — I tested this against a database built the old way:**
 
-*Two tables are missing.* `auth_ratelimit` and `check_ratelimit` are new.
-Without them the panel **still runs perfectly**, which is the trap: every
-rate-limit query fails, the failure is caught so pages keep working, and
-there is no brute-force limit at all. Measured on an unmigrated database:
-**0 of 8 wrong passwords were blocked.** After the migration the 6th attempt
-is blocked, as intended. The code now also logs this at `critical`, so if it
-ever happens again you will find "Rate limiter unavailable" in
-`writable/logs/`.
+*The rate limiter tables are missing.* `auth_ratelimit`, `check_ratelimit`
+and `connect_ratelimit` are new. Without them the panel **still runs
+perfectly**, which is the trap: every rate-limit query fails, the failure is
+caught so pages keep working, and there is no brute-force limit at all.
+Measured on an unmigrated database: **0 of 8 wrong passwords were blocked.**
+After the migration the 6th attempt is blocked, as intended. The code now
+also logs this at `critical`, so if it ever happens again you will find
+"Rate limiter unavailable" in `writable/logs/`.
+
+*Three more tables are new in this round.* `login_sessions` holds the
+sign-in history and the browser fingerprint that stops a copied session
+cookie; `keys_deleted` is the archive a deleted key moves into; and
+`connect_ratelimit` is the connector's own limiter — that one was referenced
+by `Connect.php` but never created, so until now the connector's rate limit
+was silently doing nothing. All three are in `MIGRATION.sql`. It is safe to
+run the file again if you already ran an earlier copy: every statement is
+`CREATE TABLE IF NOT EXISTS` or equivalent, and I re-ran it twice against the
+same database to confirm.
 
 *Every old referral code is spendable again.* The old code called
 `useReferral($code)` without a username, so the guard inside never ran and
@@ -269,6 +279,101 @@ Both were tested.
 **History starts the day you run `MIGRATION.sql`.** Movements from before
 that cannot be reconstructed, so each account gets one `opening` row
 explaining the balance it already had.
+
+## The greeting shows once, at sign-in
+
+"Welcome" used to appear on every page of every visit. It was not a message
+at all: `msgStatus.php` had a final `else` that printed it whenever no real
+flash was set, so it had no trigger and no end, and its only effect was to
+bury the messages that did mean something.
+
+It is now an ordinary one-time flash, set by `Auth` on a successful sign-in
+and read once on the dashboard you land on. Every other message — errors,
+"password changed", the balance banner on Generate — is untouched and still
+works exactly as before. The dashboard heading no longer says "Welcome back"
+either; a heading that greets you on every visit is the same fault in bigger
+type.
+
+## Sign-ins are recorded, and a stolen session cookie no longer works
+
+**Settings → Your sign-ins.** Every sign-in to your account: the device, the
+full user agent, the time you signed in to the second, the time you signed
+out, and whether the session is still open. An admin gets a second panel,
+**All sign-ins**, with the same for every account and the username on each
+row.
+
+This is also the fix for the attack you described — someone who knows a
+password signs in, copies the session cookie out of the browser, and pastes
+it into another browser to be treated as that person.
+
+A session cookie is a bearer token: hold it and you are that account. So the
+cookie is no longer sufficient on its own. At sign-in the session is bound to
+a fingerprint of the browser that created it (an HMAC of the user agent under
+a server secret), and `AuthFilter` recomputes and compares that fingerprint
+on every request. A mismatch means the cookie is being presented by something
+other than the browser it was issued to: the session is destroyed — not just
+refused, or the thief could keep trying while you stayed signed in — both
+parties are sent back to the login page, and the row is marked **Blocked** in
+the list so you can see it happened. It is also written to the error log.
+
+I tested it exactly as described: signed in, copied the `ci_session` value,
+replayed it from a different browser. The replay was refused and the original
+session was killed in the same moment.
+
+**Deliberately not bound to the IP address.** On Iranian mobile networks the
+IP changes constantly, and a check that signs honest people out every few
+minutes gets switched off — which protects nobody. The IP is still recorded
+(hashed), it just does not decide.
+
+Be honest about what this is: it stops a copied cookie, which is the attack
+you saw. It does not stop someone who also forges the user agent to match.
+The session lifetime (30 minutes, or 24 hours with "stay signed in") is the
+other half of the answer.
+
+## Admins can delete keys, and the record survives
+
+The keys list has a third button for admins only — the trash icon — with a
+confirmation and an optional reason. A seller does not see it, and the
+endpoint re-checks the level itself, so it is not a matter of the button
+being hidden.
+
+**Deleting does not erase.** The row is copied to `keys_deleted` first, in
+the same transaction, and only then removed from `keys_code`. The `history`
+rows are left exactly where they are. If the archive write fails, the whole
+thing rolls back and the key stays — losing the key and its record together
+is the one outcome worth avoiding. **Admin → Deleted Keys** shows the
+archive: the key, its game, who issued it, who deleted it, why and when.
+
+**Each admin may delete 20 keys in any 6 hours.** The point is not to
+inconvenience you; it is that an admin account which gets taken over cannot
+empty the table in one run and disappear. Clearing out a handful of test keys
+never comes close; a script trying to wipe thousands hits the cap within
+seconds, and the archive still holds every one it managed to remove. I tested
+this by deleting 22 in a row: the 21st and 22nd were refused, 20 were
+archived, and all 24 history rows were still there.
+
+If the counter cannot be read, deletion **fails closed** — an unlimited
+delete is precisely what this guards against. To change the numbers, edit
+`DELETE_LIMIT` and `DELETE_WINDOW_HOURS` at the top of
+`app/Controllers/Keys.php`.
+
+One thing to know: the cap is per admin username. A compromised admin who
+promotes a second account gets a fresh allowance on it. Each round is slow
+and every deletion is signed into the archive, so it is traceable, but if you
+want a hard ceiling the place to add it is a global counter rather than a
+per-name one.
+
+## Balance history for admins
+
+**Admin → Balance History** lists every movement on every account, newest
+first, with a filter per kind (top-up, key, adjusted, referral, opening) and
+totals across all sellers at the top. Each account name links to that
+account's own page.
+
+A seller has no route to it and gets sent back to the dashboard. Their own
+page already shows their own ledger and who topped them up, which is the
+whole of what concerns them — that scoping lives in the model, so a template
+change cannot widen it.
 
 ## Cross-platform check
 

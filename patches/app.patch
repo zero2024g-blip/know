@@ -3943,8 +3943,8 @@ diff -ruN /tmp/orig_app/Config/Logger.php app/Config/Logger.php
  		/**
 diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 --- /tmp/orig_app/Config/Routes.php	2026-08-24 23:02:52.524373647 +0000
-+++ app/Config/Routes.php	2026-08-26 14:52:29.333576693 +0000
-@@ -38,19 +38,33 @@
++++ app/Config/Routes.php	2026-08-26 19:56:41.676244495 +0000
+@@ -38,19 +38,38 @@
  $routes->match(['get', 'post'], 'login', 'Auth::login');
  $routes->match(['get', 'post'], 'register', 'Auth::register');
  $routes->match(['get', 'post'], 'settings', 'User::settings');
@@ -3962,6 +3962,8 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 -	$routes->get('reset', 'Keys::api_key_reset');
 +	$routes->post('reset', 'Keys::api_key_reset');
  	$routes->post('edit', 'Keys::edit_key');
++	// POST only, and the controller re-checks that the caller is an admin.
++	$routes->post('delete', 'Keys::delete_key');
  	$routes->match(['get', 'post'], 'api', 'Keys::api_get_keys');
  });
  
@@ -3976,13 +3978,16 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 +	$routes->post('games/delete', 'Games::deleteGame');
 +	$routes->post('games/duration/save', 'Games::saveDuration');
 +	$routes->post('games/duration/delete', 'Games::deleteDuration');
++	// Read-only admin screens. Both re-check the level themselves.
++	$routes->get('balance-history', 'Account::ledger');
++	$routes->get('deleted-keys', 'Keys::deleted');
  	$routes->match(['get', 'post'], 'manage-users', 'User::manage_users');
  	$routes->match(['get', 'post'], 'edit/(:num)', 'User::user_edit/$1');
  	/* --------------------------- Admin API Grouping -------------------------- */
 diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
 --- /tmp/orig_app/Controllers/Account.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Account.php	2026-08-26 14:52:29.293557029 +0000
-@@ -0,0 +1,83 @@
++++ app/Controllers/Account.php	2026-08-26 20:25:24.834616851 +0000
+@@ -0,0 +1,124 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -4065,11 +4070,79 @@ diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
 +            'topUps'    => $this->balance->topUpSources($uid),
 +        ]);
 +    }
++
++    /**
++     * Every account's balance movements, in one list. Admins only.
++     *
++     * A seller has no route to this: their own page already shows their own
++     * ledger and who topped them up, which is the whole of what concerns
++     * them. The level check is repeated here rather than left to the route
++     * group, so moving the route cannot quietly open it.
++     */
++    public function ledger()
++    {
++        if (! $this->me || (int) $this->me->level !== 1) {
++            return redirect()->to('dashboard')->with('msgWarning', 'Access Denied!');
++        }
++
++        // One optional filter, validated against the reasons that exist.
++        // Anything else is treated as no filter rather than as an error.
++        //
++        // getGet() returns whatever the query string held, and ?reason[]=a
++        // makes that an array - casting one to string is a PHP warning, and
++        // a warning is a 500 with the framework's error handler on.
++        $reason = $this->request->getGet('reason');
++        $reason = is_string($reason) ? $reason : '';
++        $known  = [
++            BalanceModel::TOPUP, BalanceModel::ADJUST, BalanceModel::PURCHASE,
++            BalanceModel::REFERRAL, BalanceModel::OPENING,
++        ];
++        if (! in_array($reason, $known, true)) {
++            $reason = '';
++        }
++
++        return view('Admin/balance_history', [
++            'title'  => 'Balance history',
++            'user'   => $this->me,
++            'time'   => new \CodeIgniter\I18n\Time(),
++            'rows'   => $this->balance->allHistory(200, $reason ?: null),
++            'totals' => $this->balance->globalTotals(),
++            'reason' => $reason,
++            'known'  => $known,
++        ]);
++    }
 +}
 diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 --- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
-+++ app/Controllers/Auth.php	2026-08-26 14:52:05.853424521 +0000
-@@ -189,15 +189,60 @@
++++ app/Controllers/Auth.php	2026-08-26 20:04:16.416584746 +0000
+@@ -133,7 +133,25 @@
+                 'time_login' => $stay_log ? $time::now()->addHours(24) : $time::now()->addMinutes(30),
+                 'time_since' => $time::now(),
+             ]);
+-            return redirect()->to('dashboard');
++
++            // Record the sign-in AFTER regenerate(), so the id stored here is
++            // the one the browser will actually send back. This is also what
++            // binds the session to this browser: see LoginSessionModel.
++            try {
++                (new \App\Models\LoginSessionModel())
++                    ->begin($cekUser, \App\Models\LoginSessionModel::currentId(), $ipHash);
++            } catch (\Throwable $e) {
++                // A sign-in must not fail because the history table is
++                // unavailable, but the gap has to be visible.
++                log_message('critical',
++                    'Could not record sign-in for {u}: {msg}. Session-theft protection is NOT active for this session.',
++                    ['u' => $cekUser->username, 'msg' => $e->getMessage()]);
++            }
++
++            // The one place a greeting belongs: a flash, read once on the
++            // page you land on, and gone after that.
++            return redirect()->to('dashboard')
++                ->with('msgSuccess', 'Welcome back, ' . getName($cekUser) . '.');
+         }
+ 
+         // Wrong credentials -> count the failed attempt.
+@@ -189,15 +207,60 @@
              'saldo'    => $rCheck->set_saldo ?: 0,
              'uplink'   => $rCheck->created_by,
              'status'   => 1,
@@ -4135,7 +4208,26 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      }
  
      private function registerFail(string $ipHash, string $reason)
-@@ -241,6 +286,7 @@
+@@ -210,9 +273,17 @@
+     public function logout()
+     {
+         if (session()->has('userid')) {
++            // Close the history row before the id changes, or the sign-in is
++            // left looking like it never ended.
++            try {
++                (new \App\Models\LoginSessionModel())->end(\App\Models\LoginSessionModel::currentId(), 'logout');
++            } catch (\Throwable $e) {
++                log_message('error', 'Could not close sign-in record: {msg}', ['msg' => $e->getMessage()]);
++            }
++
+             session()->remove(['userid', 'unames', 'time_login', 'time_since']);
+             session()->regenerate(true);
+-            session()->setFlashdata('msgSuccess', 'Logout successfuly.');
++            session()->setFlashdata('msgSuccess', 'Signed out.');
+         }
+         return redirect()->to('login');
+     }
+@@ -241,6 +312,7 @@
                  return (int) $row['blocked_until'] - $now;
              }
          } catch (\Throwable $e) {
@@ -4143,7 +4235,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          }
          return 0;
      }
-@@ -279,6 +325,7 @@
+@@ -279,6 +351,7 @@
              }
              return $remaining;
          } catch (\Throwable $e) {
@@ -4151,7 +4243,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
              return 0;
          }
      }
-@@ -289,9 +336,27 @@
+@@ -289,9 +362,27 @@
          try {
              db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete();
          } catch (\Throwable $e) {
@@ -4179,7 +4271,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      /** Human-friendly "try again in X" message. */
      private function waitMessage(int $seconds): string
      {
-@@ -311,9 +376,4 @@
+@@ -311,9 +402,4 @@
      /**
       * Real client IP (Cloudflare header first — the site is behind Cloudflare).
       */
@@ -5279,7 +5371,7 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-26 14:51:10.506409657 +0000
++++ app/Controllers/Keys.php	2026-08-26 20:33:44.148181586 +0000
 @@ -2,6 +2,9 @@
  
  namespace App\Controllers;
@@ -5290,16 +5382,20 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  use App\Models\HistoryModel;
  use App\Models\KeysModel;
  use App\Models\UserModel;
-@@ -9,7 +12,7 @@
+@@ -9,7 +12,11 @@
  
  class Keys extends BaseController
  {
 -    protected $userModel, $model, $user;
-+    protected $userModel, $model, $user, $gameModel, $durationModel;
++    protected $userModel, $model, $user, $gameModel, $durationModel, $time;
++
++    /** How many keys one admin may delete, and over what window. */
++    private const DELETE_LIMIT        = 20;
++    private const DELETE_WINDOW_HOURS = 6;
  
      public function __construct()
      {
-@@ -18,45 +21,12 @@
+@@ -18,45 +25,12 @@
          $this->model = new KeysModel();
          $this->time = new \CodeIgniter\I18n\Time;
  
@@ -5351,7 +5447,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function index()
-@@ -64,16 +34,18 @@
+@@ -64,16 +38,18 @@
          $model = $this->model;
          $user = $this->user;
  
@@ -5375,7 +5471,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'time' => $this->time,
          ];
          return view('Keys/list', $data);
-@@ -88,35 +60,52 @@
+@@ -88,35 +64,52 @@
  
      public function api_key_reset()
      {
@@ -5451,7 +5547,189 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function edit_key($key = false)
-@@ -273,14 +262,28 @@
+@@ -133,7 +126,6 @@
+                         'title' => 'Key',
+                         'user' => $user,
+                         'key' => $dKey,
+-                        'game_list' => $this->game_list,
+                         'time' => $this->time,
+                         'key_info' => getDevice($dKey->devices),
+                         'messages' => setMessage('Please carefuly edit information'),
+@@ -148,12 +140,172 @@
+         return redirect()->to('keys')->with('msgDanger', $msgDanger);
+     }
+ 
++    /**
++     * Delete a key. Admins only.
++     *
++     * The row is archived to keys_deleted first, so the record of what was
++     * sold survives; `history` is untouched and still refers to the key by id.
++     *
++     * Deletions are rate limited per admin. The point is not to inconvenience
++     * you — it is that an admin account which gets taken over cannot empty the
++     * table in one go and disappear. A real admin clearing out a handful of
++     * test keys never reaches the limit; a script trying to wipe thousands
++     * hits it within seconds, and the archive still holds everything it
++     * managed to remove.
++     */
++    public function delete_key()
++    {
++        $user = $this->user;
++
++        // Re-checked here rather than trusting the route group alone: a route
++        // can be moved by accident, a method's own guard cannot.
++        if (! $user || (int) $user->level !== 1) {
++            return $this->response->setStatusCode(403)
++                ->setJSON(['ok' => false, 'error' => 'Access denied.']);
++        }
++
++        // Scalars only: an array posted as id_keys[] casts with a warning,
++        // which the error handler turns into a 500.
++        $postedId = $this->request->getPost('id_keys');
++        $id       = is_scalar($postedId) ? (int) $postedId : 0;
++        if ($id < 1) {
++            return $this->response->setJSON(['ok' => false, 'error' => 'No key given.']);
++        }
++
++        $archive = new \App\Models\DeletedKeyModel();
++
++        try {
++            $used = $archive->recentCountBy($user->username, self::DELETE_WINDOW_HOURS);
++        } catch (\Throwable $e) {
++            // Fail CLOSED. If the counter cannot be read there is no limit,
++            // and an unlimited delete is exactly what this guards against.
++            log_message('critical', 'Delete limit unreadable: {msg}', ['msg' => $e->getMessage()]);
++            return $this->response->setJSON([
++                'ok' => false, 'error' => 'Deletion is unavailable right now.',
++            ]);
++        }
++
++        if ($used >= self::DELETE_LIMIT) {
++            return $this->response->setJSON([
++                'ok'    => false,
++                'error' => sprintf(
++                    'Limit reached: %d keys in %d hours. Try again later.',
++                    self::DELETE_LIMIT,
++                    self::DELETE_WINDOW_HOURS
++                ),
++            ]);
++        }
++
++        // getKeys(), not find(): KeysModel does not set $returnType, so find()
++        // hands back an array and every ->property read below is a fatal.
++        $key = $this->model->getKeys($id, 'id_keys');
++        if (! $key) {
++            return $this->response->setJSON(['ok' => false, 'error' => 'That key no longer exists.']);
++        }
++
++        $db = \Config\Database::connect();
++        $db->transBegin();
++
++        try {
++            $archive->insert([
++                'id_keys'      => (int) $key->id_keys,
++                'game'         => $key->game,
++                'user_key'     => $key->user_key,
++                'duration'     => $key->duration,
++                'expired_date' => $key->expired_date,
++                'max_devices'  => $key->max_devices,
++                'devices'      => $key->devices,
++                'status'       => $key->status,
++                'registrator'  => $key->registrator,
++                'key_created'  => $key->created_at,
++                'deleted_by'   => $user->username,
++                'reason'       => $this->postedReason(),
++            ]);
++
++            // Archive first, delete second. If the archive write fails the
++            // whole thing rolls back and the key stays — losing the key and
++            // its record together is the one outcome to avoid.
++            $this->model->delete($id);
++
++            if ($db->transStatus() === false) {
++                throw new \RuntimeException('delete transaction failed');
++            }
++            $db->transCommit();
++        } catch (\Throwable $e) {
++            $db->transRollback();
++            log_message('error', 'Key delete failed: {msg}', ['msg' => $e->getMessage()]);
++            return $this->response->setJSON(['ok' => false, 'error' => 'Could not delete. Nothing was changed.']);
++        }
++
++        return $this->response->setJSON([
++            'ok'        => true,
++            'remaining' => max(0, self::DELETE_LIMIT - ($used + 1)),
++            'csrf'      => csrf_hash(),
++        ]);
++    }
++
++    /** The optional free-text reason on a delete, trimmed and bounded. */
++    private function postedReason(): ?string
++    {
++        $reason = $this->request->getPost('reason');
++        if (! is_scalar($reason)) {
++            return null;
++        }
++
++        return mb_substr(trim((string) $reason), 0, 255) ?: null;
++    }
++
++    /**
++     * The archive of deleted keys. Admins only.
++     *
++     * This is the "History باقی می‌ماند" half of deletion: the key is gone
++     * from the working table, but what it was, who issued it and who removed
++     * it are all still here.
++     */
++    public function deleted()
++    {
++        $user = $this->user;
++        if (! $user || (int) $user->level !== 1) {
++            return redirect()->to('dashboard')->with('msgWarning', 'Access Denied!');
++        }
++
++        $archive = new \App\Models\DeletedKeyModel();
++
++        // Missing table means the migration has not been run. Show the page
++        // empty rather than a 500 - and say so in the log, because the
++        // delete limit is failing closed for the same reason.
++        try {
++            $rows = $archive->recent(200);
++            $used = $archive->recentCountBy($user->username, self::DELETE_WINDOW_HOURS);
++        } catch (\Throwable $e) {
++            log_message('critical',
++                'keys_deleted unavailable ({msg}). Key deletion is disabled until the migration runs.',
++                ['msg' => $e->getMessage()]);
++            $rows = [];
++            $used = 0;
++        }
++
++        return view('Keys/deleted', [
++            'title'   => 'Deleted keys',
++            'user'    => $user,
++            'time'    => $this->time,
++            'rows'    => $rows,
++            'used'    => $used,
++            'limit'   => self::DELETE_LIMIT,
++            'window'  => self::DELETE_WINDOW_HOURS,
++        ]);
++    }
++
+     private function edit_key_action()
+     {
+         $keys = $this->request->getPost('id_keys');
+         $user = $this->user;
+         $dKey = $this->model->getKeys($keys, 'id_keys');
+-        $game = implode(",", array_keys($this->game_list));
++
++        // Every game code on record, including ones since deactivated: an old
++        // key may still name one, and editing its status must not fail because
++        // the game is no longer on sale.
++        $game = implode(',', array_column($this->gameModel->allOrdered(), 'code'));
+ 
+         if (!$dKey) {
+             $msgDanger = "The user key no longer exists~";
+@@ -273,14 +425,28 @@
              $message = setMessage("Please top up to your beloved admin.", 'warning');
          }
  
@@ -5487,7 +5765,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'validation' => $validation,
          ];
          return view('Keys/generate', $data);
-@@ -293,9 +296,23 @@
+@@ -293,9 +459,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -5513,7 +5791,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
          $form_rules = [
              'game' => [
                  'label' => 'Games',
-@@ -306,15 +323,18 @@
+@@ -306,15 +486,18 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -5534,7 +5812,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +342,9 @@
+@@ -322,7 +505,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -5545,7 +5823,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +353,146 @@
+@@ -331,57 +516,146 @@
          ];
  
          $validation = Services::validation();
@@ -5606,7 +5884,9 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +            $validation->setError('duration', 'That duration is not for sale.');
 +            return redirect()->back()->withInput()->with('msgDanger', 'Invalid duration.');
 +        }
-+
+ 
+-                    // Add the generated key to the list
+-                    $generatedKeys[] = $data_response;
 +        $totalfees = $unitPrice * $quantity;
 +
 +        $db = \Config\Database::connect();
@@ -5631,9 +5911,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    return redirect()->back()->withInput()
 +                        ->with('msgWarning', 'Please top up to your beloved admin.');
 +                }
- 
--                    // Add the generated key to the list
--                    $generatedKeys[] = $data_response;
++
 +                // Read the balance back inside the transaction, so the ledger
 +                // records what this debit actually left rather than a figure
 +                // computed from a value read before the UPDATE.
@@ -5738,16 +6016,43 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  }
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
-+++ app/Controllers/User.php	2026-08-26 14:51:40.545103582 +0000
-@@ -2,6 +2,7 @@
++++ app/Controllers/User.php	2026-08-26 20:33:25.807892221 +0000
+@@ -2,42 +2,37 @@
  
  namespace App\Controllers;
  
 +use App\Models\BalanceModel;
  use App\Models\CodeModel;
  use App\Models\HistoryModel;
++use App\Models\LoginSessionModel;
  use App\Models\UserModel;
-@@ -33,11 +34,15 @@
+ use CodeIgniter\Config\Services;
+ 
+ class User extends BaseController
+ {
+-    protected $model, $userid, $user;
++    protected $model, $userid, $user, $time;
+ 
+     public function __construct()
+     {
+         $this->userid = session()->userid;
+         $this->model = new UserModel();
+         $this->user = $this->model->getUser($this->userid);
+-        $this->time = new \CodeIgniter\I18n\Time;
+-        
+-        $this->my_info = [
+-            "web_info" => [
+-            "client" => BASE_NAME,
+-            "version" => "1.0",
+-            ],
+-            "web__dev" => [
+-                "author" => "Z E R O",
+-                "id" => "@Kingdarkspro",
+-            ],
+-        ];
++        $this->time = new \CodeIgniter\I18n\Time();
+     }
+ 
      public function index()
      {
          $historyModel = new HistoryModel();
@@ -5767,7 +6072,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          ];
          return view('User/dashboard', $data);
      }
-@@ -114,7 +119,10 @@
+@@ -114,7 +109,10 @@
          $data = [
              'title' => 'Users',
              'user' => $user,
@@ -5779,7 +6084,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation
          ];
-@@ -137,7 +145,6 @@
+@@ -137,7 +135,6 @@
              'title' => 'Settings',
              'user' => $user,
              'target' => $model->getUser($userid),
@@ -5787,7 +6092,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation,
          ];
-@@ -211,19 +218,71 @@
+@@ -211,19 +208,71 @@
              $saldo = $this->request->getPost('saldo');
              $uplink = $this->request->getPost('uplink');
  
@@ -5864,7 +6169,49 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          }
      }
      
-@@ -253,10 +312,16 @@
+@@ -237,11 +286,40 @@
+ 
+         $user = $this->user;
+         $validation = Services::validation();
++
++        // Sign-in history. Everyone sees their own; an admin additionally
++        // gets everyone's, with the username on each row. The scoping lives
++        // in the model, so a view cannot widen it by passing a flag.
++        $isAdmin = (int) $user->level === 1;
++
++        // Separate instances: a CI4 model carries its query builder, and
++        // reusing one for two differently-scoped reads is how a `where`
++        // ends up on a query that was meant to be unscoped.
++        //
++        // If login_sessions is missing - the migration has not been run yet -
++        // show the page without the history rather than a 500. The empty
++        // lists say the same thing to the reader either way, and the log
++        // says why.
++        $mine = [];
++        $all  = [];
++        try {
++            $mine = (new LoginSessionModel())->historyFor($user, false, 40);
++            $all  = $isAdmin ? (new LoginSessionModel())->historyFor($user, true, 100) : [];
++        } catch (\Throwable $e) {
++            log_message('critical',
++                'login_sessions unavailable ({msg}). Sign-in history is empty and '
++                . 'session-theft protection is NOT active.',
++                ['msg' => $e->getMessage()]);
++        }
++
+         $data = [
+             'title' => 'Settings',
+             'user' => $user,
+             'time' => $this->time,
+-            'validation' => $validation
++            'validation' => $validation,
++            'mySessions'  => $mine,
++            'allSessions' => $all,
++            'thisSession' => LoginSessionModel::hashSessionId(LoginSessionModel::currentId()),
+         ];
+ 
+         return view('User/settings', $data);
+@@ -253,10 +331,16 @@
          $password = $this->request->getPost('password');
  
          $user = $this->user;
@@ -5883,7 +6230,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $msg = "Wrong current password.";
              $validation->setError('current', $msg);
          } elseif ($current == $password) {
-@@ -285,7 +350,10 @@
+@@ -285,7 +369,10 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Something wrong! Please check the form');
          } else {
@@ -5895,7 +6242,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $this->model->update(session('userid'), ['password' => $newPassword]);
              return redirect()->back()->with('msgSuccess', 'Password Successfuly Changed.');
          }
-@@ -315,7 +383,7 @@
+@@ -315,7 +402,7 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
          } else {
@@ -5975,8 +6322,8 @@ diff -ruN /tmp/orig_app/Filters/AdminFilter.php app/Filters/AdminFilter.php
 +}
 diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
 --- /tmp/orig_app/Filters/AuthFilter.php	2026-08-24 23:02:52.534788935 +0000
-+++ app/Filters/AuthFilter.php	2026-08-24 23:03:16.698767277 +0000
-@@ -1,27 +1,30 @@
++++ app/Filters/AuthFilter.php	2026-08-26 20:07:33.623014407 +0000
+@@ -1,27 +1,95 @@
 -<?php
 -
 -namespace App\Filters;
@@ -6008,10 +6355,11 @@ diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
 +
 +namespace App\Filters;
 +
++use App\Models\LoginSessionModel;
 +use App\Models\UserModel;
++use CodeIgniter\Filters\FilterInterface;
 +use CodeIgniter\HTTP\RequestInterface;
 +use CodeIgniter\HTTP\ResponseInterface;
-+use CodeIgniter\Filters\FilterInterface;
 +
 +class AuthFilter implements FilterInterface
 +{
@@ -6019,19 +6367,83 @@ diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
 +    {
 +        $session = session();
 +
-+        // Deny unless BOTH halves of the session are present.
-+        // Was `and`, which let half a session through.
++        // Deny unless BOTH halves of the session are present. This was `and`
++        // between two truthiness checks, which let half a session through.
 +        if (! $session->userid || ! $session->time_login) {
-+            return redirect()->to('/login')->with('msgWarning', "Please login first");
++            return redirect()->to('/login')->with('msgWarning', 'Please login first');
 +        }
 +
-+        $userModel = new UserModel();
-+        return $userModel->checkAuthFilter();
++        if ($stop = $this->rejectStolenSession($session)) {
++            return $stop;
++        }
++
++        return (new UserModel())->checkAuthFilter();
++    }
++
++    /**
++     * Refuse a session cookie being replayed from a different browser.
++     *
++     * A session cookie is a bearer token: hold it and you are treated as its
++     * owner. Copying the value out of one browser into another is enough to
++     * become that person — which is the attack, and it needs no password.
++     *
++     * So the cookie is no longer sufficient by itself. At sign-in the session
++     * was bound to a fingerprint of the browser that created it; here that
++     * fingerprint is recomputed and compared. A mismatch means the cookie is
++     * being presented by something other than the browser it was issued to,
++     * and the session is destroyed rather than merely refused — otherwise the
++     * thief could keep trying while the real owner stays signed in.
++     *
++     * Deliberately NOT bound to the IP address: on Iranian mobile networks it
++     * changes constantly, and a check that logs honest people out every few
++     * minutes gets turned off, which protects nobody.
++     */
++    private function rejectStolenSession($session)
++    {
++        $sessions = new LoginSessionModel();
++
++        try {
++            $row = $sessions->openSession(LoginSessionModel::currentId());
++        } catch (\Throwable $e) {
++            // The table is missing or unreachable. Let the request through —
++            // locking everyone out over a logging table would be worse — but
++            // say so loudly, because the protection is not running.
++            log_message('critical',
++                'login_sessions unavailable ({msg}). Session-theft protection is NOT active.',
++                ['msg' => $e->getMessage()]);
++            return null;
++        }
++
++        // No row: a session that predates this feature, or one already closed.
++        // Nothing to compare against, so nothing to reject.
++        if (! $row) {
++            return null;
++        }
++
++        if (! hash_equals($row->fingerprint, LoginSessionModel::fingerprint())) {
++            // 'error', not 'warning': the log threshold is 4, so a warning
++            // would be written nowhere and the one event an operator most
++            // wants to know about would leave no trace on disk.
++            log_message('error',
++                'Session fingerprint mismatch for user {u} — session destroyed. '
++                . 'A session cookie was presented by a different browser.',
++                ['u' => $row->username]);
++
++            $sessions->end(LoginSessionModel::currentId(), 'fingerprint');
++            $session->destroy();
++
++            return redirect()->to('/login')
++                ->with('msgDanger', 'Your session was ended for security. Please sign in again.');
++        }
++
++        $sessions->touch(LoginSessionModel::currentId());
++
++        return null;
 +    }
 +
 +    public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
 +    {
-+        // Do something here
++        // Nothing to do after the response.
 +    }
 +}
 diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
@@ -6284,8 +6696,8 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +}
 diff -ruN /tmp/orig_app/Models/BalanceModel.php app/Models/BalanceModel.php
 --- /tmp/orig_app/Models/BalanceModel.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Models/BalanceModel.php	2026-08-26 14:57:10.362477005 +0000
-@@ -0,0 +1,108 @@
++++ app/Models/BalanceModel.php	2026-08-26 19:53:55.233208010 +0000
+@@ -0,0 +1,152 @@
 +<?php
 +
 +namespace App\Models;
@@ -6382,6 +6794,50 @@ diff -ruN /tmp/orig_app/Models/BalanceModel.php app/Models/BalanceModel.php
 +        ];
 +    }
 +
++    /**
++     * Every account's movements, newest first. Admin screen only.
++     *
++     * The username is joined in rather than stored on the row: an account
++     * that gets renamed should not leave a ledger full of its old name.
++     * `actor` is the opposite case - it is a snapshot of who acted, kept as
++     * written, because the record of who did a thing must not change when
++     * that person is renamed or removed.
++     */
++    public function allHistory(int $limit = 200, ?string $reason = null): array
++    {
++        $builder = $this->db->table($this->table . ' b')
++            ->select('b.*, u.username, u.level', false)
++            ->join('users u', 'u.id_users = b.user_id', 'left');
++
++        if ($reason !== null && $reason !== '') {
++            $builder->where('b.reason', $reason);
++        }
++
++        return $builder->orderBy('b.id_log', 'DESC')
++            ->limit($limit)
++            ->get()->getResultObject();
++    }
++
++    /** Totals across every account, for the header of that screen. */
++    public function globalTotals(): array
++    {
++        $row = $this->db->table($this->table)
++            ->select("
++                COALESCE(SUM(CASE WHEN reason = 'topup' THEN delta END), 0)      AS topped_up,
++                COALESCE(SUM(CASE WHEN reason = 'topup' THEN 1 END), 0)          AS topup_count,
++                COALESCE(SUM(CASE WHEN reason = 'key_purchase' THEN -delta END), 0) AS spent,
++                COUNT(*)                                                         AS movements
++            ", false)
++            ->get()->getRowObject();
++
++        return [
++            'topped_up'   => (float) ($row->topped_up ?? 0),
++            'topup_count' => (int)   ($row->topup_count ?? 0),
++            'spent'       => (float) ($row->spent ?? 0),
++            'movements'   => (int)   ($row->movements ?? 0),
++        ];
++    }
++
 +    /** Who has topped this account up, and how much in total. */
 +    public function topUpSources(int $userId): array
 +    {
@@ -6449,6 +6905,49 @@ diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
      }
  
      /**
+diff -ruN /tmp/orig_app/Models/DeletedKeyModel.php app/Models/DeletedKeyModel.php
+--- /tmp/orig_app/Models/DeletedKeyModel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Models/DeletedKeyModel.php	2026-08-26 19:48:04.882188064 +0000
+@@ -0,0 +1,39 @@
++<?php
++
++namespace App\Models;
++
++use CodeIgniter\Model;
++
++/**
++ * The archive of deleted keys.
++ *
++ * Deleting a key moves it here rather than erasing it, so the record of what
++ * was sold survives the deletion. `history` rows are left exactly where they
++ * are and still point at the key by id.
++ */
++class DeletedKeyModel extends Model
++{
++    protected $table      = 'keys_deleted';
++    protected $primaryKey = 'id_deleted';
++
++    protected $allowedFields = [
++        'id_keys', 'game', 'user_key', 'duration', 'expired_date', 'max_devices',
++        'devices', 'status', 'registrator', 'key_created', 'deleted_by', 'reason',
++    ];
++    protected $useTimestamps = true;
++    protected $returnType    = 'object';
++
++    /** How many keys this admin has deleted inside the window. */
++    public function recentCountBy(string $admin, int $windowHours): int
++    {
++        return $this->where('deleted_by', $admin)
++            ->where('created_at >=', date('Y-m-d H:i:s', time() - $windowHours * 3600))
++            ->countAllResults();
++    }
++
++    /** The archive, newest first. */
++    public function recent(int $limit = 100): array
++    {
++        return $this->orderBy('id_deleted', 'DESC')->findAll($limit);
++    }
++}
 diff -ruN /tmp/orig_app/Models/DurationModel.php app/Models/DurationModel.php
 --- /tmp/orig_app/Models/DurationModel.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Models/DurationModel.php	2026-08-26 14:23:51.822277530 +0000
@@ -6720,6 +7219,213 @@ diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
      public function API_getKeys()
      {
          $connect = db_connect();
+diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionModel.php
+--- /tmp/orig_app/Models/LoginSessionModel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Models/LoginSessionModel.php	2026-08-26 20:04:16.416311824 +0000
+@@ -0,0 +1,203 @@
++<?php
++
++namespace App\Models;
++
++use CodeIgniter\Model;
++
++/**
++ * Sign-in history, and the fingerprint that stops a stolen session cookie.
++ *
++ * A session cookie is a bearer token: whoever holds it is treated as the
++ * person it was issued to. Copying one out of a browser and pasting it into
++ * another is exactly the attack described as "they copy a bit of the cookie
++ * and the panel believes they are that person".
++ *
++ * The defence is to stop treating the cookie as sufficient on its own. Each
++ * session is bound to a fingerprint of the browser that created it, and the
++ * fingerprint is checked on every request. The cookie alone no longer gets
++ * you in — you would also have to reproduce the browser it was minted in,
++ * and do it before the session expires.
++ */
++class LoginSessionModel extends Model
++{
++    protected $table      = 'login_sessions';
++    protected $primaryKey = 'id_session';
++
++    protected $allowedFields = [
++        'user_id', 'username', 'session_id', 'fingerprint', 'ip_hash',
++        'user_agent', 'device', 'login_at', 'last_seen_at', 'logout_at', 'end_reason',
++    ];
++    protected $useTimestamps = true;
++    protected $returnType    = 'object';
++
++    /**
++     * Fingerprint for the current request.
++     *
++     * Deliberately built from things that do not change while a person keeps
++     * using the same browser:
++     *
++     *   - the user agent, which is stable per browser build
++     *   - a server secret, so the value cannot be computed by an attacker
++     *     who knows the user agent
++     *
++     * The IP is NOT in here on purpose. On Iranian mobile networks it changes
++     * constantly, and binding to it would log people out every few minutes —
++     * a protection nobody can live with gets switched off, which protects
++     * nothing. The IP is still recorded, just not used to decide.
++     */
++    public static function fingerprint(?string $userAgent = null): string
++    {
++        $ua     = $userAgent ?? ($_SERVER['HTTP_USER_AGENT'] ?? '');
++        $secret = (string) (env('encryption.key') ?: config('App')->baseURL);
++
++        return hash_hmac('sha256', $ua, $secret);
++    }
++
++    /**
++     * The current session id.
++     *
++     * CodeIgniter's Session class has no session_id() method - it drives PHP's
++     * native session handling, so the id comes from PHP's own function. Calling
++     * it through the framework object looked right and threw, which took the
++     * whole protection out silently: every call site caught the error, logged
++     * it and carried on.
++     */
++    public static function currentId(): string
++    {
++        return (string) \session_id();
++    }
++
++    /** The session id is stored hashed, so this table is not a set of keys. */
++    public static function hashSessionId(string $sessionId): string
++    {
++        return hash('sha256', $sessionId);
++    }
++
++    /**
++     * A readable device name from a user agent.
++     *
++     * Best effort and deliberately coarse. It is here so a person can
++     * recognise their own sign-ins at a glance; the full user agent is kept
++     * alongside it for when the detail matters.
++     */
++    public static function describe(?string $ua): string
++    {
++        $ua = (string) $ua;
++        if ($ua === '') {
++            return 'Unknown device';
++        }
++
++        $os = 'Unknown OS';
++        foreach ([
++            '/Windows NT 10\.0/i'      => 'Windows 10/11',
++            '/Windows NT 6\.3/i'       => 'Windows 8.1',
++            '/Windows NT 6\.1/i'       => 'Windows 7',
++            '/Android ([\d.]+)/i'      => 'Android %s',
++            '/iPhone OS ([\d_]+)/i'    => 'iOS %s',
++            '/iPad.*OS ([\d_]+)/i'     => 'iPadOS %s',
++            '/Mac OS X ([\d_]+)/i'     => 'macOS %s',
++            '/CrOS/i'                  => 'ChromeOS',
++            '/Ubuntu/i'                => 'Ubuntu',
++            '/Linux/i'                 => 'Linux',
++        ] as $re => $name) {
++            if (preg_match($re, $ua, $m)) {
++                $os = str_contains($name, '%s')
++                    ? sprintf($name, str_replace('_', '.', $m[1]))
++                    : $name;
++                break;
++            }
++        }
++
++        $browser = 'Unknown browser';
++        // Order matters: Edge and Opera both claim to be Chrome, and Chrome
++        // claims to be Safari, so the most specific has to be tested first.
++        foreach ([
++            '/Edg\/([\d.]+)/i'      => 'Edge',
++            '/OPR\/([\d.]+)/i'      => 'Opera',
++            '/SamsungBrowser/i'     => 'Samsung Internet',
++            '/Firefox\/([\d.]+)/i'  => 'Firefox',
++            '/Chrome\/([\d.]+)/i'   => 'Chrome',
++            '/Version\/([\d.]+).*Safari/i' => 'Safari',
++            '/curl\//i'             => 'curl',
++        ] as $re => $name) {
++            if (preg_match($re, $ua)) {
++                $browser = $name;
++                break;
++            }
++        }
++
++        return $browser . ' · ' . $os;
++    }
++
++    /** Record a sign-in. Returns the row id. */
++    public function begin(object $user, string $sessionId, string $ipHash): int
++    {
++        $ua = mb_substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
++
++        return (int) $this->insert([
++            'user_id'      => (int) $user->id_users,
++            'username'     => $user->username,
++            'session_id'   => self::hashSessionId($sessionId),
++            'fingerprint'  => self::fingerprint($ua),
++            'ip_hash'      => $ipHash,
++            'user_agent'   => $ua,
++            'device'       => self::describe($ua),
++            'login_at'     => date('Y-m-d H:i:s'),
++            'last_seen_at' => date('Y-m-d H:i:s'),
++        ]);
++    }
++
++    /** Close a session. $reason says how it ended. */
++    public function end(string $sessionId, string $reason = 'logout'): void
++    {
++        $this->where('session_id', self::hashSessionId($sessionId))
++             ->where('logout_at', null)
++             ->set([
++                 'logout_at'  => date('Y-m-d H:i:s'),
++                 'end_reason' => $reason,
++                 'updated_at' => date('Y-m-d H:i:s'),
++             ])
++             ->update();
++    }
++
++    /** Keep "last seen" roughly current without a write on every request. */
++    public function touch(string $sessionId): void
++    {
++        $this->where('session_id', self::hashSessionId($sessionId))
++             ->where('logout_at', null)
++             ->where('last_seen_at <', date('Y-m-d H:i:s', time() - 60))
++             ->set(['last_seen_at' => date('Y-m-d H:i:s')])
++             ->update();
++    }
++
++    /**
++     * The open session for this id, or null.
++     *
++     * Used by the filter to compare fingerprints, so it reads the stored
++     * value rather than trusting anything in the request.
++     */
++    public function openSession(string $sessionId): ?object
++    {
++        return $this->where('session_id', self::hashSessionId($sessionId))
++                    ->where('logout_at', null)
++                    ->first();
++    }
++
++    /**
++     * Sign-ins to show on the settings page.
++     *
++     * $user is whose list this is. An admin passing $all sees every account's,
++     * with the username on each row; a seller only ever gets their own —
++     * the scoping is here, not in the view.
++     */
++    public function historyFor(object $viewer, bool $all = false, int $limit = 60): array
++    {
++        $isAdmin = (int) $viewer->level === 1;
++
++        if (! ($all && $isAdmin)) {
++            $this->where('user_id', (int) $viewer->id_users);
++        }
++
++        return $this->orderBy('id_session', 'DESC')->findAll($limit);
++    }
++}
 diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
 --- /tmp/orig_app/Models/UserModel.php	2026-08-24 23:02:52.607940552 +0000
 +++ app/Models/UserModel.php	2026-08-24 23:03:35.541581662 +0000
@@ -6740,6 +7446,192 @@ diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
                  $msg = 'Level account invalid!';
              } elseif ($userCek->status != 1) {
                  $msg = 'Status account changed!';
+diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_history.php
+--- /tmp/orig_app/Views/Admin/balance_history.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Admin/balance_history.php	2026-08-26 20:19:22.114902929 +0000
+@@ -0,0 +1,182 @@
++<?= $this->extend('Layout/Starter') ?>
++
++<?= $this->section('content') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<?php
++// Label, tone and icon per movement type. Kept here rather than in the
++// controller: it is presentation, and the account page uses the same map.
++$reasonMeta = [
++    'topup'           => ['Top-up',    'is-ok',     'bi-plus-circle'],
++    'key_purchase'    => ['Key',       'is-info',   'bi-key'],
++    'adjustment'      => ['Adjusted',  'is-warn',   'bi-sliders'],
++    'referral_signup' => ['Referral',  'is-accent', 'bi-person-plus'],
++    'opening'         => ['Opening',   '',          'bi-flag'],
++];
++?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-clock-history"></i> Admin</span>
++        <h1>Balance history</h1>
++        <p>Every movement on every account, newest first.</p>
++    </div>
++    <div class="em-head-act">
++        <a class="em-btn" href="<?= site_url('admin/manage-users') ?>">
++            <i class="bi bi-person-check"></i> Manage users
++        </a>
++    </div>
++</header>
++
++<div class="em-stats em-rise em-rise-1">
++    <div class="em-stat is-ok">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Topped up</span>
++            <span class="em-stat-ic"><i class="bi bi-plus-circle"></i></span>
++        </div>
++        <div class="em-stat-val">$<?= number_format($totals['topped_up'], 2) ?></div>
++        <div class="em-stat-sub"><?= (int) $totals['topup_count'] ?> top-up<?= $totals['topup_count'] === 1 ? '' : 's' ?></div>
++    </div>
++    <div class="em-stat is-info">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Spent on keys</span>
++            <span class="em-stat-ic"><i class="bi bi-key"></i></span>
++        </div>
++        <div class="em-stat-val">$<?= number_format($totals['spent'], 2) ?></div>
++        <div class="em-stat-sub">across all sellers</div>
++    </div>
++    <div class="em-stat is-accent">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Movements</span>
++            <span class="em-stat-ic"><i class="bi bi-list-ul"></i></span>
++        </div>
++        <div class="em-stat-val"><?= number_format($totals['movements']) ?></div>
++        <div class="em-stat-sub">since the ledger began</div>
++    </div>
++</div>
++
++<section class="em-panel em-rise em-rise-2">
++    <div class="em-panel-h">
++        <h2><i class="bi bi-funnel"></i> <?= $reason ? esc(ucfirst(str_replace('_', ' ', $reason))) : 'All movements' ?></h2>
++        <div class="em-panel-act">
++            <span class="em-pill"><?= count($rows) ?> shown</span>
++        </div>
++    </div>
++
++    <div class="em-panel-b" style="padding-bottom:.4rem">
++        <div class="em-filters">
++            <a class="em-btn<?= $reason === '' ? ' is-primary' : '' ?>"
++               href="<?= site_url('admin/balance-history') ?>">All</a>
++            <?php foreach ($known as $r) : ?>
++                <a class="em-btn<?= $reason === $r ? ' is-primary' : '' ?>"
++                   href="<?= site_url('admin/balance-history') ?>?reason=<?= urlencode($r) ?>">
++                    <?= esc($reasonMeta[$r][0] ?? ucfirst($r)) ?>
++                </a>
++            <?php endforeach; ?>
++        </div>
++    </div>
++
++    <?php if (empty($rows)) : ?>
++        <div class="em-empty">
++            <div class="em-empty-ic"><i class="bi bi-receipt"></i></div>
++            <h3>Nothing to show</h3>
++            <p><?= $reason ? 'No movements of that kind yet.' : 'Movements appear here as money moves.' ?></p>
++        </div>
++    <?php else : ?>
++        <div class="table-responsive">
++            <table class="table align-middle em-ledger">
++                <thead>
++                    <tr>
++                        <th>Account</th>
++                        <th class="em-col-what">What</th>
++                        <th class="em-col-detail">Detail</th>
++                        <th>By</th>
++                        <th class="text-end">Amount</th>
++                        <th class="text-end em-col-bal">Balance</th>
++                        <th class="text-end">When</th>
++                    </tr>
++                </thead>
++                <tbody>
++                    <?php foreach ($rows as $row) : ?>
++                        <?php
++                        [$label, $tone, $icon] = $reasonMeta[$row->reason]
++                            ?? [ucfirst(str_replace('_', ' ', $row->reason)), '', 'bi-dot'];
++                        $delta = (float) $row->delta;
++                        ?>
++                        <tr>
++                            <td>
++                                <?php if ($row->username !== null) : ?>
++                                    <a class="em-acct" href="<?= site_url('account/' . (int) $row->user_id) ?>">
++                                        <?= esc($row->username) ?>
++                                    </a>
++                                <?php else : ?>
++                                    <!-- The account was deleted; the ledger row is not. -->
++                                    <span class="text-muted">#<?= (int) $row->user_id ?> (removed)</span>
++                                <?php endif; ?>
++                            </td>
++                            <td class="em-col-what">
++                                <span class="em-pill <?= $tone ?>">
++                                    <i class="bi <?= $icon ?>"></i> <?= esc($label) ?>
++                                </span>
++                            </td>
++                            <td class="em-col-detail"><span class="em-ledger-note"><?= esc($row->note ?? '—') ?></span></td>
++                            <td><?= $row->actor ? esc($row->actor) : '<span class="text-muted">system</span>' ?></td>
++                            <td class="text-end">
++                                <b class="<?= $delta >= 0 ? 'em-amt-pos' : 'em-amt-neg' ?>">
++                                    <?= $delta >= 0 ? '+' : '−' ?>$<?= number_format(abs($delta), 2) ?>
++                                </b>
++                            </td>
++                            <td class="text-end em-ledger-bal em-col-bal">$<?= number_format((float) $row->balance_after, 2) ?></td>
++                            <td class="text-end">
++                                <span class="em-when-inline" title="<?= esc($row->created_at) ?>">
++                                    <?= $time::parse($row->created_at)->humanize() ?>
++                                </span>
++                            </td>
++                        </tr>
++                    <?php endforeach; ?>
++                </tbody>
++            </table>
++        </div>
++    <?php endif; ?>
++</section>
++
++<?= $this->endSection() ?>
++
++<?= $this->section('css') ?>
++<style>
++    .em-amt-pos { color: var(--em-ok); font-variant-numeric: tabular-nums; }
++    .em-amt-neg { color: var(--em-bad); font-variant-numeric: tabular-nums; }
++    .em-ledger-bal { font-family: var(--em-mono); font-size: .85rem; color: var(--em-text); }
++    .em-ledger-note { color: var(--em-text-2); font-size: .86rem; }
++    .em-when-inline { font-family: var(--em-mono); font-size: .78rem; color: var(--em-dim); white-space: nowrap; }
++    .em-acct { color: var(--em-accent); text-decoration: none; font-weight: 600; }
++    .em-acct:hover { text-decoration: underline; }
++
++    /* The filters wrap rather than scroll: five short buttons on two lines
++       read better than one line that runs off the edge of a phone. */
++    .em-filters { display: flex; flex-wrap: wrap; gap: .45rem; }
++
++    @media (max-width: 820px) {
++        .em-col-detail, .em-col-bal { display: none; }
++
++        /* Tighten the cells so the remaining columns fit the width of a
++           phone instead of scrolling sideways inside the panel.
++
++           Qualified with the table's own class on purpose. ember.css sets
++           `.em-panel .table tbody td { padding: ... !important }` at this
++           width, and the page's <style> is rendered BEFORE ember.css (see
++           Layout/Starter.php), so anything less specific loses the tie and
++           silently changes nothing. */
++        .em-panel .table.em-ledger thead th,
++        .em-panel .table.em-ledger tbody td { padding: .5rem .4rem !important; }
++    }
++
++    /* Narrower still: the amount's sign already says credit or debit, so the
++       "what" pill is the one column that can go without losing information.
++       Account, who did it, how much and when all stay. */
++    @media (max-width: 560px) {
++        .em-col-what { display: none; }
++    }
++</style>
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 --- /tmp/orig_app/Views/Admin/games.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Views/Admin/games.php	2026-08-26 15:34:02.461151404 +0000
@@ -7646,6 +8538,134 @@ diff -ruN /tmp/orig_app/Views/Auth/register.php app/Views/Auth/register.php
  
  <style>
      :root {
+diff -ruN /tmp/orig_app/Views/Keys/deleted.php app/Views/Keys/deleted.php
+--- /tmp/orig_app/Views/Keys/deleted.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Keys/deleted.php	2026-08-26 20:19:22.115113522 +0000
+@@ -0,0 +1,124 @@
++<?= $this->extend('Layout/Starter') ?>
++
++<?= $this->section('content') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-archive"></i> Admin</span>
++        <h1>Deleted keys</h1>
++        <p>Deleting a key removes it from the list — the record of it stays here.</p>
++    </div>
++    <div class="em-head-act">
++        <a class="em-btn" href="<?= site_url('keys') ?>">
++            <i class="bi bi-card-list"></i> Back to keys
++        </a>
++    </div>
++</header>
++
++<section class="em-panel em-rise em-rise-1">
++    <div class="em-panel-h">
++        <h2><i class="bi bi-speedometer2"></i> Your deletion allowance</h2>
++        <div class="em-panel-act">
++            <span class="em-pill<?= $used >= $limit ? ' is-bad' : ($used > 0 ? ' is-warn' : ' is-ok') ?>">
++                <?= (int) ($limit - $used) > 0 ? (int) ($limit - $used) . ' left' : 'Limit reached' ?>
++            </span>
++        </div>
++    </div>
++    <div class="em-panel-b">
++        <p class="em-note">
++            Each admin may delete <b><?= (int) $limit ?></b> keys in any
++            <b><?= (int) $window ?> hours</b>. You have used
++            <b><?= (int) $used ?></b> of them. The cap is not there to slow you
++            down — it is so an admin account that gets taken over cannot empty
++            the table in one run.
++        </p>
++        <div class="em-meter">
++            <span class="em-meter-track">
++                <span class="em-meter-fill<?= $used >= $limit ? ' is-full' : '' ?>"
++                      style="width:<?= min(100, $limit > 0 ? (int) round($used / $limit * 100) : 0) ?>%"></span>
++            </span>
++            <span><?= (int) $used ?>/<?= (int) $limit ?></span>
++        </div>
++    </div>
++</section>
++
++<section class="em-panel em-rise em-rise-2">
++    <div class="em-panel-h">
++        <h2><i class="bi bi-archive"></i> Archive</h2>
++        <div class="em-panel-act">
++            <span class="em-pill"><?= count($rows) ?> recorded</span>
++        </div>
++    </div>
++
++    <?php if (empty($rows)) : ?>
++        <div class="em-empty">
++            <div class="em-empty-ic"><i class="bi bi-archive"></i></div>
++            <h3>Nothing deleted yet</h3>
++            <p>Keys you delete will be listed here with who deleted them.</p>
++        </div>
++    <?php else : ?>
++        <div class="table-responsive">
++            <table class="table align-middle em-archive">
++                <thead>
++                    <tr>
++                        <th>Key</th>
++                        <th class="em-col-game">Game</th>
++                        <th class="em-col-issuer">Issued by</th>
++                        <th>Deleted by</th>
++                        <th class="em-col-why">Reason</th>
++                        <th class="text-end">When</th>
++                    </tr>
++                </thead>
++                <tbody>
++                    <?php foreach ($rows as $r) : ?>
++                        <tr>
++                            <td><span class="em-key"><?= esc($r->user_key ?: '—') ?></span></td>
++                            <td class="em-col-game"><span class="em-pill"><?= esc($r->game ?: '—') ?></span></td>
++                            <td class="em-col-issuer"><?= esc($r->registrator ?: '—') ?></td>
++                            <td><b><?= esc($r->deleted_by) ?></b></td>
++                            <td class="em-col-why"><span class="em-ledger-note"><?= esc($r->reason ?: '—') ?></span></td>
++                            <td class="text-end">
++                                <span class="em-when-inline" title="<?= esc($r->created_at) ?>">
++                                    <?= $time::parse($r->created_at)->humanize() ?>
++                                </span>
++                            </td>
++                        </tr>
++                    <?php endforeach; ?>
++                </tbody>
++            </table>
++        </div>
++    <?php endif; ?>
++</section>
++
++<?= $this->endSection() ?>
++
++<?= $this->section('css') ?>
++<style>
++    .em-note { color: var(--em-text-2); font-size: .86rem; margin: 0 0 .9rem; }
++    .em-ledger-note { color: var(--em-text-2); font-size: .86rem; }
++    .em-when-inline { font-family: var(--em-mono); font-size: .78rem; color: var(--em-dim); white-space: nowrap; }
++
++    @media (max-width: 760px) {
++        .em-col-game, .em-col-why { display: none; }
++
++        /* Tighten the cells so the remaining columns fit the width of a
++           phone instead of scrolling sideways inside the panel.
++
++           Qualified with the table's own class on purpose. ember.css sets
++           `.em-panel .table tbody td { padding: ... !important }` at this
++           width, and the page's <style> is rendered BEFORE ember.css (see
++           Layout/Starter.php), so anything less specific loses the tie and
++           silently changes nothing. */
++        .em-panel .table.em-archive thead th,
++        .em-panel .table.em-archive tbody td { padding: .5rem .4rem !important; }
++    }
++
++    /* This page exists to answer "who deleted this", so on the narrowest
++       screens the issuer is the column that gives way. */
++    @media (max-width: 560px) {
++        .em-col-issuer { display: none; }
++    }
++</style>
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 --- /tmp/orig_app/Views/Keys/generate.php	2026-08-24 23:02:52.614808324 +0000
 +++ app/Views/Keys/generate.php	2026-08-26 14:19:02.447946351 +0000
@@ -7944,8 +8964,8 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
          $("#devices").attr('rows', $(this).val());
 diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 --- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
-+++ app/Views/Keys/list.php	2026-08-26 09:04:42.294401234 +0000
-@@ -1,60 +1,176 @@
++++ app/Views/Keys/list.php	2026-08-26 19:57:33.804906561 +0000
+@@ -1,60 +1,187 @@
  <?= $this->extend('Layout/Starter') ?>
  
  <?= $this->section('content') ?>
@@ -7970,6 +8990,12 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +                title="Hide keys from onlookers" aria-pressed="true">
 +            <i class="bi bi-eye-slash"></i> <span class="em-blur-label">Hidden</span>
 +        </button>
++        <?php if ((int) $user->level === 1) : ?>
++            <a class="em-btn" href="<?= site_url('admin/deleted-keys') ?>"
++               title="Keys that were deleted, and by whom">
++                <i class="bi bi-archive"></i> <span class="em-blur-label">Deleted</span>
++            </a>
++        <?php endif; ?>
 +    </div>
 +</header>
 +
@@ -8096,8 +9122,13 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +<script src="<?= asset_ver('assets/vendor/js/dataTables.bootstrap5.min.js') ?>"></script>
  <script>
 +    // Endpoints come from site_url() so a subdirectory install keeps working.
-+    var KEYS_BASE = <?= json_encode(rtrim(site_url('keys'), '/')) ?>;
-+    var RESET_URL = <?= json_encode(site_url('keys/reset')) ?>;
++    var KEYS_BASE  = <?= json_encode(rtrim(site_url('keys'), '/')) ?>;
++    var RESET_URL  = <?= json_encode(site_url('keys/reset')) ?>;
++    var DELETE_URL = <?= json_encode(site_url('keys/delete')) ?>;
++
++    // Only decides whether the button is drawn. The server re-checks the
++    // level on every delete, so flipping this in a console achieves nothing.
++    var IS_ADMIN = <?= (int) $user->level === 1 ? 'true' : 'false' ?>;
 +
 +    // Every value below is written into HTML by a DataTables renderer, so it
 +    // has to be escaped here. The server escapes for its own templates; JSON
@@ -8164,7 +9195,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
          // ── تنها تنظیمِ صفحه‌بندی ──
          // این عدد = تعداد شماره‌صفحه‌ها (پیش‌فرض ۷). تعدادِ عددهای پشت‌سرهمِ اولِ لیست
          // برابرِ (این عدد − ۲) ئه. پس ۵ ⇒ «۱ ۲ ۳ … ۳۴۶»، ۶ ⇒ «۱ ۲ ۳ ۴ … ۳۴۶» و…
-@@ -63,10 +179,11 @@
+@@ -63,10 +190,11 @@
          var table = $('#datatable').DataTable({
              processing: true,
              serverSide: true,
@@ -8177,7 +9208,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
              columns: [{
                      data: 'id',
                      name: 'id_keys'
-@@ -76,52 +193,71 @@
+@@ -76,55 +204,143 @@
                  },
                  {
                      data: 'user_key',
@@ -8248,7 +9279,21 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +                        var edit  = '<a class="em-iconbtn is-accent" title="Edit key" ' +
 +                                    'href="' + KEYS_BASE + '/' + encodeURIComponent(row.id) + '">' +
 +                                    '<i class="bi bi-person"></i></a>';
-+                        return '<div class="em-actions">' + reset + edit + '</div>';
++                        // Admins only, and destructive, so it sits last: the
++                        // button you press by accident should not be this one.
++                        //
++                        // The key travels on a data attribute and is read back
++                        // by a delegated handler, not through an inline
++                        // onclick: a value written into an attribute is HTML
++                        // decoded before the JS in it is parsed, so escaping
++                        // once is not enough there.
++                        var del = IS_ADMIN
++                            ? '<button type="button" class="em-iconbtn is-bad em-del" ' +
++                              'title="Delete key" data-id="' + esc(row.id) + '" ' +
++                              'data-key="' + esc(row.user_key) + '">' +
++                              '<i class="bi bi-trash"></i></button>'
++                            : '';
++                        return '<div class="em-actions">' + reset + edit + del + '</div>';
                      }
                  }
              ]
@@ -8262,6 +9307,12 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 -                $(".keyBlur").addClass("key-sensi");
 -                $("#blur-out").html(`<i class="bi bi-eye-slash"></i>`);
 -            }
++        // Delegated: DataTables rebuilds the tbody on every draw, so a
++        // handler bound to the buttons themselves would survive one page.
++        $('#datatable').on('click', '.em-del', function () {
++            deleteKey($(this).data('id'), String($(this).data('key') || ''), table);
++        });
++
 +        $('#blur-out').on('click', function () {
 +            var hidden = $('.keyBlur').hasClass('key-sensi');
 +            $('.keyBlur').toggleClass('key-sensi', !hidden);
@@ -8273,7 +9324,59 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
          });
      });
  
-@@ -141,18 +277,25 @@
++    function deleteKey(id, userKey, table) {
++        Swal.fire({
++            title: 'Delete this key?',
++            html: 'The key <b>' + esc(userKey) + '</b> will stop working.<br>' +
++                  'It is kept in the deleted-keys archive, so the record of it stays.',
++            icon: 'warning',
++            input: 'text',
++            inputLabel: 'Reason (optional)',
++            inputAttributes: { maxlength: 255, autocapitalize: 'off' },
++            showCancelButton: true,
++            confirmButtonColor: '#f4725a',
++            cancelButtonColor: '#332420',
++            confirmButtonText: 'Yes, delete'
++        }).then(function (result) {
++            if (! result.isConfirmed) return;
++
++            var payload = {};
++            payload[$('meta[name="csrf-name"]').attr('content')] =
++                $('meta[name="csrf-hash"]').attr('content');
++            payload.id_keys = id;
++            payload.reason  = result.value || '';
++
++            $.post(DELETE_URL, payload, function (data) {
++                // security.regenerate rotates the hash per request; without
++                // this the second delete in a row would be rejected.
++                if (data && data.csrf) {
++                    $('meta[name="csrf-hash"]').attr('content', data.csrf);
++                }
++                if (data && data.ok) {
++                    table.ajax.reload(null, false);
++                    Toast.fire({
++                        icon: 'success',
++                        title: 'Deleted. ' + data.remaining + ' left in this window.'
++                    });
++                } else {
++                    Swal.fire('Not deleted', (data && data.error) || 'Something went wrong.', 'error');
++                }
++            }).fail(function (xhr) {
++                // A 403 here means the account is not an admin any more.
++                Swal.fire(
++                    'Not deleted',
++                    xhr.status === 403 ? 'You do not have permission to delete keys.'
++                                       : 'Could not reach the server.',
++                    'error'
++                );
++            });
++        });
++    }
++
+     function resetUserKey(keys) {
+         Swal.fire({
+             title: 'Are you sure?',
+@@ -141,18 +357,25 @@
                      title: 'Please wait...'
                  })
  
@@ -8309,7 +9412,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
                                          'Your device key has been reset.',
 diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
 --- /tmp/orig_app/Views/Layout/Header.php	2026-08-24 23:02:52.617286818 +0000
-+++ app/Views/Layout/Header.php	2026-08-26 14:53:42.695447126 +0000
++++ app/Views/Layout/Header.php	2026-08-26 19:56:50.278289250 +0000
 @@ -37,6 +37,11 @@
                                  <li>
                                      <hr class="dropdown-divider">
@@ -8322,12 +9425,22 @@ diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
                                  <?php if ($user->level == 1) : ?>
                                      <li class="dropdown-item text-muted">Admin</li>
                                      <li>
-@@ -50,6 +55,11 @@
+@@ -50,6 +55,21 @@
                                          </a>
                                      </li>
                                      <li>
 +                                        <a class="dropdown-item <?= url_is('admin/games') ? 'active' : '' ?>" href="<?= site_url('admin/games') ?>">
 +                                            <i class="bi bi-controller"></i> Games &amp; Pricing
++                                        </a>
++                                    </li>
++                                    <li>
++                                        <a class="dropdown-item <?= url_is('admin/balance-history') ? 'active' : '' ?>" href="<?= site_url('admin/balance-history') ?>">
++                                            <i class="bi bi-clock-history"></i> Balance History
++                                        </a>
++                                    </li>
++                                    <li>
++                                        <a class="dropdown-item <?= url_is('admin/deleted-keys') ? 'active' : '' ?>" href="<?= site_url('admin/deleted-keys') ?>">
++                                            <i class="bi bi-archive"></i> Deleted Keys
 +                                        </a>
 +                                    </li>
 +                                    <li>
@@ -9069,6 +10182,91 @@ diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
  
      <script>
          // Auto-close any open navbar dropdown as soon as the page scrolls.
+diff -ruN /tmp/orig_app/Views/Layout/msgStatus.php app/Views/Layout/msgStatus.php
+--- /tmp/orig_app/Views/Layout/msgStatus.php	2026-08-24 23:02:52.619164391 +0000
++++ app/Views/Layout/msgStatus.php	2026-08-26 19:45:41.930496451 +0000
+@@ -1,44 +1,44 @@
++<?php
++/**
++ * Flash messages.
++ *
++ * Everything here is either flashdata — read once, then gone — or a banner a
++ * controller deliberately passed in as $messages (the balance line on the
++ * generate page, for instance).
++ *
++ * There used to be an `else` branch that printed "Welcome <name>" whenever
++ * none of the above was set. That is not a flash: it has no trigger and no
++ * end, so it appeared on every page of every visit, and its only real effect
++ * was to bury the messages that did mean something.
++ *
++ * The greeting is now a genuine one-time flash set by Auth on a successful
++ * sign-in, so it shows once and does not come back.
++ */
++$flashes = [
++    'msgDanger'  => ['alert-danger',    'bi-x-circle-fill'],
++    'msgSuccess' => ['alert-success',   'bi-check-circle-fill'],
++    'msgWarning' => ['alert-warning',   'bi-exclamation-triangle-fill'],
++    'msgInfo'    => ['alert-secondary', 'bi-info-circle-fill'],
++];
++?>
+ <div class="flash-msgs">
+-    <?php if (session()->getFlashdata('msgDanger')) : ?>
+-        <div class="alert alert-danger alert-dismissible auto-alert fade show d-flex align-items-center gap-2" role="alert">
+-            <i class="bi bi-x-circle-fill"></i>
+-            <div><?= session()->getFlashdata('msgDanger') ?></div>
+-            <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+-        </div>
+-    <?php elseif (session()->getFlashdata('msgSuccess')) : ?>
+-        <div class="alert alert-success alert-dismissible auto-alert fade show d-flex align-items-center gap-2" role="alert">
+-            <i class="bi bi-check-circle-fill"></i>
+-            <div><?= session()->getFlashdata('msgSuccess') ?></div>
+-            <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+-        </div>
+-    <?php elseif (session()->getFlashdata('msgWarning')) : ?>
+-        <div class="alert alert-warning alert-dismissible auto-alert fade show d-flex align-items-center gap-2" role="alert">
+-            <i class="bi bi-exclamation-triangle-fill"></i>
+-            <div><?= session()->getFlashdata('msgWarning') ?></div>
+-            <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+-        </div>
+-    <?php else : ?>
+-        <?php if (session()->has('userid')) : ?>
+-            <?php if (isset($messages)) : ?>
+-                <div class="alert alert-<?= $messages[1] ?> alert-dismissible auto-alert fade show d-flex align-items-center gap-2" role="alert">
+-                    <i class="bi bi-info-circle-fill"></i>
+-                    <div><?= $messages[0] ?></div>
+-                    <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+-                </div>
+-            <?php else : ?>
+-                <div class="alert alert-secondary alert-dismissible fade show d-flex align-items-center gap-2" role="alert">
+-                    <i class="bi bi-person-check-fill"></i>
+-                    <div>Welcome <?= getName($user) ?></div>
+-                    <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+-                </div>
+-            <?php endif; ?>
+-        <?php else : ?>
+-            <div class="alert alert-secondary alert-dismissible fade show d-flex align-items-center gap-2" role="alert">
+-                <i class="bi bi-person-fill"></i>
+-                <div>Welcome Stranger</div>
++    <?php foreach ($flashes as $key => [$class, $icon]) : ?>
++        <?php if (session()->getFlashdata($key)) : ?>
++            <div class="alert <?= $class ?> alert-dismissible auto-alert fade show d-flex align-items-center gap-2" role="alert">
++                <i class="bi <?= $icon ?>"></i>
++                <div><?= session()->getFlashdata($key) ?></div>
+                 <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+             </div>
+         <?php endif; ?>
++    <?php endforeach; ?>
++
++    <?php // A banner the page asked for, e.g. the seller's balance on Generate. ?>
++    <?php if (isset($messages)) : ?>
++        <div class="alert alert-<?= esc($messages[1]) ?> alert-dismissible auto-alert fade show d-flex align-items-center gap-2" role="alert">
++            <i class="bi bi-info-circle-fill"></i>
++            <div><?= $messages[0] ?></div>
++            <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
++        </div>
+     <?php endif; ?>
+ </div>
+ 
 diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 --- /tmp/orig_app/Views/User/account.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Views/User/account.php	2026-08-26 14:57:10.405265385 +0000
@@ -9373,8 +10571,8 @@ diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 --- /tmp/orig_app/Views/User/dashboard.php	2026-08-24 23:02:52.619981516 +0000
-+++ app/Views/User/dashboard.php	2026-08-26 18:42:54.616814610 +0000
-@@ -2,145 +2,192 @@
++++ app/Views/User/dashboard.php	2026-08-26 20:05:14.587543663 +0000
+@@ -2,145 +2,195 @@
  
  <?= $this->section('content') ?>
  
@@ -9386,7 +10584,10 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +<header class="em-head em-rise">
 +    <div class="em-head-main">
 +        <span class="em-eyebrow"><i class="bi bi-speedometer2"></i> Dashboard</span>
-+        <h1>Welcome back, <?= getName($user) ?></h1>
++        <!-- Not a greeting. The greeting is the one-time flash set at
++             sign-in; a heading that greets you again on every visit to this
++             page is the same fault the flash had, just in bigger type. -->
++        <h1><?= esc(getName($user)) ?></h1>
 +        <p>
 +            <?= getLevel($user->level) ?> &middot; signed in
 +            <?= $time::parse(session()->time_since)->humanize() ?>
@@ -9693,7 +10894,7 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 --- /tmp/orig_app/Views/User/settings.php	2026-08-24 23:02:52.620264827 +0000
-+++ app/Views/User/settings.php	2026-08-26 15:02:30.338564597 +0000
++++ app/Views/User/settings.php	2026-08-26 20:22:45.131065056 +0000
 @@ -2,16 +2,28 @@
  
  <?= $this->section('content') ?>
@@ -9757,7 +10958,7 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
                  <?= form_open() ?>
  
                  <input type="hidden" name="fullname_form" value="1">
-@@ -62,13 +74,13 @@
+@@ -62,13 +74,219 @@
                      <?php endif; ?>
                  </div>
                  <div class="form-group my-2">
@@ -9772,8 +10973,215 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 +        </section>
      </div>
  </div>
- <?= $this->endSection() ?>
+-<?= $this->endSection() ?>
 \ No newline at end of file
++
++<?php
++/**
++ * One row of the sign-in list.
++ *
++ * $showUser adds the account name — the admin table needs it, your own list
++ * does not, and repeating your own username on forty rows is just noise.
++ */
++$signInRow = static function (object $r, bool $showUser, bool $isCurrent) {
++    $open  = $r->logout_at === null;
++    // "Open" only counts while the session could still be in use. A row left
++    // open by a browser that was simply closed is not someone signed in.
++    $stale = $open && strtotime((string) ($r->last_seen_at ?: $r->login_at)) < time() - 7200;
++    ?>
++    <tr<?= $isCurrent ? ' class="em-sess-current"' : '' ?>>
++        <?php if ($showUser) : ?>
++            <td>
++                <b><?= esc($r->username) ?></b>
++                <?php if ($isCurrent) : ?><span class="em-pill is-accent">you</span><?php endif; ?>
++            </td>
++        <?php endif; ?>
++        <td>
++            <b><?= esc($r->device ?: 'Unknown device') ?></b>
++            <?php if (! $showUser && $isCurrent) : ?>
++                <span class="em-pill is-accent">this device</span>
++            <?php endif; ?>
++            <small class="em-ua" title="<?= esc($r->user_agent ?? '') ?>"><?= esc($r->user_agent ?: '—') ?></small>
++        </td>
++        <td class="em-sess-time">
++            <b><?= esc(date('H:i:s', strtotime((string) $r->login_at))) ?></b>
++            <small><?= esc(date('D j M', strtotime((string) $r->login_at))) ?></small>
++        </td>
++        <td class="em-sess-time em-sess-out">
++            <?php if ($open) : ?>
++                <span class="text-muted">—</span>
++                <small>last seen <?= esc(date('H:i:s', strtotime((string) ($r->last_seen_at ?: $r->login_at)))) ?></small>
++            <?php else : ?>
++                <b><?= esc(date('H:i:s', strtotime((string) $r->logout_at))) ?></b>
++                <small><?= esc(date('D j M', strtotime((string) $r->logout_at))) ?></small>
++            <?php endif; ?>
++        </td>
++        <td class="text-end">
++            <?php if ($open && ! $stale) : ?>
++                <span class="em-pill is-ok"><span class="em-dot"></span>Signed in</span>
++            <?php elseif ($open) : ?>
++                <span class="em-pill is-warn">Left open</span>
++            <?php elseif ($r->end_reason === 'fingerprint') : ?>
++                <!-- The session was destroyed because the cookie turned up in
++                     a different browser. Worth calling out by name: this is
++                     the one row on the page that means someone tried. -->
++                <span class="em-pill is-bad"><i class="bi bi-shield-exclamation"></i> Blocked</span>
++            <?php else : ?>
++                <span class="em-pill">Signed out</span>
++            <?php endif; ?>
++        </td>
++    </tr>
++    <?php
++};
++?>
++
++<section class="em-panel em-rise em-rise-3">
++    <div class="em-panel-h">
++        <h2><i class="bi bi-laptop"></i> Your sign-ins</h2>
++        <div class="em-panel-act">
++            <span class="em-pill"><?= count($mySessions) ?> recent</span>
++        </div>
++    </div>
++
++    <?php if (empty($mySessions)) : ?>
++        <div class="em-empty">
++            <div class="em-empty-ic"><i class="bi bi-laptop"></i></div>
++            <h3>Nothing recorded yet</h3>
++            <p>Sign-ins are listed here from now on. Sign out and back in to see this one.</p>
++        </div>
++    <?php else : ?>
++        <div class="em-panel-b" style="padding-bottom:0">
++            <p class="em-note">
++                Every sign-in to your account, with the device it came from.
++                If you see one you do not recognise, change your password.
++            </p>
++        </div>
++        <div class="table-responsive">
++            <table class="table align-middle em-sess">
++                <thead>
++                    <tr>
++                        <th>Device</th>
++                        <th>Signed in</th>
++                        <th class="em-sess-out">Signed out</th>
++                        <th class="text-end">State</th>
++                    </tr>
++                </thead>
++                <tbody>
++                    <?php foreach ($mySessions as $r) : ?>
++                        <?php $signInRow($r, false, $r->session_id === $thisSession); ?>
++                    <?php endforeach; ?>
++                </tbody>
++            </table>
++        </div>
++    <?php endif; ?>
++</section>
++
++<?php if ((int) $user->level === 1) : ?>
++    <section class="em-panel em-rise em-rise-4">
++        <div class="em-panel-h">
++            <h2><i class="bi bi-people"></i> All sign-ins</h2>
++            <div class="em-panel-act">
++                <span class="em-pill is-accent">Admin</span>
++                <span class="em-pill"><?= count($allSessions) ?> recent</span>
++            </div>
++        </div>
++
++        <?php if (empty($allSessions)) : ?>
++            <div class="em-empty">
++                <div class="em-empty-ic"><i class="bi bi-people"></i></div>
++                <h3>No sign-ins recorded</h3>
++                <p>Every account's sign-ins will be listed here.</p>
++            </div>
++        <?php else : ?>
++            <div class="em-panel-b" style="padding-bottom:0">
++                <p class="em-note">
++                    Who signed in, from what, and when they left. The full
++                    user agent is under each device name.
++                </p>
++            </div>
++            <div class="table-responsive">
++                <table class="table align-middle em-sess">
++                    <thead>
++                        <tr>
++                            <th>Account</th>
++                            <th>Device</th>
++                            <th>Signed in</th>
++                            <th class="em-sess-out">Signed out</th>
++                            <th class="text-end">State</th>
++                        </tr>
++                    </thead>
++                    <tbody>
++                        <?php foreach ($allSessions as $r) : ?>
++                            <?php $signInRow($r, true, $r->session_id === $thisSession); ?>
++                        <?php endforeach; ?>
++                    </tbody>
++                </table>
++            </div>
++        <?php endif; ?>
++    </section>
++<?php endif; ?>
++
++<?= $this->endSection() ?>
++
++<?= $this->section('css') ?>
++<style>
++    .em-note { color: var(--em-text-2); font-size: .86rem; margin: 0 0 .9rem; }
++
++    .em-sess td { vertical-align: top; }
++    .em-sess small { display: block; margin-top: 2px; font-size: .72rem; color: var(--em-dim); }
++    .em-sess-time b { font-family: var(--em-mono); font-size: .84rem; }
++    .em-sess-time small { font-family: var(--em-mono); }
++
++    /* A user agent is one long unbroken string. Left alone it forces the
++       table wider than the screen; clamped it stays one line and the whole
++       value is still on the title attribute. */
++    .em-ua {
++        max-width: 34ch; overflow: hidden;
++        text-overflow: ellipsis; white-space: nowrap;
++    }
++
++    .em-sess-current { background: var(--em-wash); }
++    .em-sess .em-pill { margin-left: .4rem; }
++
++    @media (max-width: 700px) {
++        /* The user agent and the sign-out time are the two that can wait for
++           a wider screen; the device, the time you signed in and the state
++           are what the row is for - with the user agent left in, the state
++           pill was pushed off the right edge of a phone.
++
++           Both selectors are qualified with .em-sess deliberately. A media
++           query adds no specificity, so a bare `.em-ua` loses to the
++           `.em-sess small` rule above it and the row stays visible. */
++        .em-sess .em-ua      { display: none; }
++        .em-sess .em-sess-out { display: none; }
++
++        /* Tighten the cells so the remaining columns fit the width of a
++           phone instead of scrolling sideways inside the panel.
++
++           Qualified with the table's own class on purpose. ember.css sets
++           `.em-panel .table tbody td { padding: ... !important }` at this
++           width, and the page's <style> is rendered BEFORE ember.css (see
++           Layout/Starter.php), so anything less specific loses the tie and
++           silently changes nothing. */
++        .em-panel .table.em-sess thead th,
++        .em-panel .table.em-sess tbody td { padding: .5rem .4rem !important; }
++    }
++
++    /* A 375px phone is 16px short of fitting the admin table's five columns.
++       Trimming the state pill rather than dropping a column keeps every
++       piece of the row on screen. */
++    @media (max-width: 480px) {
++        .em-panel .table.em-sess .em-pill {
++            padding: .18rem .38rem;
++            font-size: .7rem;
++        }
++        .em-sess .em-sess-time b { font-size: .78rem; }
++        /* The header, not the values, sets the floor on these columns:
++           "SIGNED IN" at ember.css's tracking is wider than 23:44:35. */
++        .em-panel .table.em-sess thead th { letter-spacing: .05em; }
++    }
++</style>
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/error_404.php
 --- /tmp/orig_app/Views/errors/html/error_404.php	2026-08-24 23:02:52.624646037 +0000
 +++ app/Views/errors/html/error_404.php	2026-08-26 09:00:03.558655108 +0000
