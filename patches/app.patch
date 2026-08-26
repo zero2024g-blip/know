@@ -3983,7 +3983,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-24 23:11:48.704835471 +0000
++++ app/Controllers/Keys.php	2026-08-26 07:51:43.785591136 +0000
 @@ -64,16 +64,18 @@
          $model = $this->model;
          $user = $this->user;
@@ -4084,6 +4084,196 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function edit_key($key = false)
+@@ -293,7 +312,11 @@
+         $maxd = $this->request->getPost('max_devices');
+         $drtn = $this->request->getPost('duration');
+         $quantity = (int) $this->request->getPost('quantity');
+-        $getPrice = getPrice($this->price, $drtn, $maxd);
++
++        // Which tiers this role is allowed to buy. The admin list includes a
++        // free 1-hour test tier that a seller must never reach.
++        $allowed = (int) $user->level === 1 ? $this->duration_admin : $this->duration_seller;
++        $allowed_durations = implode(',', array_keys($allowed));
+ 
+         $game_list = implode(",", array_keys($this->game_list));
+         $form_rules = [
+@@ -306,15 +329,18 @@
+             ],
+             'duration' => [
+                 'label' => 'duration',
+-                'rules' => 'required|numeric|greater_than_equal_to[1]',
++                // Must be one of the tiers THIS role may buy. Previously any
++                // number passed, and an unlisted one priced at zero.
++                'rules' => "required|numeric|in_list[$allowed_durations]",
+                 'errors' => [
++                    'in_list' => 'That duration is not available on your account.',
+                     'greater_than_equal_to' => 'Minimum {field} is invalid.',
+                     'numeric' => 'Invalid hours {field}.'
+                 ]
+             ],
+             'max_devices' => [
+                 'label' => 'devices',
+-                'rules' => 'required|numeric|greater_than_equal_to[1]',
++                'rules' => 'required|numeric|greater_than_equal_to[1]|less_than_equal_to[100]',
+                 'errors' => [
+                     'greater_than_equal_to' => 'Minimum {field} is invalid.',
+                     'numeric' => 'Invalid max of {field}.'
+@@ -322,7 +348,9 @@
+             ],
+             'quantity' => [
+                 'label' => 'Quantity',
+-                'rules' => 'required|numeric|greater_than_equal_to[1]',
++                // Bounded: the loop below runs once per unit, and an
++                // unbounded quantity is a way to hang the request.
++                'rules' => 'required|numeric|greater_than_equal_to[1]|less_than_equal_to[50]',
+                 'errors' => [
+                     'greater_than_equal_to' => 'Minimum {field} is invalid.',
+                     'numeric' => 'Invalid quantity value.',
+@@ -331,57 +359,99 @@
+         ];
+ 
+         $validation = Services::validation();
+-        $reduceCheck = ($user->saldo - $getPrice * $quantity);
+-        // dd($reduceCheck);
+-        if ($reduceCheck < 0) {
+-            $validation->setError('duration', 'Insufficient balance');
+-            return redirect()->back()->withInput()->with('msgWarning', 'Please top up to your beloved admin.');
+-        } else {
+-            if (!$this->validate($form_rules)) {
+-                return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the error');
+-            } else {
+-                $generatedKeys = [];
+-                $history = new HistoryModel();
+-                $msg = "Successfuly Generated.";
+-
+-                // * Generate as many keys as requested (Quantity)
+-                for ($i = 0; $i < $quantity; $i++) {
+-                    $license = random_string('alnum', 12);
+-                    $custom_license = $game . "_" . $license;
+-
+-                    $data_response = [
+-                        'game' => $game,
+-                        'user_key' => $custom_license,
+-                        'duration' => $drtn,
+-                        'max_devices' => $maxd,
+-                        'registrator' => $user->username,
+-                    ];
+ 
+-                    // insert the key, then log ITS OWN history row (one per quantity)
+-                    $idKeys = $this->model->insert($data_response);
+-                    $history->insert([
+-                        'keys_id' => $idKeys,
+-                        'user_do' => $user->username,
+-                        'info' => "$game|" . substr($license, 0, 5) . "|$drtn|$maxd",
+-                    ]);
++        // Validate BEFORE pricing. The old order priced un-validated input,
++        // so an unlisted duration reached getPrice() and came back free.
++        if (! $this->validate($form_rules)) {
++            return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the error');
++        }
+ 
+-                    // Add the generated key to the list
+-                    $generatedKeys[] = $data_response;
+-                }
++        // Re-read the posted values now that the rules have vetted them.
++        $drtn = (int) $this->request->getPost('duration');
++        $maxd = (int) $this->request->getPost('max_devices');
++        $quantity = (int) $this->request->getPost('quantity');
++
++        $unitPrice = getPrice($this->price, $drtn, $maxd);
++        if ($unitPrice === null) {
++            $validation->setError('duration', 'That duration is not for sale.');
++            return redirect()->back()->withInput()->with('msgDanger', 'Invalid duration.');
++        }
++
++        $totalfees = $unitPrice * $quantity;
++
++        $db = \Config\Database::connect();
++        $db->transBegin();
+ 
+-                // * reduce saldo once for the whole batch (price * quantity)
+-                $this->userModel->update(session('userid'), ['saldo' => $reduceCheck]);
+-                $totalfees = $getPrice * $quantity;
+-
+-                $other_response = [
+-                    'fees' => $totalfees,
+-                    'quantity' => $quantity,
+-                    'generatedKeys' => $generatedKeys,
++        try {
++            // Atomic conditional debit. Two concurrent requests used to read
++            // the same balance and each write an absolute value, so both got
++            // keys and only one payment landed. Here the database itself
++            // subtracts and refuses when the funds are not there, so the
++            // second request finds nothing left to take.
++            $db->table('users')
++               ->where('id_users', session('userid'))
++               ->where('saldo >=', $totalfees)
++               ->set('saldo', 'saldo - ' . (float) $totalfees, false)
++               ->update();
++
++            if ($db->affectedRows() !== 1) {
++                $db->transRollback();
++                $validation->setError('duration', 'Insufficient balance');
++                return redirect()->back()->withInput()
++                    ->with('msgWarning', 'Please top up to your beloved admin.');
++            }
++
++            $generatedKeys = [];
++            $history = new HistoryModel();
++
++            for ($i = 0; $i < $quantity; $i++) {
++                $license = random_string('alnum', 12);
++                $custom_license = $game . "_" . $license;
++
++                $data_response = [
++                    'game' => $game,
++                    'user_key' => $custom_license,
++                    'duration' => $drtn,
++                    'max_devices' => $maxd,
++                    'registrator' => $user->username,
+                 ];
+ 
+-                session()->setFlashdata(array_merge($data_response, $other_response));
+-                return redirect()->back()->with('msgSuccess', $msg);
++                $idKeys = $this->model->insert($data_response);
++                if (! $idKeys) {
++                    throw new \RuntimeException('Key insert failed');
++                }
++
++                $history->insert([
++                    'keys_id' => $idKeys,
++                    'user_do' => $user->username,
++                    'info' => "$game|" . substr($license, 0, 5) . "|$drtn|$maxd",
++                ]);
++
++                $generatedKeys[] = $data_response;
++            }
++
++            if ($db->transStatus() === false) {
++                throw new \RuntimeException('Transaction failed');
+             }
++
++            $db->transCommit();
++        } catch (\Throwable $e) {
++            // Debit and keys live or die together. Previously the keys were
++            // inserted first and the debit came after the loop, so a failure
++            // in between handed out keys that were never paid for.
++            $db->transRollback();
++            log_message('error', 'Key generation rolled back: ' . $e->getMessage());
++            return redirect()->back()->withInput()
++                ->with('msgDanger', 'Could not complete. Nothing was charged - please try again.');
+         }
++
++        $other_response = [
++            'fees' => $totalfees,
++            'quantity' => $quantity,
++            'generatedKeys' => $generatedKeys,
++        ];
++
++        session()->setFlashdata(array_merge($data_response, $other_response));
++        return redirect()->back()->with('msgSuccess', 'Successfuly Generated.');
+     }
+ }
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
 +++ app/Controllers/User.php	2026-08-24 23:08:50.867783896 +0000
@@ -4266,8 +4456,8 @@ diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
 +}
 diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 --- /tmp/orig_app/Helpers/nata_helper.php	2026-08-24 23:02:52.536343011 +0000
-+++ app/Helpers/nata_helper.php	2026-08-24 23:08:28.293569628 +0000
-@@ -1,97 +1,104 @@
++++ app/Helpers/nata_helper.php	2026-08-26 07:50:50.742802241 +0000
+@@ -1,97 +1,125 @@
 -<?php
 -
 -/**
@@ -4463,11 +4653,32 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +    }
 +}
 +
++/**
++ * Price for a key, or NULL when the duration is not one we sell.
++ *
++ * The old version read $price[$duration] blind. An unlisted duration gave
++ * an undefined index -> null -> null * devices = 0 -> `return false`, and
++ * the caller then computed `saldo - false * qty`, which is `saldo - 0`.
++ * A seller could post any duration they liked and be charged nothing.
++ *
++ * NULL is returned for "not for sale" so the caller must handle it
++ * explicitly; 0 and false both read as a legitimate free key.
++ */
 +function getPrice($price, $duration, $device_max)
 +{
-+    $priceReal = $price[$duration];
-+    $result = ($priceReal * $device_max);
-+    return ($result <= 0) ? false : $result;
++    $duration   = (int) $duration;
++    $device_max = (int) $device_max;
++
++    if (! array_key_exists($duration, $price) || $device_max < 1) {
++        return null;
++    }
++
++    $unit = (float) $price[$duration];
++    if ($unit < 0) {
++        return null;
++    }
++
++    return $unit * $device_max;
 +}
 diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
 --- /tmp/orig_app/Models/UserModel.php	2026-08-24 23:02:52.607940552 +0000
