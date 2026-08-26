@@ -115,3 +115,77 @@ UPDATE `referral_code`
 -- sixth attempt must tell you to wait. If it does not, auth_ratelimit
 -- is not being written to — check writable/logs/ for a line containing
 -- "Rate limiter unavailable".
+
+-- ---------------------------------------------------------------------
+-- 5. Games and their pricing, now editable from the admin panel
+-- ---------------------------------------------------------------------
+-- Games, durations and prices used to be PHP arrays inside
+-- Controllers/Keys.php: adding a game or changing a price meant editing
+-- code and re-uploading. They live here now, and Admin -> Games edits
+-- them.
+--
+-- Prices are per device, per key. A duration belongs to one game, so
+-- "30 days" can cost something different for each title, and a game can
+-- offer a tier no other game does.
+--
+-- games.code is what goes into keys_code.game and into the key string
+-- itself (CODM_a1b2c3...). Existing keys reference it, so the panel
+-- refuses to change a code once keys exist against it. The display name
+-- is free to change at any time.
+
+CREATE TABLE IF NOT EXISTS `games` (
+  `id_game`    INT AUTO_INCREMENT PRIMARY KEY,
+  `code`       VARCHAR(32)  NOT NULL,
+  `name`       VARCHAR(96)  NOT NULL,
+  `status`     TINYINT      NOT NULL DEFAULT 1,
+  `sort_order` INT          NOT NULL DEFAULT 0,
+  `created_at` DATETIME NULL,
+  `updated_at` DATETIME NULL,
+  UNIQUE KEY `uniq_games_code` (`code`),
+  KEY `idx_games_status` (`status`, `sort_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `game_durations` (
+  `id_duration` INT AUTO_INCREMENT PRIMARY KEY,
+  `game_id`     INT           NOT NULL,
+  `hours`       INT           NOT NULL,
+  `label`       VARCHAR(64)   NOT NULL,
+  `price`       DECIMAL(10,2) NOT NULL DEFAULT 0,
+  `admin_only`  TINYINT       NOT NULL DEFAULT 0,
+  `status`      TINYINT       NOT NULL DEFAULT 1,
+  `sort_order`  INT           NOT NULL DEFAULT 0,
+  `created_at`  DATETIME NULL,
+  `updated_at`  DATETIME NULL,
+  UNIQUE KEY `uniq_game_hours` (`game_id`, `hours`),
+  KEY `idx_dur_game` (`game_id`, `status`, `sort_order`),
+  CONSTRAINT `fk_dur_game` FOREIGN KEY (`game_id`)
+      REFERENCES `games` (`id_game`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- The three games and four tiers that were hard-coded, so nothing
+-- changes on the day you deploy. INSERT IGNORE means re-running this
+-- file will not duplicate them or undo your later edits.
+INSERT IGNORE INTO `games` (`code`, `name`, `status`, `sort_order`, `created_at`, `updated_at`) VALUES
+  ('CODM',  'Call of Duty Mobile', 1, 10, NOW(), NOW()),
+  ('PUBGM', 'PUBG Mobile',         1, 20, NOW(), NOW()),
+  ('FF',    'Free Fire Mobile',    1, 30, NOW(), NOW());
+
+-- admin_only = 1 on the 1-hour tier: it is the free test key, and a
+-- reseller must never be able to buy it. The old code enforced that with
+-- two separate PHP arrays; it is one flag now.
+INSERT IGNORE INTO `game_durations`
+  (`game_id`, `hours`, `label`, `price`, `admin_only`, `status`, `sort_order`, `created_at`, `updated_at`)
+SELECT g.`id_game`, d.`hours`, d.`label`, d.`price`, d.`admin_only`, 1, d.`sort_order`, NOW(), NOW()
+FROM `games` g
+CROSS JOIN (
+      SELECT    1 AS hours, '1 Hour (test key)' AS label,  0.00 AS price, 1 AS admin_only, 10 AS sort_order
+UNION SELECT   24,          '1 Day',                       1.00,          0,               20
+UNION SELECT  168,          '7 Days',                      5.00,          0,               30
+UNION SELECT  720,          '30 Days',                    12.00,          0,               40
+) d
+WHERE g.`code` IN ('CODM', 'PUBGM', 'FF');
+
+-- Check:
+--     SELECT g.code, d.hours, d.label, d.price, d.admin_only
+--       FROM games g JOIN game_durations d ON d.game_id = g.id_game
+--      ORDER BY g.sort_order, d.sort_order;

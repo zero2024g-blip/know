@@ -188,6 +188,46 @@ box until you rebuild it.
   with a figure. It was permanently blank before (see below).
 - On a phone, tap the username field on the login page. The page must not
   zoom in.
+- Open Admin → Games & Pricing. Add a game, give it a tier, then change
+  that tier's price and check the Generate page shows the new figure.
+- Sign in as a **reseller** and open Generate. The 1-hour test key must
+  not be in the duration list for any game.
+- In a browser, try `https://your-panel/.env` — it must be refused, not
+  downloaded.
+
+## Games, tiers and pricing are now edited in the panel
+
+**Admin → Games & Pricing.** Games, durations and prices used to be PHP
+arrays inside `Controllers/Keys.php`, so adding a game meant editing code
+and re-uploading. They are database rows now.
+
+- **A game** is a short code plus a display name — `CODM` /
+  *Call of Duty Mobile*. The code goes inside every key it issues
+  (`CODM_a1b2c3…`), so once keys exist the panel locks that field; the
+  display name is always free to change.
+- **A tier** belongs to one game: hours, label, price per device. So
+  30 days can be $12 on one game and $25 on another, and a game can offer
+  a yearly tier no other game has. Add, edit and remove them per game.
+- **"Admins only"** on a tier is how the free 1-hour test key works. A
+  seller never sees it, and the server refuses it even if the form is
+  edited by hand — I tested exactly that: a seller posting `duration=1`
+  is rejected and charged nothing, while an admin gets the key for $0.
+- **Inactive** hides a game or tier from sellers without touching keys
+  already sold. Deleting a game that still has keys is refused outright,
+  because the code is baked into those keys.
+
+`MIGRATION.sql` seeds the three games and four tiers that were hard-coded,
+so nothing changes on the day you deploy.
+
+Two bugs fell out of building this:
+
+- **A free key could never be generated at all.** The balance debit ran
+  `saldo = saldo - 0`, which leaves the row identical, so MySQL reports
+  zero affected rows and the code read that as "insufficient funds". Any
+  zero-cost tier failed. The debit is now skipped when there is nothing
+  to charge.
+- **"$test" in the dropdown.** That label is gone; the 1-hour tier is
+  "1 Hour (test key)" at $0.00.
 
 ## Cross-platform check
 
@@ -219,6 +259,51 @@ prefix, `scrollbar-width` has a `::-webkit-scrollbar` fallback, and `:has()`
 (Safari 15.4+) is used only for a SweetAlert backdrop that degrades quietly.
 `gap` and `inset` need iOS 14.5+, which is the effective floor for this build.
 
+## Locking down the sensitive files
+
+I served the panel from a real Apache with the document root set to the
+**project root** — the worst case, and what `app.baseURL` ending in
+`/public` implies — then probed it over HTTPS. 67 checks: every route and
+asset still loads, and every one of these is refused:
+
+    .env  .env.bak  env.template  .htaccess  .htpasswd  .user.ini
+    composer.json  composer.lock  package.json  phpunit.xml.dist
+    .git/config  .git/HEAD  .gitignore
+    app/**  vendor/**  writable/**  tools/**  builds/**
+    spark  LICENSE  README.md  MIGRATION.sql  DEPLOYMENT-MODES.md
+    default.php  backup.sql  dump.sql.gz  panel.zip  id_rsa  server.key
+    config.php~  .DS_Store  Database.php.bak
+
+…and the tricks people try to get past a filter, all refused:
+`/public/../.env`, `/./.env`, `/.env.`, `/.env%20`, `//.env`,
+`/%2e%65nv`, `/app/../.env`, `/index.php/../.env`, `/.env?x=1`, `/.env/.`
+
+**What changed.** The old rules were a blacklist — they blocked the
+patterns someone had thought of. `env.template` and `default.php` sailed
+straight through; I watched them download. It is a whitelist now: a real
+file whose extension is not in the servable list is refused, whatever it
+is called. PHP is refused everywhere except the front controller, so
+`tools/genkey.php` and any file that ever gets uploaded cannot execute.
+`writable/` has its own rules that both deny access *and* switch the PHP
+engine off, so a file landing there is inert twice over.
+
+**I also found my own rule had broken the site.** The previous
+"deny anything without a file extension" matched every CodeIgniter route —
+`/login`, `/keys`, `/dashboard` — because routes are not files. On Apache
+that returns 403 for the entire panel. It now tests the resolved filename
+and only fires for files that actually exist on disk, and I verified every
+route still loads.
+
+**The one thing worth more than all of it:** point the document root at
+`public/`. Then `app/`, `vendor/`, `writable/` and `.env` are not in the
+served tree at all and none of these rules is load-bearing. In hPanel this
+is the "Document Root" field. Change `app.baseURL` to drop the `/public`
+at the same time.
+
+Both deployment modes were re-verified after the changes: with Cloudflare
+(mode A) a request that does not come from a Cloudflare IP gets 403, and
+`tools/set-mode.sh` still round-trips between modes byte-for-byte.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.
@@ -228,10 +313,5 @@ prefix, `scrollbar-width` has a `::-webkit-scrollbar` fallback, and `:has()`
       SELECT id_users, username FROM users WHERE password LIKE '$2y$08$%';
 
   then force a reset on those, and delete `create_password()`.
-- **The duration dropdown says "$test".** `Controllers/Keys.php` line 30
-  reads `1 => '1 Hours &mdash; $test/Device'` while the price table prices
-  that tier at 0. Your sellers see the word "test" in the menu. It is your
-  pricing copy, so I left it alone — change it to `$0` or drop the 1-hour
-  tier, whichever you meant.
 - **Connect.php** was empty in the archive. It is exempt from CSRF *and*
   auth, so it is the most exposed route in the app and still unreviewed.

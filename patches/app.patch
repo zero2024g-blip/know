@@ -3943,8 +3943,8 @@ diff -ruN /tmp/orig_app/Config/Logger.php app/Config/Logger.php
  		/**
 diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 --- /tmp/orig_app/Config/Routes.php	2026-08-24 23:02:52.524373647 +0000
-+++ app/Config/Routes.php	2026-08-24 23:04:47.407781185 +0000
-@@ -44,7 +44,7 @@
++++ app/Config/Routes.php	2026-08-26 14:19:59.873462719 +0000
+@@ -44,13 +44,22 @@
  	$routes->match(['get', 'post'], '/', 'Keys::index');
  	$routes->match(['get', 'post'], 'generate', 'Keys::generate');
  	$routes->get('(:num)', 'Keys::edit_key/$1');
@@ -3953,6 +3953,21 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
  	$routes->post('edit', 'Keys::edit_key');
  	$routes->match(['get', 'post'], 'api', 'Keys::api_get_keys');
  });
+ 
+ $routes->group('admin', ['filter' => 'admin'], function ($routes) {
+ 	$routes->match(['get', 'post'], 'create-referral', 'User::ref_index');
++
++	// Games, tiers and prices. POST only for anything that writes: a GET that
++	// changes state is reachable from an <img src> on another site, and the
++	// CSRF filter does not cover GET.
++	$routes->get('games', 'Games::index');
++	$routes->post('games/save', 'Games::saveGame');
++	$routes->post('games/delete', 'Games::deleteGame');
++	$routes->post('games/duration/save', 'Games::saveDuration');
++	$routes->post('games/duration/delete', 'Games::deleteDuration');
+ 	$routes->match(['get', 'post'], 'manage-users', 'User::manage_users');
+ 	$routes->match(['get', 'post'], 'edit/(:num)', 'User::user_edit/$1');
+ 	/* --------------------------- Admin API Grouping -------------------------- */
 diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 --- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
 +++ app/Controllers/Auth.php	2026-08-26 13:41:10.466818656 +0000
@@ -4155,6 +4170,279 @@ diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseContr
 +    }
 +
  }
+diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
+--- /tmp/orig_app/Controllers/Games.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Controllers/Games.php	2026-08-26 14:24:46.899279891 +0000
+@@ -0,0 +1,269 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Models\DurationModel;
++use App\Models\GameModel;
++use App\Models\UserModel;
++use Config\Services;
++
++/**
++ * Admin -> Games.
++ *
++ * The catalogue used to be PHP arrays in Controllers/Keys.php, so adding a
++ * game or changing a price meant editing code and re-uploading. This edits
++ * the same thing from the panel.
++ *
++ * Every route here is behind the `admin` filter (see Config/Routes.php), and
++ * each action re-checks the level itself rather than trusting that — a route
++ * can be moved out of the group by accident, a method cannot lose its own
++ * guard as quietly.
++ */
++class Games extends BaseController
++{
++    protected $games, $durations, $user;
++
++    public function __construct()
++    {
++        $this->games     = new GameModel();
++        $this->durations = new DurationModel();
++        $this->user      = (new UserModel())->getUser();
++    }
++
++    /** Refuse anyone who is not an admin, whatever the routing says. */
++    private function denyNonAdmin()
++    {
++        if (! $this->user || (int) $this->user->level !== 1) {
++            return redirect()->to('dashboard')->with('msgWarning', 'Access Denied!');
++        }
++        return null;
++    }
++
++    public function index()
++    {
++        if ($stop = $this->denyNonAdmin()) {
++            return $stop;
++        }
++
++        $games = $this->games->allOrdered();
++        $tiers = [];
++        foreach ($games as $g) {
++            $tiers[$g->id_game] = $this->durations->forGame((int) $g->id_game, false);
++        }
++
++        return view('Admin/games', [
++            'title'      => 'Games',
++            'user'       => $this->user,
++            'time'       => $this->time ?? new \CodeIgniter\I18n\Time(),
++            'games'      => $games,
++            'tiers'      => $tiers,
++            'keyCounts'  => array_combine(
++                array_map(static fn ($g) => $g->id_game, $games),
++                array_map(fn ($g) => $this->games->keyCount($g->code), $games)
++            ),
++            'validation' => Services::validation(),
++        ]);
++    }
++
++    // -----------------------------------------------------------------
++    //  Games
++    // -----------------------------------------------------------------
++
++    public function saveGame()
++    {
++        if ($stop = $this->denyNonAdmin()) {
++            return $stop;
++        }
++
++        $id   = (int) $this->request->getPost('id_game');
++        $code = strtoupper(trim((string) $this->request->getPost('code')));
++
++        // The code is embedded in every key string this game has produced
++        // (CODM_a1b2c3...), so it is fixed once keys exist. The name is not.
++        $existing = $id ? $this->games->find($id) : null;
++        $locked   = $existing && $this->games->keyCount($existing->code) > 0;
++        if ($locked) {
++            $code = $existing->code;
++        }
++
++        $unique = $id ? "is_unique[games.code,id_game,{$id}]" : 'is_unique[games.code]';
++
++        $rules = [
++            'code' => [
++                'label' => 'code',
++                'rules' => "required|alpha_numeric|min_length[2]|max_length[32]|{$unique}",
++                'errors' => [
++                    'alpha_numeric' => 'The code may only contain letters and numbers.',
++                    'is_unique'     => 'Another game already uses that code.',
++                ],
++            ],
++            'name' => [
++                'label' => 'name',
++                'rules' => 'required|max_length[96]',
++            ],
++            'status'     => ['label' => 'status', 'rules' => 'required|in_list[0,1]'],
++            'sort_order' => ['label' => 'order',  'rules' => 'permit_empty|integer|greater_than_equal_to[0]|less_than_equal_to[9999]'],
++        ];
++
++        // Validate the code we will actually store, not the posted one, or a
++        // locked game would fail is_unique against itself.
++        //
++        // The validation service rather than $this->validate(): that reads
++        // straight from the request, and validateData() - which takes an
++        // array - only exists from CodeIgniter 4.2.
++        $post = $this->request->getPost();
++        $post['code'] = $code;
++
++        $validation = Services::validation();
++        if (! $validation->setRules($rules)->run($post)) {
++            return redirect()->to('admin/games')->withInput()
++                ->with('msgDanger', 'Could not save the game: '
++                    . implode(' ', $validation->getErrors()));
++        }
++
++        $data = [
++            'code'       => $code,
++            'name'       => trim((string) $this->request->getPost('name')),
++            'status'     => (int) $this->request->getPost('status'),
++            'sort_order' => (int) ($this->request->getPost('sort_order') ?: 0),
++        ];
++
++        if ($id && $existing) {
++            $this->games->update($id, $data);
++            $msg = 'Game updated.';
++        } else {
++            $this->games->insert($data);
++            $msg = 'Game added.';
++        }
++
++        return redirect()->to('admin/games')->with('msgSuccess', $msg);
++    }
++
++    public function deleteGame()
++    {
++        if ($stop = $this->denyNonAdmin()) {
++            return $stop;
++        }
++
++        $id   = (int) $this->request->getPost('id_game');
++        $game = $id ? $this->games->find($id) : null;
++        if (! $game) {
++            return redirect()->to('admin/games')->with('msgDanger', 'That game no longer exists.');
++        }
++
++        // Keys carry the game code and are read back by it. Deleting a game
++        // that keys point at would leave them unreadable, so this refuses and
++        // offers the reversible alternative instead.
++        $keys = $this->games->keyCount($game->code);
++        if ($keys > 0) {
++            return redirect()->to('admin/games')->with(
++                'msgWarning',
++                "{$game->name} has {$keys} key(s) against it and cannot be deleted. "
++                . 'Set it to Inactive instead — existing keys keep working and no new ones can be made.'
++            );
++        }
++
++        $this->games->delete($id);   // durations cascade
++
++        return redirect()->to('admin/games')->with('msgSuccess', 'Game deleted.');
++    }
++
++    // -----------------------------------------------------------------
++    //  Durations
++    // -----------------------------------------------------------------
++
++    public function saveDuration()
++    {
++        if ($stop = $this->denyNonAdmin()) {
++            return $stop;
++        }
++
++        $id     = (int) $this->request->getPost('id_duration');
++        $gameId = (int) $this->request->getPost('game_id');
++
++        if (! $this->games->find($gameId)) {
++            return redirect()->to('admin/games')->with('msgDanger', 'That game no longer exists.');
++        }
++
++        $rules = [
++            'hours' => [
++                'label' => 'hours',
++                'rules' => 'required|integer|greater_than_equal_to[1]|less_than_equal_to[87600]',
++                'errors' => [
++                    'less_than_equal_to' => 'Ten years is the longest tier allowed.',
++                ],
++            ],
++            'label' => ['label' => 'label', 'rules' => 'required|max_length[64]'],
++            'price' => [
++                'label' => 'price',
++                'rules' => 'required|decimal|greater_than_equal_to[0]|less_than_equal_to[100000]',
++                'errors' => [
++                    'greater_than_equal_to' => 'A price cannot be negative.',
++                ],
++            ],
++            'admin_only' => ['label' => 'admin only', 'rules' => 'required|in_list[0,1]'],
++            'status'     => ['label' => 'status',     'rules' => 'required|in_list[0,1]'],
++            'sort_order' => ['label' => 'order',      'rules' => 'permit_empty|integer|greater_than_equal_to[0]|less_than_equal_to[9999]'],
++        ];
++
++        $validation = Services::validation();
++        if (! $validation->setRules($rules)->run($this->request->getPost())) {
++            return redirect()->to('admin/games')->withInput()
++                ->with('msgDanger', 'Could not save the tier: '
++                    . implode(' ', $validation->getErrors()));
++        }
++
++        $hours = (int) $this->request->getPost('hours');
++
++        // One tier per game per duration: two "30 days" rows at different
++        // prices would make the price depend on row order.
++        $clash = $this->durations
++            ->where('game_id', $gameId)
++            ->where('hours', $hours)
++            ->where('id_duration !=', $id ?: 0)
++            ->first();
++        if ($clash) {
++            return redirect()->to('admin/games')->withInput()
++                ->with('msgDanger', 'That game already has a tier of ' . $hours . ' hours.');
++        }
++
++        $data = [
++            'game_id'    => $gameId,
++            'hours'      => $hours,
++            'label'      => trim((string) $this->request->getPost('label')),
++            'price'      => (float) $this->request->getPost('price'),
++            'admin_only' => (int) $this->request->getPost('admin_only'),
++            'status'     => (int) $this->request->getPost('status'),
++            'sort_order' => (int) ($this->request->getPost('sort_order') ?: 0),
++        ];
++
++        if ($id && $this->durations->find($id)) {
++            $this->durations->update($id, $data);
++            $msg = 'Tier updated.';
++        } else {
++            $this->durations->insert($data);
++            $msg = 'Tier added.';
++        }
++
++        return redirect()->to('admin/games')->with('msgSuccess', $msg);
++    }
++
++    public function deleteDuration()
++    {
++        if ($stop = $this->denyNonAdmin()) {
++            return $stop;
++        }
++
++        $id = (int) $this->request->getPost('id_duration');
++        if (! $id || ! $this->durations->find($id)) {
++            return redirect()->to('admin/games')->with('msgDanger', 'That tier no longer exists.');
++        }
++
++        // Safe to delete outright: keys store the hours they were sold with,
++        // not a reference to this row, so removing a tier only stops new
++        // sales. Existing keys are untouched.
++        $this->durations->delete($id);
++
++        return redirect()->to('admin/games')->with('msgSuccess', 'Tier removed.');
++    }
++}
 diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
 --- /tmp/orig_app/Controllers/KeyCheck.php	2026-08-24 23:02:52.530359402 +0000
 +++ app/Controllers/KeyCheck.php	2026-08-26 13:36:09.327125375 +0000
@@ -4195,8 +4483,78 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-26 13:48:44.279657014 +0000
-@@ -64,16 +64,18 @@
++++ app/Controllers/Keys.php	2026-08-26 14:26:29.951309243 +0000
+@@ -2,6 +2,8 @@
+ 
+ namespace App\Controllers;
+ 
++use App\Models\DurationModel;
++use App\Models\GameModel;
+ use App\Models\HistoryModel;
+ use App\Models\KeysModel;
+ use App\Models\UserModel;
+@@ -9,7 +11,7 @@
+ 
+ class Keys extends BaseController
+ {
+-    protected $userModel, $model, $user;
++    protected $userModel, $model, $user, $gameModel, $durationModel;
+ 
+     public function __construct()
+     {
+@@ -18,45 +20,12 @@
+         $this->model = new KeysModel();
+         $this->time = new \CodeIgniter\I18n\Time;
+ 
+-        /* ------- Game ------- */
+-        $this->game_list = [
+-            'CODM' => 'Call Of Duty Mobile',
+-            'PUBGM' => 'Pubg Mobile',
+-            'FF' => 'Free Fire Mobile',
+-            // 'DFM' => 'Delta Force Mobile',
+-        ];
+-
+-        $this->duration_admin = [
+-            1 => '1 Hours &mdash; $test/Device',
+-            // 5 => '5 Hours &mdash; $1/Device',
+-            24 => '1 Days &mdash; $1/Device',
+-            // 72 => '3 Days &mdash; $3/Device',
+-            168 =>  '7 Days &mdash; $5/Device',
+-            // 336 =>  '14 Days &mdash; $10/Device',
+-            720 =>  '30 Days &mdash; $12/Device',
+-            // 1440 =>  '60 Days &mdash; $24/Device',
+-        ];
+-
+-        $this->duration_seller = [
+-            // 5 => '5 Hours &mdash; $1/Device',
+-            24 => '1 Days &mdash; $1/Device',
+-            // 72 => '3 Days &mdash; $3/Device',
+-            168 =>  '7 Days &mdash; $5/Device',
+-            // 336 =>  '14 Days &mdash; $10/Device',
+-            720 =>  '30 Days &mdash; $12/Device',
+-            // 1440 =>  '60 Days &mdash; $24/Device',
+-        ];
+-
+-        $this->price = [
+-            1 => 0,
+-            // 5 => 1,
+-            24 => 1,
+-            // 72 => 3,
+-            168 =>  5,
+-            // 336 =>  10,
+-            720 =>  12,
+-            // 1440 =>  24,
+-        ];
++        /* ------- Catalogue -------
++           Games, tiers and prices come from the database and are edited in
++           Admin -> Games. They used to be arrays right here, so adding a
++           game meant editing this file and re-uploading it. */
++        $this->gameModel     = new GameModel();
++        $this->durationModel = new DurationModel();
+     }
+ 
+     public function index()
+@@ -64,16 +33,18 @@
          $model = $this->model;
          $user = $this->user;
  
@@ -4220,7 +4578,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'time' => $this->time,
          ];
          return view('Keys/list', $data);
-@@ -88,35 +90,52 @@
+@@ -88,35 +59,52 @@
  
      public function api_key_reset()
      {
@@ -4279,16 +4637,16 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -        ];
 +        $total = $db_key->devices ? explode(',', $db_key->devices) : [];
 +        $rules = ['devices_total' => count($total), 'devices_max' => (int) $db_key->max_devices];
-+
+ 
+-        $real_response = array_merge($data, $rules);
+-        return $this->response->setJSON($real_response);
 +        if ($db_key->devices && $reset) {
 +            $model->set('devices', null)
 +                ->where('user_key', $keys)
 +                ->update();
 +            $rules = ['reset' => true, 'devices_total' => 0, 'devices_max' => (int) $db_key->max_devices];
 +        }
- 
--        $real_response = array_merge($data, $rules);
--        return $this->response->setJSON($real_response);
++
 +        return $this->response->setJSON(array_merge(
 +            ['registered' => true, 'keys' => $keys, 'csrf' => csrf_hash()],
 +            $rules
@@ -4296,32 +4654,69 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function edit_key($key = false)
-@@ -279,7 +298,10 @@
-             'time' => $this->time,
-             'game' => $this->game_list,
-             'duration' => $user->level == 1 ? $this->duration_admin : $this->duration_seller,
+@@ -273,14 +261,28 @@
+             $message = setMessage("Please top up to your beloved admin.", 'warning');
+         }
+ 
++        $isAdmin = (int) $user->level === 1;
++
++        // code => name, for the game dropdown.
++        $games = [];
++        foreach ($this->gameModel->sellable($isAdmin) as $g) {
++            $games[$g->code] = $g->name;
++        }
++
++        // code => hours => [label, price]. Admin-only tiers are dropped here
++        // for a seller, so they never reach the page at all.
++        $catalogue = $this->durationModel->catalogue($isAdmin);
++
+         $data = [
+-            'title' => 'Generate',
+-            'user' => $user,
+-            'time' => $this->time,
+-            'game' => $this->game_list,
+-            'duration' => $user->level == 1 ? $this->duration_admin : $this->duration_seller,
 -            'price' => json_encode($this->price),
-+            // The array itself. The view encodes it for a <script> context;
-+            // encoding here produced a string that the view then had to
-+            // escape again, which is what broke the estimate.
-+            'price' => $this->price,
-             'messages' => $message,
+-            'messages' => $message,
++            'title'      => 'Generate',
++            'user'       => $user,
++            'time'       => $this->time,
++            'game'       => $games,
++            // The view encodes this for its <script>; encoding it here
++            // produced a string the view then had to escape again, which is
++            // what used to break the estimate.
++            'catalogue'  => $catalogue,
++            'messages'   => $message,
              'validation' => $validation,
          ];
-@@ -293,7 +315,11 @@
+         return view('Keys/generate', $data);
+@@ -293,9 +295,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
 -        $getPrice = getPrice($this->price, $drtn, $maxd);
-+
-+        // Which tiers this role is allowed to buy. The admin list includes a
-+        // free 1-hour test tier that a seller must never reach.
-+        $allowed = (int) $user->level === 1 ? $this->duration_admin : $this->duration_seller;
-+        $allowed_durations = implode(',', array_keys($allowed));
  
-         $game_list = implode(",", array_keys($this->game_list));
+-        $game_list = implode(",", array_keys($this->game_list));
++        $isAdmin = (int) $user->level === 1;
++
++        // The catalogue this role may buy from. Admin-only tiers (the free
++        // test key) are absent entirely for a seller, so an in_list rule
++        // built from it cannot let one through.
++        $catalogue = $this->durationModel->catalogue($isAdmin);
++
++        $game_list = implode(',', array_keys($catalogue));
++        $allowed_durations = implode(',', array_keys($catalogue[$game] ?? []));
++
++        // No sellable tier for that game on this account: reject before the
++        // rules run, because in_list[] with an empty list is not a rule.
++        if ($allowed_durations === '') {
++            return redirect()->back()->withInput()
++                ->with('msgDanger', 'That game is not available on your account.');
++        }
          $form_rules = [
-@@ -306,15 +332,18 @@
+             'game' => [
+                 'label' => 'Games',
+@@ -306,15 +322,18 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -4342,7 +4737,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +351,9 @@
+@@ -322,7 +341,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -4353,7 +4748,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +362,99 @@
+@@ -331,57 +352,128 @@
          ];
  
          $validation = Services::validation();
@@ -4395,16 +4790,23 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        if (! $this->validate($form_rules)) {
 +            return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the error');
 +        }
- 
--                    // Add the generated key to the list
--                    $generatedKeys[] = $data_response;
--                }
++
 +        // Re-read the posted values now that the rules have vetted them.
 +        $drtn = (int) $this->request->getPost('duration');
 +        $maxd = (int) $this->request->getPost('max_devices');
 +        $quantity = (int) $this->request->getPost('quantity');
-+
-+        $unitPrice = getPrice($this->price, $drtn, $maxd);
+ 
+-                    // Add the generated key to the list
+-                    $generatedKeys[] = $data_response;
++        // One query decides the price and the permission at the same time:
++        // the game must be active, the tier must belong to it, be active,
++        // and be one this role may buy. Anything else comes back null.
++        $tier = $this->durationModel->resolve($game, (int) $drtn, $isAdmin);
++        if ($tier === null) {
++            return redirect()->back()->withInput()
++                ->with('msgDanger', 'That duration is not available on your account.');
++        }
++        $unitPrice = keyPrice((float) $tier->price, $maxd);
 +        if ($unitPrice === null) {
 +            $validation->setError('duration', 'That duration is not for sale.');
 +            return redirect()->back()->withInput()->with('msgDanger', 'Invalid duration.');
@@ -4414,6 +4816,49 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +
 +        $db = \Config\Database::connect();
 +        $db->transBegin();
++
++        try {
++            if ($totalfees > 0) {
++                // Atomic conditional debit. Two concurrent requests used to
++                // read the same balance and each write an absolute value, so
++                // both got keys and only one payment landed. Here the database
++                // subtracts and refuses when the funds are not there, so the
++                // second request finds nothing left to take.
++                $db->table('users')
++                   ->where('id_users', session('userid'))
++                   ->where('saldo >=', $totalfees)
++                   ->set('saldo', 'saldo - ' . (float) $totalfees, false)
++                   ->update();
++
++                if ($db->affectedRows() !== 1) {
++                    $db->transRollback();
++                    $validation->setError('duration', 'Insufficient balance');
++                    return redirect()->back()->withInput()
++                        ->with('msgWarning', 'Please top up to your beloved admin.');
+                 }
++            } else {
++                // A free tier — the admin-only test key. The debit above must
++                // be skipped, not run with a zero amount: `saldo = saldo - 0`
++                // leaves the row byte-identical, MySQL reports 0 affected
++                // rows, and the check above reads that as "no funds". The
++                // free key could never be generated.
++                //
++                // The account still has to exist and be usable, so check that
++                // much before handing out keys.
++                $account = $db->table('users')
++                    ->where('id_users', session('userid'))
++                    ->where('status', 1)
++                    ->countAllResults();
++
++                if ($account !== 1) {
++                    $db->transRollback();
++                    return redirect()->back()->withInput()
++                        ->with('msgDanger', 'Your account is not active.');
++                }
++            }
++
++            $generatedKeys = [];
++            $history = new HistoryModel();
  
 -                // * reduce saldo once for the whole batch (price * quantity)
 -                $this->userModel->update(session('userid'), ['saldo' => $reduceCheck]);
@@ -4423,28 +4868,6 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -                    'fees' => $totalfees,
 -                    'quantity' => $quantity,
 -                    'generatedKeys' => $generatedKeys,
-+        try {
-+            // Atomic conditional debit. Two concurrent requests used to read
-+            // the same balance and each write an absolute value, so both got
-+            // keys and only one payment landed. Here the database itself
-+            // subtracts and refuses when the funds are not there, so the
-+            // second request finds nothing left to take.
-+            $db->table('users')
-+               ->where('id_users', session('userid'))
-+               ->where('saldo >=', $totalfees)
-+               ->set('saldo', 'saldo - ' . (float) $totalfees, false)
-+               ->update();
-+
-+            if ($db->affectedRows() !== 1) {
-+                $db->transRollback();
-+                $validation->setError('duration', 'Insufficient balance');
-+                return redirect()->back()->withInput()
-+                    ->with('msgWarning', 'Please top up to your beloved admin.');
-+            }
-+
-+            $generatedKeys = [];
-+            $history = new HistoryModel();
-+
 +            for ($i = 0; $i < $quantity; $i++) {
 +                $license = random_string('alnum', 12);
 +                $custom_license = $game . "_" . $license;
@@ -4471,11 +4894,11 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                ]);
 +
 +                $generatedKeys[] = $data_response;
-+            }
+             }
 +
 +            if ($db->transStatus() === false) {
 +                throw new \RuntimeException('Transaction failed');
-             }
++            }
 +
 +            $db->transCommit();
 +        } catch (\Throwable $e) {
@@ -4731,8 +5154,8 @@ diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
 +}
 diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 --- /tmp/orig_app/Helpers/nata_helper.php	2026-08-24 23:02:52.536343011 +0000
-+++ app/Helpers/nata_helper.php	2026-08-26 08:59:48.034480563 +0000
-@@ -1,97 +1,145 @@
++++ app/Helpers/nata_helper.php	2026-08-26 14:17:39.269611059 +0000
+@@ -1,97 +1,147 @@
 -<?php
 -
 -/**
@@ -4939,21 +5362,23 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 + * NULL is returned for "not for sale" so the caller must handle it
 + * explicitly; 0 and false both read as a legitimate free key.
 + */
-+function getPrice($price, $duration, $device_max)
++/**
++ * What one key costs: the tier's per-device price times the device count.
++ *
++ * Returns null rather than 0 for anything it cannot price. The two are very
++ * different here — 0 is a real price (the free test tier) and null means
++ * "refuse the sale". An earlier version returned false for an unlisted
++ * duration, which the caller read as free.
++ */
++function keyPrice(float $unitPrice, $device_max): ?float
 +{
-+    $duration   = (int) $duration;
 +    $device_max = (int) $device_max;
 +
-+    if (! array_key_exists($duration, $price) || $device_max < 1) {
++    if ($device_max < 1 || $unitPrice < 0) {
 +        return null;
 +    }
 +
-+    $unit = (float) $price[$duration];
-+    if ($unit < 0) {
-+        return null;
-+    }
-+
-+    return $unit * $device_max;
++    return $unitPrice * $device_max;
 +}
 +
 +/**
@@ -5030,6 +5455,174 @@ diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
      }
  
      /**
+diff -ruN /tmp/orig_app/Models/DurationModel.php app/Models/DurationModel.php
+--- /tmp/orig_app/Models/DurationModel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Models/DurationModel.php	2026-08-26 14:23:51.822277530 +0000
+@@ -0,0 +1,93 @@
++<?php
++
++namespace App\Models;
++
++use CodeIgniter\Model;
++
++class DurationModel extends Model
++{
++    protected $table      = 'game_durations';
++    protected $primaryKey = 'id_duration';
++
++    protected $allowedFields = [
++        'game_id', 'hours', 'label', 'price', 'admin_only', 'status', 'sort_order',
++    ];
++    protected $useTimestamps = true;
++
++    // Objects, not arrays. CI4 defaults to arrays and the rest of this panel
++    // works in objects, so findAll() results would arrive in the wrong shape.
++    protected $returnType = 'object';
++
++    /** Tiers for one game, in display order. */
++    public function forGame(int $gameId, bool $activeOnly = true): array
++    {
++        if ($activeOnly) {
++            $this->where('status', 1);
++        }
++
++        return $this->where('game_id', $gameId)
++            ->orderBy('sort_order', 'ASC')
++            ->orderBy('hours', 'ASC')
++            ->findAll();
++    }
++
++    /**
++     * The whole catalogue as  code => [hours => tier]  for the generate page.
++     *
++     * $isAdmin decides whether admin-only tiers are included at all. They are
++     * filtered here, in one place, rather than in the view — a template change
++     * must not be able to put the free test key in a seller's dropdown.
++     */
++    public function catalogue(bool $isAdmin): array
++    {
++        $builder = $this->db->table('game_durations d')
++            ->select('g.code, d.hours, d.label, d.price, d.admin_only')
++            ->join('games g', 'g.id_game = d.game_id', 'inner')
++            ->where('d.status', 1)
++            ->where('g.status', 1);
++
++        if (! $isAdmin) {
++            $builder->where('d.admin_only', 0);
++        }
++
++        $rows = $builder->orderBy('g.sort_order', 'ASC')
++            ->orderBy('d.sort_order', 'ASC')
++            ->orderBy('d.hours', 'ASC')
++            ->get()->getResultObject();
++
++        $out = [];
++        foreach ($rows as $r) {
++            $out[$r->code][(int) $r->hours] = [
++                'label' => $r->label,
++                'price' => (float) $r->price,
++            ];
++        }
++
++        return $out;
++    }
++
++    /**
++     * The one tier a purchase is actually for, or null.
++     *
++     * Everything the price and the permission check depend on is resolved in
++     * this single query: the game must be active, the tier must belong to
++     * that game, be active, and be one this role may buy. A seller asking for
++     * an admin-only tier gets null, exactly like a tier that does not exist.
++     */
++    public function resolve(string $gameCode, int $hours, bool $isAdmin): ?object
++    {
++        $builder = $this->db->table('game_durations d')
++            ->select('d.id_duration, d.hours, d.label, d.price, d.admin_only, g.code, g.name')
++            ->join('games g', 'g.id_game = d.game_id', 'inner')
++            ->where('g.code', $gameCode)
++            ->where('g.status', 1)
++            ->where('d.hours', $hours)
++            ->where('d.status', 1);
++
++        if (! $isAdmin) {
++            $builder->where('d.admin_only', 0);
++        }
++
++        return $builder->get()->getRowObject();
++    }
++}
+diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
+--- /tmp/orig_app/Models/GameModel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Models/GameModel.php	2026-08-26 14:23:51.810880173 +0000
+@@ -0,0 +1,67 @@
++<?php
++
++namespace App\Models;
++
++use CodeIgniter\Model;
++
++class GameModel extends Model
++{
++    protected $table      = 'games';
++    protected $primaryKey = 'id_game';
++
++    protected $allowedFields = ['code', 'name', 'status', 'sort_order'];
++    protected $useTimestamps = true;
++
++    // Objects, not arrays. CI4 defaults to arrays and the rest of this panel
++    // works in objects, so findAll() results would arrive in the wrong shape.
++    protected $returnType = 'object';
++
++    /**
++     * Games a seller may pick from, in display order.
++     *
++     * A game with no sellable duration is left out: offering it would only
++     * produce a "that duration is not available" error after the fact.
++     */
++    public function sellable(bool $isAdmin): array
++    {
++        $builder = $this->db->table('games g')
++            ->select('g.id_game, g.code, g.name')
++            ->join('game_durations d', 'd.game_id = g.id_game', 'inner')
++            ->where('g.status', 1)
++            ->where('d.status', 1);
++
++        if (! $isAdmin) {
++            $builder->where('d.admin_only', 0);
++        }
++
++        return $builder
++            ->groupBy('g.id_game, g.code, g.name, g.sort_order')
++            ->orderBy('g.sort_order', 'ASC')
++            ->orderBy('g.name', 'ASC')
++            ->get()->getResultObject();
++    }
++
++    /** Every game, active or not, for the admin screen. */
++    public function allOrdered(): array
++    {
++        return $this->orderBy('sort_order', 'ASC')
++            ->orderBy('name', 'ASC')
++            ->findAll();
++    }
++
++    public function byCode(string $code): ?object
++    {
++        return $this->where('code', $code)->first();
++    }
++
++    /**
++     * How many keys already reference this game code.
++     *
++     * The code is embedded in every key string, so renaming it would orphan
++     * them. The admin screen uses this to lock the field.
++     */
++    public function keyCount(string $code): int
++    {
++        return $this->db->table('keys_code')->where('game', $code)->countAllResults();
++    }
++}
 diff -ruN /tmp/orig_app/Models/HistoryModel.php app/Models/HistoryModel.php
 --- /tmp/orig_app/Models/HistoryModel.php	2026-08-24 23:02:52.606777746 +0000
 +++ app/Models/HistoryModel.php	2026-08-26 08:50:46.663875110 +0000
@@ -5120,6 +5713,432 @@ diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
                  $msg = 'Level account invalid!';
              } elseif ($userCek->status != 1) {
                  $msg = 'Status account changed!';
+diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
+--- /tmp/orig_app/Views/Admin/games.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Admin/games.php	2026-08-26 14:21:31.971784245 +0000
+@@ -0,0 +1,422 @@
++<?= $this->extend('Layout/Starter') ?>
++
++<?= $this->section('content') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-controller"></i> Admin</span>
++        <h1>Games &amp; pricing</h1>
++        <p>
++            Every game and every tier a key can be sold as. Prices are per device,
++            per key. Sellers only ever see what is Active and not admin-only.
++        </p>
++    </div>
++    <div class="em-head-act">
++        <button type="button" class="em-btn is-primary" data-game-new>
++            <i class="bi bi-plus-lg"></i> Add game
++        </button>
++    </div>
++</header>
++
++<?php if (empty($games)) : ?>
++    <section class="em-panel em-rise em-rise-1">
++        <div class="em-empty">
++            <div class="em-empty-ic"><i class="bi bi-controller"></i></div>
++            <h3>No games yet</h3>
++            <p>Add one, then give it the durations you want to sell.</p>
++            <button type="button" class="em-btn is-primary" data-game-new>
++                <i class="bi bi-plus-lg"></i> Add your first game
++            </button>
++        </div>
++    </section>
++<?php endif; ?>
++
++<?php foreach ($games as $g) : ?>
++    <?php $keys = $keyCounts[$g->id_game] ?? 0; ?>
++    <section class="em-panel em-rise em-rise-1">
++        <div class="em-panel-h">
++            <h2>
++                <i class="bi bi-controller"></i>
++                <span class="em-key"><?= esc($g->code) ?></span>
++                <?= esc($g->name) ?>
++            </h2>
++            <div class="em-panel-act">
++                <?php if ((int) $g->status === 1) : ?>
++                    <span class="em-pill is-ok"><span class="em-dot"></span>Active</span>
++                <?php else : ?>
++                    <span class="em-pill"><span class="em-dot"></span>Inactive</span>
++                <?php endif; ?>
++                <span class="em-pill is-info" title="Keys sold under this game"><?= (int) $keys ?> keys</span>
++
++                <button type="button" class="em-btn is-sm"
++                        data-game-edit
++                        data-id="<?= (int) $g->id_game ?>"
++                        data-code="<?= esc($g->code, 'attr') ?>"
++                        data-name="<?= esc($g->name, 'attr') ?>"
++                        data-status="<?= (int) $g->status ?>"
++                        data-sort="<?= (int) $g->sort_order ?>"
++                        data-locked="<?= $keys > 0 ? '1' : '0' ?>">
++                    <i class="bi bi-pencil-square"></i> Edit
++                </button>
++
++                <form method="post" action="<?= site_url('admin/games/delete') ?>"
++                      class="d-inline" data-confirm-delete="<?= esc($g->name, 'attr') ?>">
++                    <?= csrf_field() ?>
++                    <input type="hidden" name="id_game" value="<?= (int) $g->id_game ?>">
++                    <button type="submit" class="em-iconbtn is-bad" title="Delete game"
++                            <?= $keys > 0 ? 'disabled title="Has keys — set it Inactive instead"' : '' ?>>
++                        <i class="bi bi-trash"></i>
++                    </button>
++                </form>
++            </div>
++        </div>
++
++        <div class="table-responsive">
++            <table class="table align-middle">
++                <thead>
++                    <tr>
++                        <th>Duration</th>
++                        <th>Hours</th>
++                        <th>Price / device</th>
++                        <th>Who can buy</th>
++                        <th>Status</th>
++                        <th class="text-end">Action</th>
++                    </tr>
++                </thead>
++                <tbody>
++                    <?php if (empty($tiers[$g->id_game])) : ?>
++                        <tr>
++                            <td colspan="6" class="text-center text-muted">
++                                No tiers yet — this game cannot be sold until it has one.
++                            </td>
++                        </tr>
++                    <?php endif; ?>
++
++                    <?php foreach (($tiers[$g->id_game] ?? []) as $d) : ?>
++                        <tr>
++                            <td><b><?= esc($d->label) ?></b></td>
++                            <td><span class="em-pill"><?= (int) $d->hours ?>h</span></td>
++                            <td><span class="em-pill">$<?= number_format((float) $d->price, 2) ?></span></td>
++                            <td>
++                                <?php if ((int) $d->admin_only === 1) : ?>
++                                    <span class="em-pill is-warn" title="Sellers never see this tier">
++                                        <span class="em-dot"></span>Admin only
++                                    </span>
++                                <?php else : ?>
++                                    <span class="em-pill is-info"><span class="em-dot"></span>Everyone</span>
++                                <?php endif; ?>
++                            </td>
++                            <td>
++                                <?php if ((int) $d->status === 1) : ?>
++                                    <span class="em-pill is-ok"><span class="em-dot"></span>Active</span>
++                                <?php else : ?>
++                                    <span class="em-pill"><span class="em-dot"></span>Off</span>
++                                <?php endif; ?>
++                            </td>
++                            <td class="text-end">
++                                <div class="em-actions">
++                                    <button type="button" class="em-iconbtn is-accent" title="Edit tier"
++                                            data-tier-edit
++                                            data-id="<?= (int) $d->id_duration ?>"
++                                            data-game="<?= (int) $g->id_game ?>"
++                                            data-gamename="<?= esc($g->name, 'attr') ?>"
++                                            data-hours="<?= (int) $d->hours ?>"
++                                            data-label="<?= esc($d->label, 'attr') ?>"
++                                            data-price="<?= esc(number_format((float) $d->price, 2, '.', ''), 'attr') ?>"
++                                            data-adminonly="<?= (int) $d->admin_only ?>"
++                                            data-status="<?= (int) $d->status ?>"
++                                            data-sort="<?= (int) $d->sort_order ?>">
++                                        <i class="bi bi-pencil-square"></i>
++                                    </button>
++                                    <form method="post" action="<?= site_url('admin/games/duration/delete') ?>"
++                                          data-confirm-delete="<?= esc($d->label, 'attr') ?>">
++                                        <?= csrf_field() ?>
++                                        <input type="hidden" name="id_duration" value="<?= (int) $d->id_duration ?>">
++                                        <button type="submit" class="em-iconbtn is-bad" title="Remove tier">
++                                            <i class="bi bi-trash"></i>
++                                        </button>
++                                    </form>
++                                </div>
++                            </td>
++                        </tr>
++                    <?php endforeach; ?>
++                </tbody>
++            </table>
++        </div>
++
++        <div class="em-panel-b" style="border-top:1px solid var(--em-line)">
++            <button type="button" class="em-btn is-sm"
++                    data-tier-new
++                    data-game="<?= (int) $g->id_game ?>"
++                    data-gamename="<?= esc($g->name, 'attr') ?>">
++                <i class="bi bi-plus-lg"></i> Add a tier to <?= esc($g->name) ?>
++            </button>
++        </div>
++    </section>
++<?php endforeach; ?>
++
++<!-- ===================== game dialog ===================== -->
++<dialog class="em-modal" id="gameModal">
++    <form method="post" action="<?= site_url('admin/games/save') ?>">
++        <?= csrf_field() ?>
++        <input type="hidden" name="id_game" id="g_id" value="">
++
++        <header class="em-modal-h">
++            <h2 id="g_title">Add game</h2>
++            <button type="button" class="em-iconbtn" data-close aria-label="Close">
++                <i class="bi bi-x-lg"></i>
++            </button>
++        </header>
++
++        <div class="em-modal-b">
++            <div class="em-field">
++                <label for="g_code">Short code</label>
++                <input type="text" class="form-control" name="code" id="g_code"
++                       maxlength="32" required placeholder="CODM" autocomplete="off">
++                <p class="em-hint" id="g_code_hint">
++                    Letters and numbers only. It goes inside every key this game
++                    issues, like <code>CODM_a1b2c3</code>.
++                </p>
++            </div>
++
++            <div class="em-field">
++                <label for="g_name">Display name</label>
++                <input type="text" class="form-control" name="name" id="g_name"
++                       maxlength="96" required placeholder="Call of Duty Mobile">
++                <p class="em-hint">What sellers see in the dropdown. Safe to change any time.</p>
++            </div>
++
++            <div class="row g-3">
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="g_status">Status</label>
++                        <select class="form-select" name="status" id="g_status">
++                            <option value="1">Active</option>
++                            <option value="0">Inactive</option>
++                        </select>
++                        <p class="em-hint">Inactive hides it from sellers. Existing keys keep working.</p>
++                    </div>
++                </div>
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="g_sort">Order</label>
++                        <input type="number" class="form-control" name="sort_order" id="g_sort"
++                               min="0" max="9999" value="0">
++                        <p class="em-hint">Lower shows first.</p>
++                    </div>
++                </div>
++            </div>
++        </div>
++
++        <footer class="em-modal-f">
++            <button type="button" class="em-btn" data-close>Cancel</button>
++            <button type="submit" class="em-btn is-primary"><i class="bi bi-check-lg"></i> Save game</button>
++        </footer>
++    </form>
++</dialog>
++
++<!-- ===================== tier dialog ===================== -->
++<dialog class="em-modal" id="tierModal">
++    <form method="post" action="<?= site_url('admin/games/duration/save') ?>">
++        <?= csrf_field() ?>
++        <input type="hidden" name="id_duration" id="t_id" value="">
++        <input type="hidden" name="game_id" id="t_game" value="">
++
++        <header class="em-modal-h">
++            <h2 id="t_title">Add tier</h2>
++            <button type="button" class="em-iconbtn" data-close aria-label="Close">
++                <i class="bi bi-x-lg"></i>
++            </button>
++        </header>
++
++        <div class="em-modal-b">
++            <div class="em-field">
++                <label for="t_preset">Length</label>
++                <select class="form-select" id="t_preset">
++                    <option value="">Choose a common length…</option>
++                    <option value="1|1 Hour">1 hour</option>
++                    <option value="24|1 Day">1 day</option>
++                    <option value="72|3 Days">3 days</option>
++                    <option value="168|7 Days">7 days</option>
++                    <option value="336|14 Days">14 days</option>
++                    <option value="720|30 Days">30 days</option>
++                    <option value="2160|90 Days">90 days</option>
++                    <option value="4320|180 Days">180 days</option>
++                    <option value="8760|1 Year">1 year</option>
++                    <option value="">Something else…</option>
++                </select>
++                <p class="em-hint">Fills the two fields below. You can still change them.</p>
++            </div>
++
++            <div class="row g-3">
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="t_hours">Hours</label>
++                        <input type="number" class="form-control" name="hours" id="t_hours"
++                               min="1" max="87600" required placeholder="720">
++                        <p class="em-hint">How long the key lasts once activated.</p>
++                    </div>
++                </div>
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="t_price">Price per device</label>
++                        <input type="number" class="form-control" name="price" id="t_price"
++                               min="0" max="100000" step="0.01" required placeholder="12.00">
++                        <p class="em-hint">A 2-device key costs twice this.</p>
++                    </div>
++                </div>
++            </div>
++
++            <div class="em-field">
++                <label for="t_label">Label</label>
++                <input type="text" class="form-control" name="label" id="t_label"
++                       maxlength="64" required placeholder="30 Days">
++                <p class="em-hint">Shown in the seller's dropdown next to the price.</p>
++            </div>
++
++            <div class="row g-3">
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="t_admin">Who can buy</label>
++                        <select class="form-select" name="admin_only" id="t_admin">
++                            <option value="0">Everyone</option>
++                            <option value="1">Admins only</option>
++                        </select>
++                        <p class="em-hint">
++                            Use "Admins only" for a free test key. Sellers never
++                            see it, and the server refuses it even if the form is
++                            edited by hand.
++                        </p>
++                    </div>
++                </div>
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="t_status">Status</label>
++                        <select class="form-select" name="status" id="t_status">
++                            <option value="1">Active</option>
++                            <option value="0">Off</option>
++                        </select>
++                        <p class="em-hint">Off stops new sales. Keys already sold are unaffected.</p>
++                    </div>
++                </div>
++            </div>
++
++            <div class="em-field">
++                <label for="t_sort">Order</label>
++                <input type="number" class="form-control" name="sort_order" id="t_sort"
++                       min="0" max="9999" value="0">
++            </div>
++        </div>
++
++        <footer class="em-modal-f">
++            <button type="button" class="em-btn" data-close>Cancel</button>
++            <button type="submit" class="em-btn is-primary"><i class="bi bi-check-lg"></i> Save tier</button>
++        </footer>
++    </form>
++</dialog>
++
++<?= $this->endSection() ?>
++
++<?= $this->section('js') ?>
++<script>
++    (function () {
++        var gameModal = document.getElementById('gameModal');
++        var tierModal = document.getElementById('tierModal');
++
++        function open(dlg)  { dlg.showModal(); }
++        function close(dlg) { dlg.close(); }
++
++        document.querySelectorAll('[data-close]').forEach(function (b) {
++            b.addEventListener('click', function () { close(b.closest('dialog')); });
++        });
++
++        // ---- game dialog ----
++        function fillGame(d) {
++            document.getElementById('g_id').value     = d.id     || '';
++            document.getElementById('g_code').value   = d.code   || '';
++            document.getElementById('g_name').value   = d.name   || '';
++            document.getElementById('g_status').value = d.status !== undefined ? d.status : '1';
++            document.getElementById('g_sort').value   = d.sort   || 0;
++            document.getElementById('g_title').textContent = d.id ? 'Edit game' : 'Add game';
++
++            // Once keys exist the code is baked into them, so it stops being
++            // editable. Disabled inputs are not submitted, hence readonly.
++            var code = document.getElementById('g_code');
++            var hint = document.getElementById('g_code_hint');
++            if (d.locked === '1') {
++                code.setAttribute('readonly', 'readonly');
++                hint.textContent = 'Locked: keys already carry this code, so changing it would orphan them.';
++            } else {
++                code.removeAttribute('readonly');
++                hint.innerHTML = 'Letters and numbers only. It goes inside every key this game issues, like <code>CODM_a1b2c3</code>.';
++            }
++        }
++
++        document.querySelectorAll('[data-game-new]').forEach(function (b) {
++            b.addEventListener('click', function () { fillGame({}); open(gameModal); });
++        });
++        document.querySelectorAll('[data-game-edit]').forEach(function (b) {
++            b.addEventListener('click', function () {
++                fillGame({
++                    id: b.dataset.id, code: b.dataset.code, name: b.dataset.name,
++                    status: b.dataset.status, sort: b.dataset.sort, locked: b.dataset.locked
++                });
++                open(gameModal);
++            });
++        });
++
++        // ---- tier dialog ----
++        function fillTier(d) {
++            document.getElementById('t_id').value     = d.id     || '';
++            document.getElementById('t_game').value   = d.game   || '';
++            document.getElementById('t_hours').value  = d.hours  || '';
++            document.getElementById('t_label').value  = d.label  || '';
++            document.getElementById('t_price').value  = d.price  || '';
++            document.getElementById('t_admin').value  = d.adminonly !== undefined ? d.adminonly : '0';
++            document.getElementById('t_status').value = d.status !== undefined ? d.status : '1';
++            document.getElementById('t_sort').value   = d.sort   || 0;
++            document.getElementById('t_preset').value = '';
++            document.getElementById('t_title').textContent =
++                (d.id ? 'Edit tier — ' : 'Add tier to ') + (d.gamename || '');
++        }
++
++        document.querySelectorAll('[data-tier-new]').forEach(function (b) {
++            b.addEventListener('click', function () {
++                fillTier({ game: b.dataset.game, gamename: b.dataset.gamename });
++                open(tierModal);
++            });
++        });
++        document.querySelectorAll('[data-tier-edit]').forEach(function (b) {
++            b.addEventListener('click', function () { fillTier(b.dataset); open(tierModal); });
++        });
++
++        document.getElementById('t_preset').addEventListener('change', function () {
++            if (!this.value) return;
++            var parts = this.value.split('|');
++            document.getElementById('t_hours').value = parts[0];
++            document.getElementById('t_label').value = parts[1];
++        });
++
++        // ---- deletes ask first ----
++        document.querySelectorAll('form[data-confirm-delete]').forEach(function (f) {
++            f.addEventListener('submit', function (e) {
++                if (f.dataset.confirmed === '1') return;
++                e.preventDefault();
++                Swal.fire({
++                    title: 'Delete "' + f.dataset.confirmDelete + '"?',
++                    text: 'This cannot be undone.',
++                    icon: 'warning',
++                    showCancelButton: true,
++                    confirmButtonText: 'Yes, delete',
++                    confirmButtonColor: '#f4725a',
++                    cancelButtonColor: '#332420'
++                }).then(function (r) {
++                    if (r.isConfirmed) { f.dataset.confirmed = '1'; f.submit(); }
++                });
++            });
++        });
++    })();
++</script>
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/referral.php app/Views/Admin/referral.php
 --- /tmp/orig_app/Views/Admin/referral.php	2026-08-24 23:02:52.610578496 +0000
 +++ app/Views/Admin/referral.php	2026-08-24 23:07:43.047526877 +0000
@@ -5461,7 +6480,7 @@ diff -ruN /tmp/orig_app/Views/Auth/register.php app/Views/Auth/register.php
      :root {
 diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 --- /tmp/orig_app/Views/Keys/generate.php	2026-08-24 23:02:52.614808324 +0000
-+++ app/Views/Keys/generate.php	2026-08-26 13:48:58.675668135 +0000
++++ app/Views/Keys/generate.php	2026-08-26 14:19:02.447946351 +0000
 @@ -3,6 +3,21 @@
  <?= $this->section('content') ?>
  <div class="row justify-content-center">
@@ -5510,7 +6529,21 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                  <?= form_open() ?>
  
                  <div class="row">
-@@ -96,8 +106,8 @@
+@@ -78,7 +88,12 @@
+                 <div class="row">
+                     <div class="form-group col-lg-6 mb-3">
+                         <label for="duration" class="form-label">Duration</label>
+-                        <?= form_dropdown(['class' => 'form-select', 'name' => 'duration', 'id' => 'duration'], $duration, old('duration') ?: '') ?>
++                        <!-- Filled from the catalogue when a game is chosen: tiers
++                             and prices differ per game. The server re-resolves
++                             whatever is submitted, so this list is convenience,
++                             never the authority. -->
++                        <select class="form-select" name="duration" id="duration"
++                                data-old="<?= esc(old('duration') ?? '', 'attr') ?>"></select>
+                         <?php if ($validation->hasError('duration')) : ?>
+                             <small id="help-duration" class="text-danger"><?= $validation->getError('duration') ?></small>
+                         <?php endif; ?>
+@@ -96,8 +111,8 @@
                      <input type="text" id="estimation" class="form-control" placeholder="Your order will total" readonly>
                  </div>
                  <div class="form-group">
@@ -5521,27 +6554,18 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                      </button>
                  </div>
                  <?= form_close() ?>
-@@ -183,7 +193,15 @@
+@@ -183,26 +198,77 @@
  <?= $this->section('js') ?>
  <script>
      $(document).ready(function() {
 -        var price = JSON.parse('<?= $price ?>');
-+        // A JS object literal, not a string to parse. esc() here HTML-encoded
-+        // the quotes, so JSON.parse received {&quot;1&quot;:0} and threw on
-+        // every load - which killed this whole handler and left the estimate
-+        // permanently blank. The HEX flags escape < > & ' " as \uXXXX, so the
-+        // value cannot terminate the script tag either.
-+        var price = <?= json_encode(
-+            $price,
-+            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
-+        ) ?>;
-         getPrice(price);
-         // When selected
-         $("#max_devices, #duration, #game, #quantity").on('change keyup', function() {
-@@ -191,17 +209,23 @@
-         });
-         // try to get price
-         function getPrice(price) {
+-        getPrice(price);
+-        // When selected
+-        $("#max_devices, #duration, #game, #quantity").on('change keyup', function() {
+-            getPrice(price);
+-        });
+-        // try to get price
+-        function getPrice(price) {
 -            var price = price;
 -            var device = $("#max_devices").val();
 -            var durate = $("#duration").val();
@@ -5552,26 +6576,123 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 -                $("#estimation").val(result);
 -            } else {
 -                $("#estimation").val('Estimation error');
-+            var device   = parseInt($("#max_devices").val(), 10);
-+            var durate   = $("#duration").val();
-+            var quantity = parseInt($("#quantity").val(), 10);
-+            var gprice   = price[durate];
++        // The catalogue as a JS object literal:
++        //   { "CODM": { "24": {label, price}, ... }, ... }
++        // Not a string to JSON.parse - esc() used to HTML-encode the quotes,
++        // so parse received {&quot;24&quot;:...} and threw on every load,
++        // which killed this handler and left the estimate blank. The HEX
++        // flags escape < > & ' " as \uXXXX so it cannot end the script tag.
++        var CATALOGUE = <?= json_encode(
++            $catalogue,
++            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
++        ) ?>;
++        var $game     = $('#game');
++        var $duration = $('#duration');
 +
-+            // `gprice != NaN` was always true - NaN is not equal to anything,
-+            // itself included - so the error branch never ran and an unknown
-+            // duration quietly put the string "NaN" in the box. Test the
-+            // inputs instead of comparing against NaN.
-+            if (gprice === undefined || !isFinite(device) || !isFinite(quantity)
-+                || device < 1 || quantity < 1) {
-+                $("#estimation").val('');
-+                return;
++        // Rebuild the duration list for whichever game is selected. Tiers and
++        // prices are per game now, so this cannot be a static list.
++        function refreshDurations() {
++            var tiers    = CATALOGUE[$game.val()] || {};
++            var previous = $duration.val() || $duration.attr('data-old') || '';
++
++            // Numeric order, so 1h < 1d < 7d < 30d < 1y regardless of the
++            // order the server happened to send.
++            var hours = Object.keys(tiers).sort(function (a, b) { return a - b; });
++
++            $duration.empty();
++            if (!hours.length) {
++                $duration.append($('<option>', { value: '', text: 'No tier available' }));
++            }
++            hours.forEach(function (h) {
++                var t = tiers[h];
++                $duration.append($('<option>', {
++                    value: h,
++                    text: t.label + ' \u2014 $' + Number(t.price).toFixed(2) + '/device'
++                }));
++            });
++
++            // Keep the previous choice when the new game offers it too.
++            if (previous && tiers[previous] !== undefined) {
++                $duration.val(previous);
              }
 +
-+            var total = device * gprice * quantity;
-+            $("#estimation").val('$' + total.toFixed(2));
++            // The themed dropdown copies the options once when it is built, so
++            // it has to be told they changed.
++            var el = $duration[0];
++            if (el && typeof el._tselRebuild === 'function') {
++                el._tselRebuild();
++            }
++            estimate();
++        }
++
++        function estimate() {
++            var tiers    = CATALOGUE[$game.val()] || {};
++            var tier     = tiers[$duration.val()];
++            var device   = parseInt($('#max_devices').val(), 10);
++            var quantity = parseInt($('#quantity').val(), 10);
++
++            // `tier != NaN` was the old test, and NaN equals nothing at all -
++            // itself included - so the error branch never ran and an unknown
++            // duration wrote the string "NaN" into the box. Check the inputs.
++            if (!tier || !isFinite(device) || !isFinite(quantity)
++                || device < 1 || quantity < 1) {
++                $('#estimation').val('');
++                return;
++            }
++
++            $('#estimation').val('$' + (device * Number(tier.price) * quantity).toFixed(2));
          }
++
++        $game.on('change', refreshDurations);
++        $('#max_devices, #duration, #quantity').on('change keyup', estimate);
++
++        refreshDurations();
      });
  
+     // Replace the native <select> (grey OS menu) with a themed dropdown that
+@@ -229,19 +295,30 @@
+             menu.className = 'tsel-menu';
+             wrap.appendChild(menu);
+ 
+-            Array.prototype.forEach.call(select.options, function (o, i) {
+-                var row = document.createElement('div');
+-                row.className = 'tsel-opt';
+-                row.innerHTML = '<span></span><span class="tsel-dot"></span>';
+-                row.firstChild.textContent = o.textContent;
+-                row.addEventListener('click', function () {
+-                    select.selectedIndex = i;
+-                    select.dispatchEvent(new Event('change', { bubbles: true }));
+-                    sync();
+-                    wrap.classList.remove('open');
++            // Built from the <select>'s options, so it has to be rebuildable:
++            // the duration list is replaced whenever the game changes.
++            function buildOptions() {
++                menu.innerHTML = '';
++                Array.prototype.forEach.call(select.options, function (o, i) {
++                    var row = document.createElement('div');
++                    row.className = 'tsel-opt';
++                    row.innerHTML = '<span></span><span class="tsel-dot"></span>';
++                    row.firstChild.textContent = o.textContent;
++                    row.addEventListener('click', function () {
++                        select.selectedIndex = i;
++                        select.dispatchEvent(new Event('change', { bubbles: true }));
++                        sync();
++                        wrap.classList.remove('open');
++                    });
++                    menu.appendChild(row);
+                 });
+-                menu.appendChild(row);
+-            });
++            }
++            buildOptions();
++
++            select._tselRebuild = function () {
++                buildOptions();
++                sync();
++            };
+ 
+             function sync() {
+                 var sel = select.options[select.selectedIndex];
 diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
 --- /tmp/orig_app/Views/Keys/key_edit.php	2026-08-24 23:02:52.615642502 +0000
 +++ app/Views/Keys/key_edit.php	2026-08-25 21:52:42.727526281 +0000
@@ -6018,6 +7139,21 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
                                      Swal.fire(
                                          'Reset!',
                                          'Your device key has been reset.',
+diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
+--- /tmp/orig_app/Views/Layout/Header.php	2026-08-24 23:02:52.617286818 +0000
++++ app/Views/Layout/Header.php	2026-08-26 14:22:01.043599092 +0000
+@@ -50,6 +50,11 @@
+                                         </a>
+                                     </li>
+                                     <li>
++                                        <a class="dropdown-item <?= url_is('admin/games') ? 'active' : '' ?>" href="<?= site_url('admin/games') ?>">
++                                            <i class="bi bi-controller"></i> Games &amp; Pricing
++                                        </a>
++                                    </li>
++                                    <li>
+                                         <hr class="dropdown-divider">
+                                     </li>
+                                 <?php endif; ?>
 diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
 --- /tmp/orig_app/Views/Layout/Starter.php	2026-08-24 23:02:52.618152290 +0000
 +++ app/Views/Layout/Starter.php	2026-08-26 09:06:21.668661896 +0000
