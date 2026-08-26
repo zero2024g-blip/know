@@ -4286,8 +4286,8 @@ diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseContr
  }
 diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 --- /tmp/orig_app/Controllers/Games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Games.php	2026-08-26 14:24:46.899279891 +0000
-@@ -0,0 +1,269 @@
++++ app/Controllers/Games.php	2026-08-26 15:34:02.419475028 +0000
+@@ -0,0 +1,274 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -4381,9 +4381,14 @@ diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 +        $rules = [
 +            'code' => [
 +                'label' => 'code',
-+                'rules' => "required|alpha_numeric|min_length[2]|max_length[32]|{$unique}",
++                // 19, not 32. A key is "<code>_<12 random chars>" and
++                // keys_code.user_key is varchar(32), so anything longer than
++                // 19 produces a key that gets truncated on insert — and
++                // truncated keys collide on that column's UNIQUE index.
++                'rules' => "required|alpha_numeric|min_length[2]|max_length[19]|{$unique}",
 +                'errors' => [
 +                    'alpha_numeric' => 'The code may only contain letters and numbers.',
++                    'max_length'    => 'Keep the code to 19 characters or fewer, or the keys it makes will not fit.',
 +                    'is_unique'     => 'Another game already uses that code.',
 +                ],
 +            ],
@@ -6060,7 +6065,7 @@ diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
                  $msg = 'Status account changed!';
 diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 --- /tmp/orig_app/Views/Admin/games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/Admin/games.php	2026-08-26 14:21:31.971784245 +0000
++++ app/Views/Admin/games.php	2026-08-26 15:34:02.461151404 +0000
 @@ -0,0 +1,422 @@
 +<?= $this->extend('Layout/Starter') ?>
 +
@@ -6238,7 +6243,7 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +            <div class="em-field">
 +                <label for="g_code">Short code</label>
 +                <input type="text" class="form-control" name="code" id="g_code"
-+                       maxlength="32" required placeholder="CODM" autocomplete="off">
++                       maxlength="19" required placeholder="CODM" autocomplete="off">
 +                <p class="em-hint" id="g_code_hint">
 +                    Letters and numbers only. It goes inside every key this game
 +                    issues, like <code>CODM_a1b2c3</code>.
