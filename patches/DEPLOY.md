@@ -345,6 +345,48 @@ Both deployment modes were re-verified after the changes: with Cloudflare
 (mode A) a request that does not come from a Cloudflare IP gets 403, and
 `tools/set-mode.sh` still round-trips between modes byte-for-byte.
 
+## The app connector — new crypto, and it needs the app rebuilt
+
+`CONNECTOR-PROTOCOL.md` in the zip is the full spec, with a working curl
+script and the Android equivalent. The short version:
+
+**AES-256-CBC with a fixed IV became AES-256-GCM with a fresh nonce.** Three
+things were wrong and all three were reproduced before being fixed. The IV
+never changed, so encrypting the same request twice produced byte-identical
+output — anyone watching the wire could tell which requests repeated without
+holding the key. Nothing checked integrity, so in a test 16 bytes of a reply
+were rewritten to a chosen value **with no key at all** and the old code
+parsed it happily. And the key sat in the PHP source, so it travelled with
+every copy and every backup.
+
+Now: a 12-byte random nonce per message, a 16-byte GCM tag, a 5-minute
+timestamp window, and the client's own nonce echoed in the reply so a
+recorded "valid" response cannot be replayed at the app later. Every failure
+— tampered, wrong key, stale, malformed — returns the same
+`"Decryption failed."`, so nothing tells an attacker which check they missed.
+
+**Set the key in `.env`:**
+
+    php -r 'echo bin2hex(random_bytes(32)), "\n";'
+    connect.aesKey = <the 64 hex characters>
+
+Missing or malformed and the connector answers 503 and logs `critical`. It
+fails closed deliberately.
+
+**This breaks the current app.** An old client cannot talk to the new server
+— that is what the `EG1.` version prefix is for. Rebuild the app with the
+matching key and format before you deploy this, or roll both together.
+
+**The limit worth stating plainly:** the key still ships inside the APK.
+Anyone who unpacks it can read and forge anything on this endpoint. What
+this buys you is protection against interception, tampering and replay on
+the wire. Only signing responses with a private key the app never holds
+would stop someone who owns the client — a bigger change, worth planning.
+
+Also fixed there: **MLBB and FFM keys could never connect.** A game code
+missing from `$gameVersions` falls through to "Please Update Your App", and
+both were missing while having live keys — 10 of them.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.

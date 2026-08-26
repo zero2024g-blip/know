@@ -4286,8 +4286,8 @@ diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseContr
  }
 diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 --- /tmp/orig_app/Controllers/Connect.php	2026-08-24 23:02:52.529923272 +0000
-+++ app/Controllers/Connect.php	2026-08-26 18:24:45.553702246 +0000
-@@ -1 +1,517 @@
++++ app/Controllers/Connect.php	2026-08-26 18:44:04.444645731 +0000
+@@ -1 +1,671 @@
 -# Private 🥲❤️
 \ No newline at end of file
 +<?php
@@ -4301,12 +4301,14 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +{
 +    protected $model, $game, $aVer, $uKey, $sDev, $PublicKey;
 +    protected $staticWords, $Public_Key, $setAccess;
-+    protected $aes_key, $aes_iv;
++    protected $aes_key;
 +
 +    // Declared, not created on the fly. PHP 8.2 deprecated dynamic properties
 +    // and 8.5 prints a notice for each one on every single request.
 +    protected $maintenance;
-+    protected $codm_version, $pubgm_version, $ffm_version, $dfm_version, $spof_version;
++    /** The client's nonce for this request, echoed back in the reply. */
++    private $reply_nonce = null;
++    protected $codm_version, $pubgm_version, $ffm_version, $dfm_version, $mlbb_version, $spof_version;
 +
 +    /** Failed attempts allowed from one IP before it is shut out, and for how long. */
 +    private const RL_TABLE  = 'connect_ratelimit';
@@ -4316,8 +4318,20 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +    
 +    public function __construct()
 +    {
-+        $this->aes_key = hex2bin('PUT_YOUR_64_HEX_KEY_HERE');
-+        $this->aes_iv  = hex2bin('PUT_YOUR_32_HEX_IV_HERE');
++        // The key comes from .env, never from this file. A key committed to
++        // source travels with every copy of the code, shows up in every
++        // backup, and cannot be rotated without a release.
++        //   connect.aesKey = <64 hex characters>
++        $hexKey = (string) (env('connect.aesKey') ?: '');
++        if (strlen($hexKey) !== 64 || ! ctype_xdigit($hexKey)) {
++            // Fail closed. Answering with a working key that is not the one
++            // you configured is worse than not answering.
++            log_message('critical', 'connect.aesKey missing or malformed in .env — the connector is disabled.');
++            $this->aes_key = null;
++            return;
++        }
++        $this->aes_key = hex2bin($hexKey);
++        // No fixed IV any more: GCM generates a fresh nonce per message.
 +
 +        // panel
 +        $this->model = new KeysModel();
@@ -4334,6 +4348,8 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +        $this->ffm_version = "X.Y.Z:YOURBUILDID"; //FF - U6TpewCDQr
 +        $this->dfm_version = "X.Y.Z:YOURBUILDID"; //DFM - bZP9GT6dCu
 +        
++        $this->mlbb_version = "0.0.1:YOURBUILDID";
++
 +        $this->spof_version = "X.Y.Z:YOURBUILDID"; // k3QzINOfH_sp
 +    }
 +
@@ -4382,6 +4398,12 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +            // Deliberately the same shape as any other refusal: telling a
 +            // scanner it has been rate limited tells it to change address.
 +            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
++        }
++
++        if ($this->aes_key === null) {
++            // Nothing can be sealed without a key, so answer in the clear
++            // with no detail at all.
++            return $this->response->setStatusCode(503)->setBody('');
 +        }
 +
 +        $raw_data = $this->request->getPost('data');
@@ -4749,50 +4771,182 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +
 +    protected function isUpdate($my_version, $my_game)
 +    {
++        // Every game code that exists in keys_code needs an entry here. A code
++        // that is missing falls through to the `return true` below, which the
++        // caller reads as "update your app" — so those keys can never connect,
++        // no matter what version the app sends. MLBB and FFM had live keys and
++        // were both missing.
 +        $gameVersions = [
 +            'CODM'    => $this->codm_version,
 +            'PUBGM'   => $this->pubgm_version,
 +            'FF'      => $this->ffm_version,
++            'FFM'     => $this->ffm_version,   // same client as FF
++            'MLBB'    => $this->mlbb_version,
 +            'DFM'     => $this->dfm_version,
 +            'SPOOFER' => $this->spof_version,
 +        ];
-+        
-+        if (isset($gameVersions[$my_game])) { // remove: !
-+           return ($my_version !== md5($gameVersions['SPOOFER']) && $my_version !== md5($gameVersions[$my_game]));
-+           // return false;
++
++        if (isset($gameVersions[$my_game])) {
++            return (! hash_equals(md5($gameVersions['SPOOFER']), (string) $my_version)
++                 && ! hash_equals(md5($gameVersions[$my_game]),  (string) $my_version));
 +        }
++
++        // Unknown game code: still refuse, but say so in the log, because in
++        // practice this means someone sold keys for a game nobody added here.
++        log_message('warning', 'Connect: no version configured for game "{g}" — its keys cannot connect.', ['g' => $my_game]);
 +        return true;
 +    }
 +
-+    // AES ENCRYPTION
-+    private function aes_decrypt($encrypted)
-+    {
-+        $decrypted = openssl_decrypt($encrypted, 'AES-256-CBC', $this->aes_key, 0, $this->aes_iv);
++    // -----------------------------------------------------------------
++    //  Transport crypto
++    // -----------------------------------------------------------------
++    //  AES-256-GCM. GCM is an AEAD mode: it encrypts and authenticates in
++    //  one pass, so a tampered message fails to open instead of decrypting
++    //  into something the attacker chose.
++    //
++    //  What the previous scheme got wrong, and why each part of this exists:
++    //
++    //  * CBC with a FIXED IV made encryption deterministic — the same request
++    //    always produced the same bytes, so anyone watching the wire could
++    //    tell repeated requests apart without any key. Here a fresh 12-byte
++    //    nonce is generated per message and travels with it.
++    //
++    //  * CBC has no integrity check at all. Flipping bits in the ciphertext
++    //    flips the matching plaintext bits, and the server happily parsed the
++    //    result. GCM's 16-byte tag makes that a hard failure.
++    //
++    //  * The version string is bound as additional authenticated data, so a
++    //    message cannot be replayed against a future format that means
++    //    something different.
++    //
++    //  Wire format, one line of ASCII:
++    //
++    //      EG1.<base64url nonce>.<base64url ciphertext||tag>
++    //
++    //  The version prefix is what lets you roll a new scheme later without
++    //  guessing what an old client sent.
++    //
++    //  HONEST LIMIT: the key ships inside the Android app. Anyone who
++    //  unpacks the APK has it and can then read and forge anything here.
++    //  This stops interception and tampering on the wire; it does not stop
++    //  someone who owns the client. Only signing responses with a private
++    //  key the app never holds would do that.
 +
-+        if ($decrypted === false) {
++    private const CRYPTO_VERSION = 'EG1';
++    private const CRYPTO_CIPHER  = 'aes-256-gcm';
++    private const NONCE_BYTES    = 12;   // GCM's native size
++    private const TAG_BYTES      = 16;
++    private const MAX_SKEW       = 300;  // a request older than 5 min is refused
++
++    private function b64u_encode(string $bin): string
++    {
++        return rtrim(strtr(base64_encode($bin), '+/', '-_'), '=');
++    }
++
++    private function b64u_decode(string $txt): string|false
++    {
++        return base64_decode(strtr($txt, '-_', '+/'), true);
++    }
++
++    /**
++     * Open a sealed request. Returns null for anything that is not exactly
++     * right — wrong version, bad base64, wrong length, failed tag, bad JSON,
++     * stale timestamp. Every one of those gets the same answer from the
++     * caller, so this never becomes an oracle that tells an attacker which
++     * part they got wrong.
++     */
++    private function aes_decrypt($envelope)
++    {
++        if (! is_string($envelope)) {
 +            return null;
 +        }
 +
-+        $decode_params = json_decode($decrypted, true);
-+        if (json_last_error() !== JSON_ERROR_NONE) {
-+            return null; 
++        $parts = explode('.', trim($envelope));
++        if (count($parts) !== 3 || $parts[0] !== self::CRYPTO_VERSION) {
++            return null;
 +        }
 +
-+        return $decode_params;
++        $nonce = $this->b64u_decode($parts[1]);
++        $blob  = $this->b64u_decode($parts[2]);
++
++        if ($nonce === false || $blob === false
++            || strlen($nonce) !== self::NONCE_BYTES
++            || strlen($blob) <= self::TAG_BYTES) {
++            return null;
++        }
++
++        // The tag is carried on the end of the ciphertext.
++        $tag        = substr($blob, -self::TAG_BYTES);
++        $ciphertext = substr($blob, 0, -self::TAG_BYTES);
++
++        $plain = openssl_decrypt(
++            $ciphertext,
++            self::CRYPTO_CIPHER,
++            $this->aes_key,
++            OPENSSL_RAW_DATA,
++            $nonce,
++            $tag,
++            self::CRYPTO_VERSION          // AAD
++        );
++
++        if ($plain === false) {
++            return null;                  // tag mismatch: tampered or wrong key
++        }
++
++        $params = json_decode($plain, true);
++        if (json_last_error() !== JSON_ERROR_NONE || ! is_array($params)) {
++            return null;
++        }
++
++        // Replay window. A captured request stops working once it is stale,
++        // which limits how long a recording is worth anything.
++        $ts = (int) ($params['ts'] ?? 0);
++        if ($ts <= 0 || abs(time() - $ts) > self::MAX_SKEW) {
++            return null;
++        }
++
++        // The client's nonce is echoed back in the response so the app can
++        // check the answer belongs to the question it just asked, rather
++        // than being a replayed recording of an older "valid" response.
++        $this->reply_nonce = $params['cnonce'] ?? null;
++
++        return $params;
 +    }
 +
++    /**
++     * Seal a response. A fresh nonce every time, and the client's own nonce
++     * echoed inside so a captured response cannot be replayed at it later.
++     */
 +    private function aes_encrypt($data)
 +    {
-+        $json_data = json_encode($data);
-+        $encrypted = openssl_encrypt($json_data, 'AES-256-CBC', $this->aes_key, 0, $this->aes_iv);
++        if (! empty($this->reply_nonce)) {
++            $data['cnonce'] = $this->reply_nonce;
++        }
++        $data['ts'] = time();
++
++        $nonce = random_bytes(self::NONCE_BYTES);
++        $tag   = '';
++
++        $ciphertext = openssl_encrypt(
++            json_encode($data),
++            self::CRYPTO_CIPHER,
++            $this->aes_key,
++            OPENSSL_RAW_DATA,
++            $nonce,
++            $tag,
++            self::CRYPTO_VERSION,         // AAD
++            self::TAG_BYTES
++        );
++
++        $envelope = self::CRYPTO_VERSION
++            . '.' . $this->b64u_encode($nonce)
++            . '.' . $this->b64u_encode($ciphertext . $tag);
 +
 +        return $this->response
-+                ->setHeader('Content-Type', 'text/plain')
-+                ->setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
-+                ->setHeader('Pragma', 'no-cache')
-+                ->setBody($encrypted);
-+
-+        // return $this->response->setBody($encrypted);
++            ->setHeader('Content-Type', 'text/plain')
++            ->setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
++            ->setHeader('Pragma', 'no-cache')
++            ->setBody($envelope);
 +    }
 +}
 +
@@ -9219,8 +9373,8 @@ diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 --- /tmp/orig_app/Views/User/dashboard.php	2026-08-24 23:02:52.619981516 +0000
-+++ app/Views/User/dashboard.php	2026-08-26 08:51:31.737717278 +0000
-@@ -2,145 +2,199 @@
++++ app/Views/User/dashboard.php	2026-08-26 18:42:54.616814610 +0000
+@@ -2,145 +2,192 @@
  
  <?= $this->section('content') ?>
  
@@ -9334,7 +9488,7 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +                        <div class="rh-row">
 +                            <div class="rh-ava"><?= strtoupper(substr(esc($in[0]), 0, 1)) ?></div>
 +                            <div class="rh-body">
-+                                <div class="rh-key"><span class="em-key"><?= esc($in[1]) ?>&hellip;</span></div>
++                                <div><span class="em-key"><?= esc($in[1]) ?>&hellip;</span></div>
 +                                <div class="rh-sub">
 +                                    <?= esc($in[0]) ?> &middot; <?= esc($in[2]) ?> hours &middot;
 +                                    <?= esc($in[3]) ?> device<?= ((int) $in[3] === 1) ? '' : 's' ?>
@@ -9522,15 +9676,8 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +    .rh-right { text-align: right; flex-shrink: 0; }
 +    .rh-time { font-size: .76rem; color: var(--em-dim); white-space: nowrap; }
 +
-+    /* key/value rows in the Account panel */
-+    .em-kv {
-+        display: flex; align-items: center; justify-content: space-between;
-+        gap: 1rem; padding: .75rem 1.15rem; font-size: .87rem;
-+    }
-+    .em-kv + .em-kv { border-top: 1px solid var(--em-line); }
-+    .em-kv span { color: var(--em-dim); }
-+    .em-kv b { color: var(--em-text); font-weight: 600; text-align: right; }
-+    .em-pill.is-accent { background: var(--em-wash); color: var(--em-accent); border-color: rgba(244,114,90,.3); }
++    /* .em-kv and .em-pill.is-accent now live in ember.css: the account page
++       uses them too, and a page-local rule only styles the page it sits in. */
 +
 +    .em-shortcuts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; }
 +    .em-shortcuts .em-btn { width: 100%; }
