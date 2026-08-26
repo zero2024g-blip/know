@@ -3874,6 +3874,20 @@ diff -ruN /tmp/orig_app/BACKUP/Views/welcome_message.php app/BACKUP/Views/welcom
 -
 -</body>
 -</html>
+diff -ruN /tmp/orig_app/Config/Encryption.php app/Config/Encryption.php
+--- /tmp/orig_app/Config/Encryption.php	2026-08-24 23:02:52.517438475 +0000
++++ app/Config/Encryption.php	2026-08-26 08:19:10.081993636 +0000
+@@ -23,7 +23,9 @@
+ 	 *
+ 	 * @var string
+ 	 */
+-	public $key = '9███████████████████████████████████████████████████████████████';
++	// Set via .env (encryption.key), never in source. A value committed here
++	// travels with every copy of the code and cannot be rotated per install.
++	public $key = '';
+ 
+ 	/**
+ 	 * --------------------------------------------------------------------------
 diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 --- /tmp/orig_app/Config/Routes.php	2026-08-24 23:02:52.524373647 +0000
 +++ app/Config/Routes.php	2026-08-24 23:04:47.407781185 +0000
@@ -3888,17 +3902,81 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
  });
 diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 --- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
-+++ app/Controllers/Auth.php	2026-08-24 23:28:04.227095150 +0000
-@@ -311,9 +311,89 @@
++++ app/Controllers/Auth.php	2026-08-26 08:11:56.109516260 +0000
+@@ -189,15 +189,44 @@
+             'saldo'    => $rCheck->set_saldo ?: 0,
+             'uplink'   => $rCheck->created_by,
+             'status'   => 1,
++            // No 'level' here on purpose: a registrant takes the column
++            // default. Accepting it from input would let anyone sign up
++            // as an administrator.
+         ];
+ 
+-        if ($this->userModel->insert($data_register)) {
+-            $mCode->useReferral($referral);
+-            $this->rateClear($ipHash); // success -> clear
+-            return redirect()->to('login')->with('msgSuccess', 'Registration successful! Please login.');
++        $db = \Config\Database::connect();
++        $db->transBegin();
++
++        try {
++            // Claim the code FIRST. It was previously marked used after the
++            // insert and with a missing argument, so it was never marked at
++            // all and one code funded unlimited accounts. Claiming first
++            // also means a losing race creates no account.
++            if (! $mCode->useReferral($referral, $username)) {
++                $db->transRollback();
++                return $this->registerFail($ipHash, 'This referral code has already been used.');
++            }
++
++            if (! $this->userModel->insert($data_register)) {
++                throw new \RuntimeException('User insert failed');
++            }
++
++            if ($db->transStatus() === false) {
++                throw new \RuntimeException('Transaction failed');
++            }
++
++            $db->transCommit();
++        } catch (\Throwable $e) {
++            // The claim and the account live or die together, so a failed
++            // signup never burns the code.
++            $db->transRollback();
++            log_message('error', 'Registration rolled back: ' . $e->getMessage());
++            return redirect()->route('register')->withInput()
++                ->with('msgDanger', 'An error occurred. Please try again.');
+         }
+ 
+-        return redirect()->route('register')->withInput()->with('msgDanger', 'An error occurred. Please try again.');
++        $this->rateClear($ipHash); // success -> clear
++        return redirect()->to('login')->with('msgSuccess', 'Registration successful! Please login.');
+     }
+ 
+     private function registerFail(string $ipHash, string $reason)
+@@ -311,9 +340,4 @@
      /**
       * Real client IP (Cloudflare header first — the site is behind Cloudflare).
       */
+-    private function clientIp(): string
+-    {
+-        $cf = $this->request->getServer('HTTP_CF_CONNECTING_IP');
+-        return ! empty($cf) ? (string) $cf : (string) $this->request->getIPAddress();
+-    }
+ }
+diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseController.php
+--- /tmp/orig_app/Controllers/BaseController.php	2026-08-24 23:02:52.529199628 +0000
++++ app/Controllers/BaseController.php	2026-08-26 08:11:56.109693212 +0000
+@@ -56,4 +56,91 @@
+ 		//--------------------------------------------------------------------
+ 		// E.g.: $this->session = \Config\Services::session();
+ 	}
++
 +    /**
 +     * Cloudflare's published edge ranges. Only a request that actually
 +     * arrives from one of these is allowed to speak for its client via
 +     * CF-Connecting-IP. Refresh from https://www.cloudflare.com/ips/
 +     */
-+    private const CF_RANGES = [
++    protected const CF_RANGES = [
 +        '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
 +        '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
 +        '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
@@ -3907,10 +3985,8 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 +        '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
 +    ];
 +
-     private function clientIp(): string
-     {
--        $cf = $this->request->getServer('HTTP_CF_CONNECTING_IP');
--        return ! empty($cf) ? (string) $cf : (string) $this->request->getIPAddress();
++    protected function clientIp(): string
++    {
 +        $remote = (string) $this->request->getIPAddress();
 +
 +        // MODE B (direct, no CDN): nothing legitimate sets CF-Connecting-IP,
@@ -3941,7 +4017,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 +        return filter_var($cf, FILTER_VALIDATE_IP) ? $cf : $remote;
 +    }
 +
-+    private function fromCloudflare(string $ip): bool
++    protected function fromCloudflare(string $ip): bool
 +    {
 +        foreach (self::CF_RANGES as $cidr) {
 +            if ($this->ipInCidr($ip, $cidr)) {
@@ -3951,7 +4027,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 +        return false;
 +    }
 +
-+    private function ipInCidr(string $ip, string $cidr): bool
++    protected function ipInCidr(string $ip, string $cidr): bool
 +    {
 +        [$subnet, $bits] = array_pad(explode('/', $cidr, 2), 2, null);
 +        $bits = (int) $bits;
@@ -3979,7 +4055,30 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 +        $mask = chr(0xFF << (8 - $rest) & 0xFF);
 +
 +        return (($ipBin[$whole] ?? "\0") & $mask) === (($subnetBin[$whole] ?? "\0") & $mask);
++    }
++
+ }
+diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
+--- /tmp/orig_app/Controllers/KeyCheck.php	2026-08-24 23:02:52.530359402 +0000
++++ app/Controllers/KeyCheck.php	2026-08-26 08:12:09.389130517 +0000
+@@ -178,13 +178,9 @@
+         return 'Too many attempts. Please try again in ' . $seconds . ' seconds.';
      }
+ 
+-    /**
+-     * Real client IP (Cloudflare header first — the site is behind Cloudflare).
+-     * Remove the CF line if you ever move OFF Cloudflare, so it can't be spoofed.
+-     */
+-    private function clientIp(): string
+-    {
+-        $cf = $this->request->getServer('HTTP_CF_CONNECTING_IP');
+-        return ! empty($cf) ? (string) $cf : (string) $this->request->getIPAddress();
+-    }
++    // clientIp() is inherited from BaseController, which verifies the peer
++    // is a Cloudflare edge before believing CF-Connecting-IP. This class
++    // used to carry its own copy that took the header on trust, so the
++    // rate limit below - the only thing bounding key guessing on a public
++    // endpoint - could be reset at will by forging one header.
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
@@ -4276,7 +4375,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  }
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
-+++ app/Controllers/User.php	2026-08-24 23:08:50.867783896 +0000
++++ app/Controllers/User.php	2026-08-26 08:12:24.924137865 +0000
 @@ -114,7 +114,10 @@
          $data = [
              'title' => 'Users',
@@ -4315,7 +4414,38 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              }
          }
      }
-@@ -315,7 +317,7 @@
+@@ -253,10 +255,16 @@
+         $password = $this->request->getPost('password');
+ 
+         $user = $this->user;
+-        $currHash = create_password($current, false);
+         $validation = Services::validation();
+ 
+-        if (!password_verify($currHash, $user->password)) {
++        // Verify against BOTH schemes. The old code only built the legacy
++        // md5(pepper.plain) and compared that, which can never match an
++        // Argon2id hash of the plaintext - so every account upgraded at
++        // login was permanently unable to change its password.
++        $currentOk = password_verify($current, $user->password)
++                  || password_verify(create_password($current, false), $user->password);
++
++        if (! $currentOk) {
+             $msg = "Wrong current password.";
+             $validation->setError('current', $msg);
+         } elseif ($current == $password) {
+@@ -285,7 +293,10 @@
+         if (!$this->validate($form_rules)) {
+             return redirect()->back()->withInput()->with('msgDanger', 'Something wrong! Please check the form');
+         } else {
+-            $newPassword = create_password($password);
++            // create_passwordV2 = Argon2id. The old call used create_password,
++            // which is the legacy md5-then-bcrypt-cost-8 scheme, so changing
++            // your password silently downgraded it and undid the migration.
++            $newPassword = create_passwordV2($password);
+             $this->model->update(session('userid'), ['password' => $newPassword]);
+             return redirect()->back()->with('msgSuccess', 'Password Successfuly Changed.');
+         }
+@@ -315,7 +326,7 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
          } else {
@@ -4680,6 +4810,50 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +
 +    return $unit * $device_max;
 +}
+diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
+--- /tmp/orig_app/Models/CodeModel.php	2026-08-24 23:02:52.605921932 +0000
++++ app/Models/CodeModel.php	2026-08-26 08:10:47.406331196 +0000
+@@ -18,14 +18,35 @@
+         return $this->get()->getResultObject();
+     }
+ 
++    /**
++     * Claim a referral code for a user. Returns TRUE only if THIS call is
++     * the one that claimed it.
++     *
++     * Two bugs lived here. The caller passed one argument, so $username was
++     * false, the branch never ran and used_by was never written - a single
++     * code created unlimited funded accounts. And a read-then-write claim
++     * lets two simultaneous registrations both pass the "already used"
++     * check. The claim is now a single conditional UPDATE, so the database
++     * decides the winner and only one caller sees a row change.
++     */
+     public function useReferral($code, $username = false)
+     {
+-        $code = $this->checkCode($code);
+-        if ($code and $username) {
+-            $ok = $this->update($code->id_reff, ['used_by' => $username]);
+-            if ($ok) return true;
++        if (! $username) {
++            return false;
++        }
++
++        $row = $this->checkCode($code);
++        if (! $row) {
++            return false;
+         }
+-        return false;
++
++        $db = \Config\Database::connect();
++        $db->table($this->table)
++           ->where('id_reff', $row->id_reff)
++           ->where('used_by', null)
++           ->update(['used_by' => $username]);
++
++        return $db->affectedRows() === 1;
+     }
+ 
+     /**
 diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
 --- /tmp/orig_app/Models/UserModel.php	2026-08-24 23:02:52.607940552 +0000
 +++ app/Models/UserModel.php	2026-08-24 23:03:35.541581662 +0000
@@ -5147,295 +5321,3 @@ diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/er
  
  	<style>
  		* { box-sizing: border-box; }
---- /tmp/orig_index.php	2026-08-24 23:02:52.630388750 +0000
-+++ index.php	2026-08-24 23:05:21.374443161 +0000
-@@ -3,11 +3,6 @@
- // Path to the front controller (this file)
- define('FCPATH', __DIR__ . DIRECTORY_SEPARATOR);
- 
--// 🔴 جلوگیری از حملات LFI (جلوگیری از "../" و "/")
--if (strpos($filename, '..') !== false || strpos($filename, '/') !== false) {
--    die("Access Denied!");
--}
--
- /*
-  *---------------------------------------------------------------
-  * BOOTSTRAP THE APPLICATION
---- /tmp/orig_htaccess	2026-08-24 23:02:52.634921270 +0000
-+++ .htaccess	2026-08-26 01:19:44.534230279 +0000
-@@ -1,5 +1,20 @@
--# 1. HARDEN SECURITY HEADERS
--# Provides protection against XSS, Framing, and Content-Sniffing
-+# =====================================================================
-+#  ZERO PANEL — .htaccess
-+#
-+#  TWO DEPLOYMENT MODES. Pick one. Read DEPLOYMENT-MODES.md first.
-+#
-+#    MODE A — behind Cloudflare   (default: ACTIVE)
-+#    MODE B — direct, no CDN      (default: commented out with #)
-+#
-+#  To switch to MODE B: uncomment every line marked  [B]
-+#                       and comment out every line marked  [A]
-+#  Nothing else needs to change in this file.
-+# =====================================================================
-+
-+
-+# ---------------------------------------------------------------------
-+# 1. SECURITY HEADERS — identical in both modes
-+# ---------------------------------------------------------------------
- <IfModule mod_headers.c>
-     Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
-     Header always set X-Frame-Options "SAMEORIGIN"
-@@ -10,67 +25,221 @@
-     Header always set Content-Security-Policy "default-src 'self' https: data:; script-src 'self' https: data: 'unsafe-inline'; style-src 'self' https: 'unsafe-inline'; font-src 'self' https: data:; img-src 'self' https: data:; connect-src 'self' https:; frame-ancestors 'self';"
-     Header always unset X-Powered-By
-     Header unset X-Powered-By
-+
-+    # Never let a signed-in page be cached by a proxy, a CDN, or a shared
-+    # browser. Without this an authenticated page can be served to the
-+    # wrong person. Matters in BOTH modes; critical in MODE A because
-+    # Cloudflare caches aggressively at the edge.
-+    <FilesMatch "\.php$">
-+        Header always set Cache-Control "private, no-store, no-cache, must-revalidate"
-+        Header always set Pragma "no-cache"
-+    </FilesMatch>
-+</IfModule>
-+
-+
-+# ---------------------------------------------------------------------
-+# 2. COMPRESSION — both modes
-+#
-+#    YOUR SERVER IS LITESPEED, not Apache (confirmed from the live
-+#    response header x-turbo-charged-by: LiteSpeed on Hostinger/hPanel).
-+#
-+#    LiteSpeed reads .htaccess, but it does NOT report Apache's module
-+#    names, so the two <IfModule> blocks below are very likely SKIPPED on
-+#    your host. They are kept because they cost nothing and make the file
-+#    correct if you ever move to real Apache.
-+#
-+#    What actually compresses your responses today:
-+#      MODE A - Cloudflare compresses at the edge (verified: the live
-+#               site returns content-encoding: br).
-+#      MODE B - LiteSpeed's own compression, switched on in hPanel, not
-+#               here. hPanel -> Website -> Optimization.
-+#
-+#    Section 3's pre-compressed .br/.gz serving does NOT depend on any
-+#    IfModule - it uses mod_rewrite and mod_headers, both of which
-+#    LiteSpeed fully supports. That is the part that carries the weight.
-+# ---------------------------------------------------------------------
-+<IfModule mod_brotli.c>
-+    AddOutputFilterByType BROTLI_COMPRESS text/html text/plain text/xml text/css text/javascript
-+    AddOutputFilterByType BROTLI_COMPRESS application/javascript application/json application/xml
-+    AddOutputFilterByType BROTLI_COMPRESS image/svg+xml
- </IfModule>
-+<IfModule mod_deflate.c>
-+    AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css text/javascript
-+    AddOutputFilterByType DEFLATE application/javascript application/json application/xml
-+    AddOutputFilterByType DEFLATE image/svg+xml
-+    # Already-compressed formats: recompressing wastes CPU and gains nothing.
-+    SetEnvIfNoCase Request_URI \.(?:woff2?|png|jpe?g|gif|webp|avif|ico|zip|gz)$ no-gzip dont-vary
-+</IfModule>
-+
- 
--# 2. BASIC SERVER HARDENING
--# Disable directory browsing and server signature
-+# ---------------------------------------------------------------------
-+# 3. STATIC ASSET CACHING — both modes
-+#    Files under /assets/vendor/ never change without a filename change,
-+#    so they can be cached hard. On a slow or expensive connection this
-+#    turns every repeat visit into zero asset bytes.
-+# ---------------------------------------------------------------------
-+<IfModule mod_expires.c>
-+    ExpiresActive On
-+    ExpiresByType text/css                 "access plus 1 year"
-+    ExpiresByType application/javascript   "access plus 1 year"
-+    ExpiresByType text/javascript          "access plus 1 year"
-+    ExpiresByType font/woff2               "access plus 1 year"
-+    ExpiresByType image/svg+xml            "access plus 1 month"
-+    ExpiresByType image/png                "access plus 1 month"
-+    ExpiresByType image/x-icon             "access plus 1 month"
-+    ExpiresByType text/html                "access plus 0 seconds"
-+</IfModule>
-+<IfModule mod_headers.c>
-+    <FilesMatch "\.(css|js|woff2|svg|png|jpg|jpeg|gif|webp|ico)$">
-+        Header set Cache-Control "public, max-age=31536000, immutable"
-+        # These are public files; no cookie should ever ride along.
-+        Header unset Set-Cookie
-+    </FilesMatch>
-+</IfModule>
-+
-+# Serve a pre-compressed .br / .gz twin if one exists next to the file.
-+# tools/precompress.sh generates them. Costs zero CPU per request.
-+<IfModule mod_rewrite.c>
-+    RewriteEngine On
-+
-+    RewriteCond %{HTTP:Accept-Encoding} br
-+    RewriteCond %{REQUEST_FILENAME}.br -f
-+    RewriteRule \.(css|js)$ %{REQUEST_URI}.br [L]
-+
-+    RewriteCond %{HTTP:Accept-Encoding} gzip
-+    RewriteCond %{REQUEST_FILENAME}.gz -f
-+    RewriteRule \.(css|js)$ %{REQUEST_URI}.gz [L]
-+</IfModule>
-+<IfModule mod_headers.c>
-+    # Vary is mandatory whenever the response body depends on a request
-+    # header. Without it a shared proxy can cache the brotli copy and hand
-+    # it to a client that cannot decode it - the page arrives as garbage.
-+    # Iranian ISPs run transparent proxies, so this is not theoretical.
-+    <FilesMatch "\.(css|js)(\.br|\.gz)?$">
-+        Header append Vary Accept-Encoding
-+    </FilesMatch>
-+
-+    <FilesMatch "\.css\.br$">
-+        Header set Content-Encoding br
-+        Header set Content-Type "text/css"
-+    </FilesMatch>
-+    <FilesMatch "\.js\.br$">
-+        Header set Content-Encoding br
-+        Header set Content-Type "application/javascript"
-+    </FilesMatch>
-+    <FilesMatch "\.css\.gz$">
-+        Header set Content-Encoding gzip
-+        Header set Content-Type "text/css"
-+    </FilesMatch>
-+    <FilesMatch "\.js\.gz$">
-+        Header set Content-Encoding gzip
-+        Header set Content-Type "application/javascript"
-+    </FilesMatch>
-+</IfModule>
-+
-+
-+# ---------------------------------------------------------------------
-+# 4. SERVER HARDENING — both modes
-+# ---------------------------------------------------------------------
- Options All -Indexes
- IndexIgnore *
- Options +FollowSymlinks
- ServerSignature Off
- 
--# 3. REWRITE ENGINE & TRAFFIC FILTERING
-+
-+# ---------------------------------------------------------------------
-+# 5. REWRITE RULES
-+# ---------------------------------------------------------------------
- <IfModule mod_rewrite.c>
-     RewriteEngine On
-     RewriteBase /
- 
--    # A) API & Data Exception (Highest Priority)
--    RewriteRule ^.*zezr_connector.*$ - [L,NC]
--
--    # B) Block direct IP access (Ensures traffic comes through Cloudflare)
-+    # --- API exception -------------------------------------------------
-+    # Anchored to the real route. The old pattern matched the string
-+    # ANYWHERE in the URL and carried [L], so any path containing it
-+    # skipped every filter below.
-+    RewriteRule ^data/zezr_connector/?$ - [L,NC]
-+
-+    # --- Require traffic to arrive via Cloudflare -----------------------
-+    # [A] Cloudflare always sets CF-IPCountry. A request without it did
-+    #     not come through the edge, so it is a direct hit on the origin.
-     RewriteCond %{HTTP:CF-IPCountry} ^$
-     RewriteRule ^.*$ - [F,L]
--
--    # C) Force HTTPS (Cloudflare-aware redirection)
-+    #
-+    # [B] MODE B: there is no Cloudflare, so nothing sets that header and
-+    #     the rule above would block every visitor. Leave the two lines
-+    #     above commented out and rely on section 8 instead.
-+
-+    # --- Force HTTPS ----------------------------------------------------
-+    # [A] Behind Cloudflare, TLS terminates at the edge; the origin sees
-+    #     plain HTTP and learns the real scheme from this header.
-     RewriteCond %{HTTP:X-Forwarded-Proto} !https
-     RewriteCond %{HTTPS} off
-     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
-+    #
-+    # [B] MODE B: TLS terminates here, so only %{HTTPS} is meaningful.
-+    #     X-Forwarded-Proto is attacker-controlled with no proxy in front
-+    #     and must NOT be trusted. Uncomment these two lines:
-+    # RewriteCond %{HTTPS} off
-+    # RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
- 
--    # D) Block Malicious Request Methods
--    RewriteCond %{REQUEST_METHOD} !^(GET|POST|HEAD) [NC]
-+    # --- Block unusual methods — both modes -----------------------------
-+    RewriteCond %{REQUEST_METHOD} !^(GET|POST|HEAD)$ [NC]
-     RewriteRule .* - [F,L]
- 
--    # E) Anti-Hotlinking Protection
-+    # --- Anti-hotlinking — both modes -----------------------------------
-     RewriteCond %{HTTP_REFERER} !^$
-     RewriteCond %{HTTP_REFERER} !^https?://(www\.)?panel\.zeromods\.id [NC]
-     RewriteRule \.(so|exe|php|json|sql|rar|zip|sh|py|bin|cfg|bak|log|env|lock|template)$ https://panel.zeromods.id [F,L]
- 
--    # F) Advanced Injection & XSS Protection
-+    # --- Query-string filtering — both modes ----------------------------
-     RewriteCond %{QUERY_STRING} [a-zA-Z0-9_]=http [OR]
-     RewriteCond %{QUERY_STRING} (<|%3C).*script.*(>|%3E) [NC,OR]
-     RewriteCond %{QUERY_STRING} (GLOBALS|REQUEST|setup|config|base64) [NC]
-     RewriteRule .* - [F,L]
- 
--    # G) CodeIgniter Routing Logic
-+    # --- CodeIgniter front controller — both modes ----------------------
-     RewriteCond %{REQUEST_FILENAME} !-f
-     RewriteCond %{REQUEST_FILENAME} !-d
-     RewriteRule ^(.*)$ index.php/$1 [L,QSA]
- </IfModule>
- 
--# 4. SENSITIVE FILE & FOLDER PROTECTION
--# Prevent access to environment files, logs, and development configs
--<FilesMatch "^(\.env|passwd|shadow|.*\.log|.*\.sql|composer\..*|package.*\.json|.*\.sh|.*\.py|.*\.bak|config|.*\.ini|.*\.swp|.*\.dist|.*\.exe)$">
-+
-+# ---------------------------------------------------------------------
-+# 6. SENSITIVE FILES — both modes
-+# ---------------------------------------------------------------------
-+<FilesMatch "^(\.env.*|\.git.*|passwd|shadow|.*\.log|.*\.sql|composer\..*|package.*\.json|.*\.sh|.*\.py|.*\.bak|.*\.old.*|config|.*\.ini|.*\.swp|.*\.dist|.*\.exe|.*\.md|.*\.lock|.*\.yml|.*\.yaml)$">
-     Require all denied
- </FilesMatch>
- 
--# Block access to framework core folders
--RewriteRule ^(system|app|tests|writable|vendor) - [F,L]
-+# Any file with NO extension. Verified on the live site: /spark returned
-+# its PHP source as plain text, and /LICENSE and /builds were served too,
-+# because a blacklist only blocks the patterns someone remembered to add.
-+# This closes the whole class instead. index.php keeps its extension, so
-+# the front controller is unaffected.
-+<FilesMatch "^[^.]+$">
-+    Require all denied
-+</FilesMatch>
- 
--# 5. DOS PROTECTION & IP WHITELISTING
--# Limit request body size to 2MB to prevent large upload attacks
-+# Framework internals are never served directly.
-+<IfModule mod_rewrite.c>
-+    RewriteRule ^(system|app|tests|writable|vendor|tools)/ - [F,L]
-+</IfModule>
-+
-+
-+# ---------------------------------------------------------------------
-+# 7. REQUEST SIZE — both modes
-+# ---------------------------------------------------------------------
- LimitRequestBody 2048000
- 
--# Only allow traffic from Cloudflare Edge IPs
-+
-+# ---------------------------------------------------------------------
-+# 8. ORIGIN ACCESS CONTROL
-+# ---------------------------------------------------------------------
-+# [A] MODE A — accept connections only from Cloudflare's edge.
-+#     This is what makes CF-Connecting-IP trustworthy and stops an
-+#     attacker who learns the origin IP from bypassing the edge entirely.
-+#     Refresh from https://www.cloudflare.com/ips/ — the list changes.
- <RequireAny>
-     Require ip 103.21.244.0/22
-     Require ip 103.22.200.0/22
-@@ -95,3 +264,8 @@
-     Require ip 2a06:98c0::/29
-     Require ip 2c0f:f248::/32
- </RequireAny>
-+#
-+# [B] MODE B — comment out the whole <RequireAny> block above and
-+#     uncomment the single line below, so the world can reach you.
-+#     Read DEPLOYMENT-MODES.md for what you lose and what replaces it.
-+# Require all granted

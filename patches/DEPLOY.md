@@ -23,12 +23,29 @@ SweetAlert2 and Poppins.
 
 Also rotate `database.default.password` — it was in the archive you sent.
 
+## 4b. The encryption key is now blank on purpose
+
+`app/Config/Encryption.php` used to carry a real 64-hex key as a literal.
+A key committed to source travels with every copy of the code and cannot
+be rotated per install, and this project shipped `app/BACKUP/` inside the
+webroot. It is now `''`, and the value comes from `.env` only.
+
+No app code calls the encrypter today, so nothing breaks either way — but
+set it anyway, because CI4 needs it the moment you start using sessions
+that encrypt, or `encrypt()`/`decrypt()`:
+
+    encryption.key = hex2bin:<run `php spark key:generate`>
+
 ## 5. Check it works
 - Sign in. Sign out. Sign in again.
 - Open Keys. The table loads and the page is noticeably faster.
 - Reset a key's devices. Then reset a second one **without reloading** —
   this proves the CSRF token rotation is handled.
 - As a non-admin, open /admin/manage-users. You must be bounced.
+- Register with a referral code. Then try the **same code again** — it
+  must be refused. Before this patch it stayed usable forever.
+- Change your own password, sign out, sign back in with the new one.
+  Do it for a legacy account too, if you still have one.
 
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
