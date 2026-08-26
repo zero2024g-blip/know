@@ -3902,7 +3902,7 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
  });
 diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 --- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
-+++ app/Controllers/Auth.php	2026-08-26 08:11:56.109516260 +0000
++++ app/Controllers/Auth.php	2026-08-26 08:44:06.189279572 +0000
 @@ -189,15 +189,44 @@
              'saldo'    => $rCheck->set_saldo ?: 0,
              'uplink'   => $rCheck->created_by,
@@ -4375,8 +4375,28 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  }
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
-+++ app/Controllers/User.php	2026-08-26 08:12:24.924137865 +0000
-@@ -114,7 +114,10 @@
++++ app/Controllers/User.php	2026-08-26 08:50:55.349777348 +0000
+@@ -33,11 +33,15 @@
+     public function index()
+     {
+         $historyModel = new HistoryModel();
++        $keysModel    = new \App\Models\KeysModel();
++
+         $data = [
+-            'title' => 'Dashboard',
+-            'user' => $this->user,
+-            'time' => $this->time,
+-            'history' => $historyModel->getAll(),
++            'title'   => 'Dashboard',
++            'user'    => $this->user,
++            'time'    => $this->time,
++            // Both are scoped by role inside the model, not here.
++            'history' => $historyModel->getAll(10, 'DESC', $this->user),
++            'stats'   => $keysModel->stats($this->user),
+         ];
+         return view('User/dashboard', $data);
+     }
+@@ -114,7 +118,10 @@
          $data = [
              'title' => 'Users',
              'user' => $user,
@@ -4388,7 +4408,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation
          ];
-@@ -137,7 +140,6 @@
+@@ -137,7 +144,6 @@
              'title' => 'Settings',
              'user' => $user,
              'target' => $model->getUser($userid),
@@ -4396,7 +4416,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation,
          ];
-@@ -213,7 +215,7 @@
+@@ -213,7 +219,7 @@
  
              $data_update = [
                  'username' => $username,
@@ -4405,7 +4425,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
                  'level' => $level,
                  'status' => $status,
                  'saldo' => (($saldo < 1) ? 0 : $saldo),
-@@ -222,7 +224,7 @@
+@@ -222,7 +228,7 @@
  
              $update = $model->update($userid, $data_update);
              if ($update) {
@@ -4414,7 +4434,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              }
          }
      }
-@@ -253,10 +255,16 @@
+@@ -253,10 +259,16 @@
          $password = $this->request->getPost('password');
  
          $user = $this->user;
@@ -4433,7 +4453,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $msg = "Wrong current password.";
              $validation->setError('current', $msg);
          } elseif ($current == $password) {
-@@ -285,7 +293,10 @@
+@@ -285,7 +297,10 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Something wrong! Please check the form');
          } else {
@@ -4445,7 +4465,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $this->model->update(session('userid'), ['password' => $newPassword]);
              return redirect()->back()->with('msgSuccess', 'Password Successfuly Changed.');
          }
-@@ -315,7 +326,7 @@
+@@ -315,7 +330,7 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
          } else {
@@ -4586,8 +4606,8 @@ diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
 +}
 diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 --- /tmp/orig_app/Helpers/nata_helper.php	2026-08-24 23:02:52.536343011 +0000
-+++ app/Helpers/nata_helper.php	2026-08-26 07:50:50.742802241 +0000
-@@ -1,97 +1,125 @@
++++ app/Helpers/nata_helper.php	2026-08-26 08:59:48.034480563 +0000
+@@ -1,97 +1,145 @@
 -<?php
 -
 -/**
@@ -4810,6 +4830,26 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +
 +    return $unit * $device_max;
 +}
++
++/**
++ * Versioned URL for a file under public/.
++ *
++ * .htaccess serves CSS and JS with "max-age=31536000, immutable", which is
++ * what makes repeat visits cheap on a slow connection — but it also means a
++ * browser that already has the file will not re-check it for a year. Without
++ * a version in the URL, editing a stylesheet would reach new visitors only.
++ *
++ * The suffix is the file's modification time, so the URL changes exactly when
++ * the file does. A missing file falls back to the plain URL rather than
++ * throwing: a broken stylesheet link is better than a 500 on every page.
++ */
++function asset_ver(string $path): string
++{
++    $full = FCPATH . ltrim($path, '/');
++    $stamp = is_file($full) ? filemtime($full) : false;
++
++    return base_url($path) . ($stamp ? '?v=' . $stamp : '');
++}
 diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
 --- /tmp/orig_app/Models/CodeModel.php	2026-08-24 23:02:52.605921932 +0000
 +++ app/Models/CodeModel.php	2026-08-26 08:10:47.406331196 +0000
@@ -4854,6 +4894,76 @@ diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
      }
  
      /**
+diff -ruN /tmp/orig_app/Models/HistoryModel.php app/Models/HistoryModel.php
+--- /tmp/orig_app/Models/HistoryModel.php	2026-08-24 23:02:52.606777746 +0000
++++ app/Models/HistoryModel.php	2026-08-26 08:50:46.663875110 +0000
+@@ -11,8 +11,20 @@
+     protected $allowedFields = ['keys_id', 'user_do', 'info'];
+     protected $useTimestamps = true;
+ 
+-    public function getAll($limit = 10, $orderBy = "DESC")
++    /**
++     * Latest history rows.
++     *
++     * $user scopes the result: an admin sees everyone's, anyone else sees
++     * only their own. Without it a seller's dashboard listed every other
++     * seller's key generations — not enough to reconstruct a key (the row
++     * stores 5 of 12 characters), but it exposed their volume and timing.
++     */
++    public function getAll($limit = 10, $orderBy = "DESC", ?object $user = null)
+     {
++        if ($user !== null && (int) $user->level !== 1) {
++            $this->where('user_do', $user->username);
++        }
++
+         return $this->limit($limit)
+             ->orderBy('id_history', $orderBy)
+             ->get()->getResultObject();
+diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
+--- /tmp/orig_app/Models/KeysModel.php	2026-08-24 23:02:52.607423272 +0000
++++ app/Models/KeysModel.php	2026-08-26 08:50:35.320234360 +0000
+@@ -27,6 +27,41 @@
+             ->getRowObject();
+     }
+ 
++    /**
++     * Counters for the dashboard cards.
++     *
++     * Scoped the same way API_getKeys() is: an admin sees the whole table,
++     * anyone else sees only the keys they registered. The scoping happens
++     * here rather than in the view, so a template change can never widen
++     * what a seller is shown.
++     */
++    public function stats(object $user): array
++    {
++        $db      = db_connect();
++        $scope   = static function ($builder) use ($user) {
++            if ((int) $user->level !== 1) {
++                $builder->where('registrator', $user->username);
++            }
++            return $builder;
++        };
++
++        $total  = $scope($db->table($this->table))->countAllResults();
++        $active = $scope($db->table($this->table))->where('status', 1)->countAllResults();
++
++        $soon = $scope($db->table($this->table))
++            ->where('expired_date IS NOT NULL', null, false)
++            ->where('expired_date >=', date('Y-m-d H:i:s'))
++            ->where('expired_date <=', date('Y-m-d H:i:s', strtotime('+7 days')))
++            ->countAllResults();
++
++        return [
++            'total'    => $total,
++            'active'   => $active,
++            'inactive' => $total - $active,
++            'soon'     => $soon,
++        ];
++    }
++
+     public function API_getKeys()
+     {
+         $connect = db_connect();
 diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
 --- /tmp/orig_app/Models/UserModel.php	2026-08-24 23:02:52.607940552 +0000
 +++ app/Models/UserModel.php	2026-08-24 23:03:35.541581662 +0000
@@ -4945,22 +5055,120 @@ diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
                          <?php endif; ?>
 diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 --- /tmp/orig_app/Views/Admin/users.php	2026-08-24 23:02:52.611664182 +0000
-+++ app/Views/Admin/users.php	2026-08-25 21:53:26.934430148 +0000
-@@ -40,22 +40,60 @@
++++ app/Views/Admin/users.php	2026-08-26 09:00:20.774053368 +0000
+@@ -1,100 +1,186 @@
+ <?= $this->extend('Layout/Starter') ?>
+ 
+ <?= $this->section('content') ?>
+-<div class="row">
+-    <div class="col-lg-12">
+-        <div class="alert alert-primary d-flex align-items-center gap-2" role="alert">
+-            <i class="bi bi-info-circle-fill"></i>
+-            <div><strong>INFO</strong> &middot; Search specify user by their (username, fullname, saldo or uplink).</div>
+-        </div>
+-        <div class="card shadow-sm">
+-            <div class="card-header">
+-                <i class="bi bi-people-fill me-2"></i>Manage Users
+-            </div>
+-            <div class="card-body">
+-                <!-- <?php if ($user_list) : ?> -->
+-
+-                <div class="table-responsive">
+-                    <table id="datatable" class="table table-bordered table-hover text-center" style="width:100%">
+-                        <thead>
+-                            <tr>
+-                                <th scope="row">#</th>
+-                                <th>Username</th>
+-                                <th>Fullname</th>
+-                                <th>Level</th>
+-                                <th>Saldo</th>
+-                                <th>Status</th>
+-                                <th>Uplink</th>
+-                                <th>Action</th>
+-                            </tr>
+-                        </thead>
+-                    </table>
+-                </div>
+-                <!-- <?php endif; ?> -->
+ 
+-            </div>
+-        </div>
++<?= $this->include('Layout/msgStatus') ?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-people-fill"></i> Admin</span>
++        <h1>Manage users</h1>
++        <p>Search by username, full name, balance or uplink.</p>
++    </div>
++    <div class="em-head-act">
++        <a class="em-btn" href="<?= site_url('admin/create-referral') ?>">
++            <i class="bi bi-ticket-perforated"></i> Referral codes
++        </a>
++    </div>
++</header>
++
++<section class="em-panel em-rise em-rise-1">
++    <div class="table-responsive">
++        <table id="datatable" class="table table-hover align-middle" style="width:100%">
++            <thead>
++                <tr>
++                    <th scope="col">#</th>
++                    <th scope="col">Username</th>
++                    <th scope="col">Full name</th>
++                    <th scope="col">Role</th>
++                    <th scope="col">Balance</th>
++                    <th scope="col">Status</th>
++                    <th scope="col">Uplink</th>
++                    <th scope="col" class="text-end">Action</th>
++                </tr>
++            </thead>
++            <tbody>
++                <?php for ($i = 0; $i < 6; $i++) : ?>
++                    <tr class="em-skel-row">
++                        <td><div class="em-skel is-narrow"></div></td>
++                        <td><div class="em-skel is-mid"></div></td>
++                        <td><div class="em-skel is-mid"></div></td>
++                        <td><div class="em-skel is-narrow"></div></td>
++                        <td><div class="em-skel is-narrow"></div></td>
++                        <td><div class="em-skel is-narrow"></div></td>
++                        <td><div class="em-skel is-mid"></div></td>
++                        <td><div class="em-skel is-narrow"></div></td>
++                    </tr>
++                <?php endfor; ?>
++            </tbody>
++        </table>
+     </div>
+-</div>
++</section>
+ 
  <?= $this->endSection() ?>
  
  <?= $this->section('css') ?>
 -<?= link_tag("https://cdn.datatables.net/1.10.25/css/dataTables.bootstrap5.min.css") ?>
-+<?= link_tag('assets/vendor/css/dataTables.bootstrap5.min.css') ?>
++<link rel="stylesheet" href="<?= asset_ver('assets/vendor/css/dataTables.bootstrap5.min.css') ?>">
++<style>
++    .em-pill.is-accent { background: var(--em-wash); color: var(--em-accent); border-color: rgba(244,114,90,.3); }
++</style>
  <?= $this->endSection() ?>
  
  <?= $this->section('js') ?>
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/jquery.dataTables.min.js") ?>
-+<?= script_tag('assets/vendor/js/jquery.dataTables.min.js') ?>
++<script src="<?= asset_ver('assets/vendor/js/jquery.dataTables.min.js') ?>"></script>
  
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/dataTables.bootstrap5.min.js") ?>
-+<?= script_tag('assets/vendor/js/dataTables.bootstrap5.min.js') ?>
++<script src="<?= asset_ver('assets/vendor/js/dataTables.bootstrap5.min.js') ?>"></script>
  <script>
++    var EDIT_BASE = <?= json_encode(rtrim(site_url('admin/edit'), '/')) ?>;
++
++    // DataTables writes renderer output as HTML, so every value coming back
++    // from the API is escaped here before it is concatenated in.
++    function esc(v) {
++        return String(v === null || v === undefined ? '' : v)
++            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
++            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
++    }
++
      $(document).ready(function() {
 +        // ── Weak / high-latency connections ──────────────────────────
 +        // A dropped request used to leave the table permanently empty with
@@ -5007,13 +5215,89 @@ diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
                  [0, "desc"]
              ],
 -            ajax: "<?= site_url('admin/api/users') ?>",
+-            columns: [{
+-                    data: 'id',
+-                },
 +            ajax: dtAjax("<?= site_url('admin/api/users') ?>"),
-             columns: [{
-                     data: 'id',
++            columns: [
++                { data: 'id' },
+                 {
+                     data: 'username',
++                    render: function(v, type, row) {
++                        return '<b>' + esc(row.username) + '</b>';
++                    }
                  },
+                 {
+                     data: 'fullname',
+-                    render: function(data, type, row, meta) {
+-                        return (row.fullname ? row.fullname : '~');
++                    render: function(v, type, row) {
++                        return row.fullname
++                            ? esc(row.fullname)
++                            : '<span class="text-muted">&mdash;</span>';
+                     }
+                 },
+                 {
+                     data: 'level',
++                    render: function(v, type, row) {
++                        var admin = (row.level === 'Admin');
++                        return '<span class="em-pill' + (admin ? ' is-accent' : ' is-info') + '">' +
++                               esc(row.level) + '</span>';
++                    }
+                 },
+                 {
+                     data: 'saldo',
+-                    render: function(data, type, row, meta) {
+-                        var textc = (row.level === 'Admin' ? 'primary' : 'dark');
+-                        var saldo = (row.level === 'Admin' ? '&mstpos;' : row.saldo);
+-                        return `<span class="badge text-${textc}">${saldo}</span>`;
++                    render: function(v, type, row) {
++                        // An admin has no spending limit, so a number here would
++                        // be misleading. The old code emitted "&mstpos;", which
++                        // is not an HTML entity and printed literally.
++                        if (row.level === 'Admin') {
++                            return '<span class="em-pill" title="No limit">&infin;</span>';
++                        }
++                        return '<span class="em-pill">$' + esc(row.saldo) + '</span>';
+                     }
+                 },
+                 {
+                     data: 'status',
+                     name: 'status',
+-                    render: function(data, type, row, meta) {
+-                        var act = `<span class="badge text-success">Active</span>`;
+-                        var ban = `<span class="badge text-danger">Banned</span>`;
+-                        return (row.status == 1 ? act : ban);
++                    render: function(v, type, row) {
++                        return String(row.status) === '1'
++                            ? '<span class="em-pill is-ok"><span class="em-dot"></span>Active</span>'
++                            : '<span class="em-pill is-bad"><span class="em-dot"></span>Banned</span>';
+                     }
+                 },
+                 {
+                     data: 'uplink',
++                    render: function(v, type, row) {
++                        return row.uplink
++                            ? esc(row.uplink)
++                            : '<span class="text-muted">&mdash;</span>';
++                    }
+                 },
+                 {
+                     data: null,
+-                    render: function(data, type, row, meta) {
+-                        return `<a href="<?= site_url('admin/edit') ?>/${row.id}" class="btn btn-dark btn-sm"><i class="bi bi-pencil-square me-1"></i>Edit</a>`;
++                    orderable: false,
++                    className: 'text-end',
++                    render: function(v, type, row) {
++                        return '<a class="em-btn is-sm" href="' + EDIT_BASE + '/' +
++                               encodeURIComponent(row.id) + '">' +
++                               '<i class="bi bi-pencil-square"></i> Edit</a>';
+                     }
+                 }
+             ]
 diff -ruN /tmp/orig_app/Views/Auth/login.php app/Views/Auth/login.php
 --- /tmp/orig_app/Views/Auth/login.php	2026-08-24 23:02:52.612791444 +0000
-+++ app/Views/Auth/login.php	2026-08-24 23:31:42.866400878 +0000
++++ app/Views/Auth/login.php	2026-08-26 09:00:03.558407419 +0000
 @@ -1,9 +1,7 @@
  <?= $this->extend('Layout/Starter') ?>
  
@@ -5021,13 +5305,13 @@ diff -ruN /tmp/orig_app/Views/Auth/login.php app/Views/Auth/login.php
 -
 -<link rel="preconnect" href="https://fonts.googleapis.com">
 -<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800&display=swap" rel="stylesheet">
-+<link href="<?= base_url('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
++<link href="<?= asset_ver('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
  
  <style>
      :root {
 diff -ruN /tmp/orig_app/Views/Auth/register.php app/Views/Auth/register.php
 --- /tmp/orig_app/Views/Auth/register.php	2026-08-24 23:02:52.613507624 +0000
-+++ app/Views/Auth/register.php	2026-08-24 23:31:42.867477202 +0000
++++ app/Views/Auth/register.php	2026-08-26 09:00:03.558145104 +0000
 @@ -1,9 +1,7 @@
  <?= $this->extend('Layout/Starter') ?>
  
@@ -5035,14 +5319,36 @@ diff -ruN /tmp/orig_app/Views/Auth/register.php app/Views/Auth/register.php
 -
 -<link rel="preconnect" href="https://fonts.googleapis.com">
 -<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800&display=swap" rel="stylesheet">
-+<link href="<?= base_url('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
++<link href="<?= asset_ver('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
  
  <style>
      :root {
 diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 --- /tmp/orig_app/Views/Keys/generate.php	2026-08-24 23:02:52.614808324 +0000
-+++ app/Views/Keys/generate.php	2026-08-24 23:07:43.048430122 +0000
-@@ -43,7 +43,7 @@
++++ app/Views/Keys/generate.php	2026-08-26 08:58:28.557034408 +0000
+@@ -3,6 +3,21 @@
+ <?= $this->section('content') ?>
+ <div class="row justify-content-center">
+     <div class="col-lg-6">
++        <!-- The header lives inside the column so its left edge lines up
++             with the card below it; full-width it read as a separate page. -->
++        <header class="em-head em-rise">
++            <div class="em-head-main">
++                <span class="em-eyebrow"><i class="bi bi-stars"></i> Generate</span>
++                <h1>Create licenses</h1>
++                <p>Pick a game, duration and quantity. The cost is shown before you commit.</p>
++            </div>
++            <div class="em-head-act">
++                <a class="em-btn" href="<?= site_url('keys') ?>">
++                    <i class="bi bi-list-ul"></i> All keys
++                </a>
++            </div>
++        </header>
++
+         <?= $this->include('Layout/msgStatus') ?>
+         <?php $genKeys = session()->getFlashdata('generatedKeys'); ?>
+         <?php if ($genKeys) : ?>
+@@ -43,20 +58,15 @@
                      <i>&#9203; Your time starts only after your first login.</i><br>
                      <i class="bi bi-wallet"></i> Saldo Reduce :
                      <span class="text-danger">-<?= esc(session()->getFlashdata('fees')) ?></span>
@@ -5051,7 +5357,35 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                  </small>
              </div>
          <?php endif; ?>
-@@ -183,7 +183,7 @@
+-        <div class="card">
+-            <div class="card-header p3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+-                <div class="pt-1 text-nowrap">
+-                    <i class="bi bi-stars me-2"></i>Create License
+-                </div>
+-                <div class="text-end">
+-                    <a class="btn btn-sm btn-outline-light" href="<?= site_url('keys') ?>"><i class="bi bi-people"></i></a>
+-                </div>
++        <div class="em-panel em-rise em-rise-1">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-stars"></i> New license</h2>
+             </div>
+-            <div class="card-body">
++            <div class="em-panel-b">
+                 <?= form_open() ?>
+ 
+                 <div class="row">
+@@ -96,8 +106,8 @@
+                     <input type="text" id="estimation" class="form-control" placeholder="Your order will total" readonly>
+                 </div>
+                 <div class="form-group">
+-                    <button type="submit" class="btn btn-outline-primary">
+-                        <i class="bi bi-lightning-charge me-1"></i>Generate
++                    <button type="submit" class="em-btn is-primary">
++                        <i class="bi bi-lightning-charge"></i> Generate
+                     </button>
+                 </div>
+                 <?= form_close() ?>
+@@ -183,7 +193,7 @@
  <?= $this->section('js') ?>
  <script>
      $(document).ready(function() {
@@ -5143,23 +5477,185 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
          $("#devices").attr('rows', $(this).val());
 diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 --- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
-+++ app/Views/Keys/list.php	2026-08-25 21:53:26.934107285 +0000
-@@ -45,16 +45,53 @@
++++ app/Views/Keys/list.php	2026-08-26 09:04:42.294401234 +0000
+@@ -1,60 +1,176 @@
+ <?= $this->extend('Layout/Starter') ?>
+ 
+ <?= $this->section('content') ?>
+-<div class="row justify-content-center">
+-    <div class="row">
+-        <div class="col-lg-12">
+-            <?= $this->include('Layout/msgStatus') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-card-list"></i> Keys</span>
++        <h1>Registered keys</h1>
++        <p>Every key you have issued, with its device usage and expiry.</p>
++    </div>
++    <div class="em-head-act">
++        <a class="em-btn is-primary" href="<?= site_url('keys/generate') ?>">
++            <i class="bi bi-plus-lg"></i> New key
++        </a>
++        <button class="em-btn" id="blur-out" type="button"
++                title="Hide keys from onlookers" aria-pressed="true">
++            <i class="bi bi-eye-slash"></i> <span class="em-blur-label">Hidden</span>
++        </button>
++    </div>
++</header>
++
++<section class="em-panel em-rise em-rise-1">
++    <?php if ($keylist) : ?>
++        <div class="table-responsive">
++            <table id="datatable" class="table table-hover align-middle" style="width:100%">
++                <thead>
++                    <tr>
++                        <th>#</th>
++                        <th>Game</th>
++                        <th>Key</th>
++                        <th>Devices</th>
++                        <th>Duration</th>
++                        <th>Expires</th>
++                        <th class="text-end">Action</th>
++                    </tr>
++                </thead>
++                <tbody>
++                    <!-- Placeholder rows. The real ones arrive by AJAX; without
++                         these the panel would collapse to header height and then
++                         jump when data lands, which reads as a stutter on a slow
++                         connection. DataTables replaces this tbody wholesale. -->
++                    <?php for ($i = 0; $i < 6; $i++) : ?>
++                        <tr class="em-skel-row">
++                            <td><div class="em-skel is-narrow"></div></td>
++                            <td><div class="em-skel is-mid"></div></td>
++                            <td><div class="em-skel is-wide"></div></td>
++                            <td><div class="em-skel is-narrow"></div></td>
++                            <td><div class="em-skel is-narrow"></div></td>
++                            <td><div class="em-skel is-mid"></div></td>
++                            <td><div class="em-skel is-narrow"></div></td>
++                        </tr>
++                    <?php endfor; ?>
++                </tbody>
++            </table>
+         </div>
+-        <div class="col-lg-12">
+-            <div class="card shadow-sm">
+-                <div class="card-header p3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+-                    <div class="pt-1 text-nowrap">
+-                        <i class="bi bi-card-list me-2"></i>Keys Registered
+-                    </div>
+-                    <div class="text-end">
+-                        <a class="btn btn-outline-light btn-sm" href="<?= site_url('keys/generate') ?>"><i class="bi bi-person-plus"></i> KEY</a>
+-                        <button class="btn btn-secondary btn-sm ms-1" id="blur-out" data-bs-toggle="tooltip" data-bs-placement="top" title="Eye Protect"><i class="bi bi-eye-slash"></i></button>
+-                    </div>
+-                </div>
+-                <div class="card-body">
+-                    <?php if ($keylist) : ?>
+-                        <div class="table-responsive">
+-                            <table id="datatable" class="table table-bordered table-hover text-center" style="width:100%">
+-                                <thead>
+-                                    <tr>
+-                                        <th>#</th>
+-                                        <th>Game</th>
+-                                        <th>User Keys</th>
+-                                        <th>Devices</th>
+-                                        <th>Duration</th>
+-                                        <th>Expired</th>
+-                                        <th>Action</th>
+-                                    </tr>
+-                                </thead>
+-                            </table>
+-                        </div>
+-                    <?php else : ?>
+-                        <p class="text-center">Nothing keys to show</p>
+-                    <?php endif; ?>
+-                </div>
+-            </div>
++    <?php else : ?>
++        <div class="em-empty">
++            <div class="em-empty-ic"><i class="bi bi-key"></i></div>
++            <h3>No keys yet</h3>
++            <p>Generate your first key and it will appear here.</p>
++            <a href="<?= site_url('keys/generate') ?>" class="em-btn is-primary">
++                <i class="bi bi-plus-lg"></i> Generate keys
++            </a>
+         </div>
+-    </div>
+-</div>
++    <?php endif; ?>
++</section>
++
  <?= $this->endSection() ?>
  
  <?= $this->section('css') ?>
 -<?= link_tag("https://cdn.datatables.net/1.10.25/css/dataTables.bootstrap5.min.css") ?>
-+<?= link_tag('assets/vendor/css/dataTables.bootstrap5.min.css') ?>
++<link rel="stylesheet" href="<?= asset_ver('assets/vendor/css/dataTables.bootstrap5.min.css') ?>">
++<style>
++    .em-actions { display: inline-flex; gap: .4rem; justify-content: flex-end; }
++    .em-key.is-dead { color: var(--em-dim); text-decoration: line-through; }
++    .em-blur-label { font-size: .82rem; }
++
++    /* Desktop keeps its own Expires column, so the inline copy is redundant.
++       This must sit BEFORE the media query: same specificity, so whichever
++       comes last wins, and a media query does not change that. */
++    .em-when { display: none; }
  
++    @media (max-width: 700px) {
++        .em-blur-label { display: none; }
++
++        /* Seven columns do not fit a phone. Left as-is the row scrolls and
++           the action buttons end up off-screen — the two things you came
++           here to press. Hide the row number, the game, the duration and
++           the expiry column; the expiry reappears under the key, so nothing
++           is actually lost. */
++        #datatable th:nth-child(1), #datatable td:nth-child(1),
++        #datatable th:nth-child(2), #datatable td:nth-child(2),
++        #datatable th:nth-child(5), #datatable td:nth-child(5),
++        #datatable th:nth-child(6), #datatable td:nth-child(6) { display: none; }
++
++        #datatable td, #datatable th { padding: .7rem .55rem !important; }
++        .em-when { display: block; margin-top: .3rem; font-size: .72rem; color: var(--em-dim); }
++    }
++</style>
  <?= $this->endSection() ?>
  
  <?= $this->section('js') ?>
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/jquery.dataTables.min.js") ?>
-+<?= script_tag('assets/vendor/js/jquery.dataTables.min.js') ?>
++<script src="<?= asset_ver('assets/vendor/js/jquery.dataTables.min.js') ?>"></script>
  
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/dataTables.bootstrap5.min.js") ?>
-+<?= script_tag('assets/vendor/js/dataTables.bootstrap5.min.js') ?>
++<script src="<?= asset_ver('assets/vendor/js/dataTables.bootstrap5.min.js') ?>"></script>
  <script>
++    // Endpoints come from site_url() so a subdirectory install keeps working.
++    var KEYS_BASE = <?= json_encode(rtrim(site_url('keys'), '/')) ?>;
++    var RESET_URL = <?= json_encode(site_url('keys/reset')) ?>;
++
++    // Every value below is written into HTML by a DataTables renderer, so it
++    // has to be escaped here. The server escapes for its own templates; JSON
++    // that goes through innerHTML does not pass through that.
++    function esc(v) {
++        return String(v === null || v === undefined ? '' : v)
++            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
++            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
++    }
++
++    // "2/3" plus a bar. Percentages are clamped so a bad max_devices
++    // (0, null, or lower than devices) cannot overflow the track.
++    function deviceMeter(used, max) {
++        var u = Math.max(0, parseInt(used, 10) || 0);
++        var m = Math.max(1, parseInt(max, 10) || 1);
++        var pct = Math.min(100, Math.round((u / m) * 100));
++        return '<span class="em-meter">' +
++                 '<span class="em-meter-track">' +
++                   '<span class="em-meter-fill' + (u >= m ? ' is-full' : '') +
++                   '" style="width:' + pct + '%"></span>' +
++                 '</span>' +
++                 '<span>' + u + '/' + m + '</span>' +
++               '</span>';
++    }
++
      $(document).ready(function() {
 +        // ── Weak / high-latency connections ──────────────────────────
 +        // A dropped request used to leave the table permanently empty with
@@ -5201,7 +5697,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
          // ── تنها تنظیمِ صفحه‌بندی ──
          // این عدد = تعداد شماره‌صفحه‌ها (پیش‌فرض ۷). تعدادِ عددهای پشت‌سرهمِ اولِ لیست
          // برابرِ (این عدد − ۲) ئه. پس ۵ ⇒ «۱ ۲ ۳ … ۳۴۶»، ۶ ⇒ «۱ ۲ ۳ ۴ … ۳۴۶» و…
-@@ -63,10 +100,11 @@
+@@ -63,10 +179,11 @@
          var table = $('#datatable').DataTable({
              processing: true,
              serverSide: true,
@@ -5214,15 +5710,114 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
              columns: [{
                      data: 'id',
                      name: 'id_keys'
-@@ -143,12 +181,19 @@
+@@ -76,52 +193,71 @@
+                 },
+                 {
+                     data: 'user_key',
+-                    render: function(data, type, row, meta) {
+-                        var is_valid = (row.status == 'Active') ? "text-success" : "text-danger";
+-                        return `<span class="${is_valid} keyBlur key-sensi">${(row.user_key ? row.user_key : '&mdash;')}</span> `;
++                    render: function(row_ignored, type, row) {
++                        if (!row.user_key) return '<span class="text-muted">&mdash;</span>';
++                        var tone = (row.status === 'Active') ? '' : ' is-dead';
++                        // The expiry is repeated here and shown only on narrow
++                        // screens, where its own column is hidden. Four columns
++                        // is the most that fits a phone without pushing the
++                        // action buttons off the edge.
++                        var when = row.expired ? esc(row.expired) : 'Not started';
++                        return '<span class="em-key keyBlur key-sensi' + tone + '">' +
++                               esc(row.user_key) + '</span>' +
++                               '<span class="em-when">' + when + '</span>';
+                     }
+                 },
+                 {
+                     data: 'devices',
+-                    render: function(data, type, row, meta) {
+-                        var totalDevice = (row.devices ? row.devices : 0);
+-                        return `<span id="devMax-${row.user_key}">${totalDevice}/${row.max_devices}</span>`;
++                    render: function(row_ignored, type, row) {
++                        return '<span id="devMax-' + esc(row.user_key) + '">' +
++                               deviceMeter(row.devices, row.max_devices) + '</span>';
+                     }
+                 },
+                 {
+                     data: 'duration',
+-                    render: function(data, type, row, meta) {
+-                        return row.duration;
++                    render: function(row_ignored, type, row) {
++                        return '<span class="em-pill">' + esc(row.duration) + '</span>';
+                     }
+                 },
+                 {
+                     data: 'expired',
+                     name: 'expired_date',
+-                    render: function(data, type, row, meta) {
+-                        return row.expired ? `<span class="badge text-dark">${row.expired}</span>` : '(not started yet)';
++                    render: function(row_ignored, type, row) {
++                        if (!row.expired) {
++                            return '<span class="em-pill is-info">' +
++                                   '<span class="em-dot"></span>Not started</span>';
++                        }
++                        return '<span class="em-pill">' + esc(row.expired) + '</span>';
+                     }
+                 },
+                 {
+                     data: null,
+-                    render: function(data, type, row, meta) {
+-                        var btnReset = `<button class="btn btn-outline-danger btn-sm" onclick="resetUserKey('${row.user_key}')"
+-                        data-bs-toggle="tooltip" data-bs-placement="left" title="Reset key?"><i class="bi bi-bootstrap-reboot"></i></button>`;
+-                        var btnEdits = `<a href="${window.location.origin}/keys/${row.id}" class="btn btn-outline-primary btn-sm"
+-                        data-bs-toggle="tooltip" data-bs-placement="left" title="Edit key information?"><i class="bi bi-person"></i></a>`;
+-                        return `<div class="d-grid gap-2 d-md-block">${btnReset} ${btnEdits}</div>`;
++                    orderable: false,
++                    className: 'text-end',
++                    render: function(row_ignored, type, row) {
++                        // KEYS_BASE comes from site_url(), so this keeps working
++                        // when the panel is served from a subdirectory. The old
++                        // window.location.origin dropped that path segment.
++                        var reset = '<button type="button" class="em-iconbtn is-bad" title="Reset devices" ' +
++                                    'onclick="resetUserKey(\'' + esc(row.user_key) + '\')">' +
++                                    '<i class="bi bi-bootstrap-reboot"></i></button>';
++                        var edit  = '<a class="em-iconbtn is-accent" title="Edit key" ' +
++                                    'href="' + KEYS_BASE + '/' + encodeURIComponent(row.id) + '">' +
++                                    '<i class="bi bi-person"></i></a>';
++                        return '<div class="em-actions">' + reset + edit + '</div>';
+                     }
+                 }
+             ]
+         });
  
-                 var base_url = window.location.origin;
-                 var api_url = `${base_url}/keys/reset`;
+-        $("#blur-out").click(function() {
+-            if ($(".keyBlur").hasClass("key-sensi")) {
+-                $(".keyBlur").removeClass("key-sensi");
+-                $("#blur-out").html(`<i class="bi bi-eye"></i>`);
+-            } else {
+-                $(".keyBlur").addClass("key-sensi");
+-                $("#blur-out").html(`<i class="bi bi-eye-slash"></i>`);
+-            }
++        $('#blur-out').on('click', function () {
++            var hidden = $('.keyBlur').hasClass('key-sensi');
++            $('.keyBlur').toggleClass('key-sensi', !hidden);
++            $(this)
++                .attr('aria-pressed', String(!hidden))
++                .html(hidden
++                    ? '<i class="bi bi-eye"></i> <span class="em-blur-label">Shown</span>'
++                    : '<i class="bi bi-eye-slash"></i> <span class="em-blur-label">Hidden</span>');
+         });
+     });
+ 
+@@ -141,18 +277,25 @@
+                     title: 'Please wait...'
+                 })
+ 
+-                var base_url = window.location.origin;
+-                var api_url = `${base_url}/keys/reset`;
 -                $.getJSON(api_url, {
 -                        pass: 't██████',
 -                        userkey: keys,
 -                        reset: 1
 -                    },
++                var api_url = RESET_URL;
 +                var csrfPayload = {};
 +                csrfPayload[$('meta[name="csrf-name"]').attr('content')] =
 +                    $('meta[name="csrf-hash"]').attr('content');
@@ -5239,10 +5834,16 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
                          if (textStatus == 'success') {
                              if (data.registered) {
                                  if (data.reset) {
+-                                    $(`#devMax-${keys}`).html(`0/${data.devices_max}`);
++                                    $('#devMax-' + $.escapeSelector(keys))
++                                        .html(deviceMeter(0, data.devices_max));
+                                     Swal.fire(
+                                         'Reset!',
+                                         'Your device key has been reset.',
 diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
 --- /tmp/orig_app/Views/Layout/Starter.php	2026-08-24 23:02:52.618152290 +0000
-+++ app/Views/Layout/Starter.php	2026-08-25 21:52:57.671686826 +0000
-@@ -6,11 +6,23 @@
++++ app/Views/Layout/Starter.php	2026-08-26 09:06:21.668661896 +0000
+@@ -6,680 +6,37 @@
      <meta charset="utf-8">
      <meta name="viewport" content="width=device-width, initial-scale=1">
  
@@ -5264,60 +5865,1053 @@ diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
 +    <link rel="preload" href="<?= base_url('assets/vendor/fonts/poppins-400.woff2') ?>" as="font" type="font/woff2" crossorigin>
 +    <link rel="preload" href="<?= base_url('assets/vendor/fonts/poppins-600.woff2') ?>" as="font" type="font/woff2" crossorigin>
 +
-+    <link href="<?= base_url('assets/vendor/css/bootstrap.min.css') ?>" rel="stylesheet">
-+    <link href="<?= base_url('assets/vendor/css/bootstrap-icons.min.css') ?>" rel="stylesheet">
-+    <link href="<?= base_url('assets/vendor/css/sweetalert2.min.css') ?>" rel="stylesheet">
-+    <link href="<?= base_url('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
++    <link href="<?= asset_ver('assets/vendor/css/bootstrap.min.css') ?>" rel="stylesheet">
++    <link href="<?= asset_ver('assets/vendor/css/bootstrap-icons.min.css') ?>" rel="stylesheet">
++    <link href="<?= asset_ver('assets/vendor/css/sweetalert2.min.css') ?>" rel="stylesheet">
++    <link href="<?= asset_ver('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
  
      <title><?= BASE_NAME ?> - <?= isset($title) ? $title : 'Panel' ?></title>
      <?= $this->renderSection('css') ?>
-@@ -679,7 +691,6 @@
-         }
-     </style>
+ 
+-    <?= link_tag('assets/css/natacode.css') ?>
++    <link rel="stylesheet" href="<?= asset_ver('assets/css/natacode.css') ?>">
+ 
+-    <!-- Dark theme (coral accent) -->
+-    <style>
+-        :root {
+-            --bg: #120d0b;
+-            --surface: #1f1714;
+-            --surface-soft: #18120f;
+-            --border: #332420;
+-            --accent: #f4725a;
+-            --accent-soft: #fb8a72;
+-            --text-main: #f7ece8;
+-            --text-muted: #a4897f;
+-            --success: #34d399;
+-            --danger: #f87171;
+-            --warning: #fbbf24;
+-        }
+-
+-        * { scrollbar-color: var(--accent) var(--surface); }
+-
+-        html, body {
+-            background: var(--bg) !important;
+-            color: var(--text-main) !important;
+-            font-family: 'Poppins', -apple-system, "Segoe UI", Roboto, sans-serif !important;
+-            height: 100%;
+-            position: relative;
+-        }
+-        body {
+-            display: flex;
+-            flex-direction: column;
+-            min-height: 100vh;
+-        }
+-
+-        /* Site-wide subtle background texture — applies to every page, not just auth screens */
+-        body::before {
+-            content: '';
+-            position: fixed;
+-            inset: 0;
+-            background-image: radial-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+-            background-size: 3px 3px;
+-            pointer-events: none;
+-            z-index: 0;
+-        }
+-        /* Header must sit in a HIGHER stacking context than main, otherwise its
+-           navbar dropdown (opened via the ZERO user menu) renders behind the page
+-           cards — main comes later in the DOM, so at equal z-index it paints on top,
+-           and the dropdown's own z-index only orders things inside the header. */
+-        body > header { position: relative; z-index: 1040; }
+-        body > main, body > footer { position: relative; z-index: 1; }
+-
+-        a { color: var(--accent-soft); }
+-        a:hover { color: var(--accent); }
+-
+-        /* Navbar */
+-        .navbar.bg-dark {
+-            background: rgba(24, 18, 15, 0.72) !important;
+-            backdrop-filter: blur(14px) saturate(140%);
+-            -webkit-backdrop-filter: blur(14px) saturate(140%);
+-            border-bottom: 1px solid var(--border);
+-            position: sticky;
+-            top: 0;
+-            z-index: 1030;
+-            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.25);
+-        }
+-        .navbar-brand {
+-            color: var(--text-main) !important;
+-            font-weight: 800;
+-            font-size: 1.15rem;
+-            display: inline-flex;
+-            align-items: center;
+-            gap: 0.6rem;
+-            letter-spacing: -0.2px;
+-        }
+-        .navbar-brand i, .navbar-brand .brand-icon {
+-            color: var(--accent-soft);
+-            filter: drop-shadow(0 0 8px rgba(244, 114, 90, 0.5));
+-            transition: transform 0.25s ease;
+-        }
+-        .navbar-brand:hover .brand-icon { transform: rotate(-8deg) scale(1.08); }
+-
+-        .nav-link {
+-            color: var(--text-muted) !important;
+-            font-weight: 600;
+-            font-size: 0.92rem;
+-            padding: 0.45rem 0.9rem !important;
+-            border-radius: 999px;
+-            transition: all 0.18s ease;
+-        }
+-        .nav-link:hover {
+-            color: var(--text-main) !important;
+-            background: rgba(255, 255, 255, 0.06);
+-        }
+-
+-        /* Keep nav items in a compact horizontal row even inside the collapsed
+-           mobile menu (Bootstrap stacks <li> full-width by default, which made
+-           pill-styled links look like giant glowing bars on small screens). */
+-        .navbar-nav {
+-            flex-direction: row !important;
+-            flex-wrap: wrap;
+-            gap: 0.5rem;
+-            align-items: center;
+-        }
+-        .navbar-nav .nav-item { width: auto; }
+-        .navbar-nav .nav-link:not(.dropdown-toggle) { display: inline-flex; align-items: center; }
+-        .navbar-nav .nav-cta { margin-left: 0 !important; }
+-
+-        .nav-link.active {
+-            color: #fff !important;
+-            background: linear-gradient(135deg, var(--accent-soft), var(--accent));
+-            box-shadow: 0 6px 16px rgba(244, 114, 90, 0.35);
+-        }
+-        .navbar-toggler {
+-            border-color: var(--border) !important;
+-        }
+-
+-        /* User avatar chip */
+-        #navbarDropdown {
+-            display: inline-flex;
+-            align-items: center;
+-            gap: 0.6rem;
+-            background: var(--surface);
+-            border: 1px solid var(--border);
+-            border-radius: 999px;
+-            padding: 0.3rem 0.9rem 0.3rem 0.4rem !important;
+-        }
+-        #navbarDropdown:hover { border-color: var(--accent-soft); }
+-        #navbarDropdown .avatar {
+-            width: 28px;
+-            height: 28px;
+-            border-radius: 50%;
+-            background: linear-gradient(135deg, var(--accent-soft), var(--accent));
+-            display: inline-flex;
+-            align-items: center;
+-            justify-content: center;
+-            color: #fff;
+-            font-weight: 700;
+-            font-size: 0.78rem;
+-            flex-shrink: 0;
+-        }
+-        #navbarDropdown .bi-person-circle { display: none; }
+-        #navbarDropdown::after { margin-left: 0.3rem; }
+-
+-        /* Dropdown */
+-        /* Bootstrap deliberately disables Popper.js for any dropdown inside
+-           .navbar (sets data-bs-popper="none") and falls back to plain CSS
+-           positioning. We make that fallback explicit and reliable here,
+-           instead of leaving it to browser default absolute-position rules. */
+-        .navbar .nav-item.dropdown {
+-            position: relative !important;
+-        }
+-        .navbar .dropdown-menu {
+-            position: absolute !important;
+-            top: 100% !important;
+-            right: 0 !important;
+-            left: auto !important;
+-            margin-top: 0.5rem !important;
+-        }
+-        /* In the collapsed mobile menu (navbar-expand-md → <768px) the ZERO toggle
+-           sits at the LEFT of the screen, so right-anchoring pushes the menu off
+-           the left edge and clips it. Anchor it to the left there so it opens
+-           inward (to the right). On md+ the toggle is on the right, where the
+-           default right:0 keeps the menu on-screen. */
+-        @media (max-width: 767.98px) {
+-            .navbar .dropdown-menu {
+-                left: 0 !important;
+-                right: auto !important;
+-            }
+-        }
+-        .dropdown-menu {
+-            background: #241a16 !important;
+-            border: 1.5px solid rgba(244, 114, 90, 0.25) !important;
+-            border-radius: 14px !important;
+-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7) !important;
+-            padding: 0.5rem !important;
+-            z-index: 1060 !important;
+-            min-width: 200px;
+-        }
+-        .dropdown-item {
+-            color: var(--text-main) !important;
+-            border-radius: 9px;
+-            padding: 0.55rem 0.85rem !important;
+-            font-weight: 500;
+-        }
+-        .dropdown-item:hover,
+-        .dropdown-item:focus {
+-            background: var(--surface-soft) !important;
+-            color: var(--accent-soft) !important;
+-        }
+-        .dropdown-item.text-muted { color: var(--text-muted) !important; }
+-        .dropdown-divider { border-color: var(--border) !important; }
+-
+-        /* Container / content */
+-        main {
+-            flex: 1 0 auto;
+-        }
+-        #content {
+-            max-width: 1100px;
+-        }
+-
+-        /* Cards */
+-        .card {
+-            background: var(--surface) !important;
+-            border: 1px solid var(--border) !important;
+-            border-radius: 18px !important;
+-            color: var(--text-main) !important;
+-            overflow: hidden; /* keep children (e.g. wide pagination) from breaking the rounded corners */
+-        }
+-        .card-header {
+-            background: var(--surface-soft) !important;
+-            border-bottom: 1px solid var(--border) !important;
+-        }
+-        .card-header .row {
+-            row-gap: 0.6rem; /* breathing room when title/buttons wrap to two lines on mobile */
+-        }
+-
+-        /* Forms */
+-        .form-control {
+-            background: var(--surface-soft) !important;
+-            border: 1.5px solid var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        .form-control:focus {
+-            background: var(--surface-soft) !important;
+-            border-color: var(--accent) !important;
+-            color: var(--text-main) !important;
+-            box-shadow: 0 0 0 4px rgba(244, 114, 90, 0.18) !important;
+-        }
+-        .form-control::placeholder { color: #7a655e; }
+-        label { color: var(--text-main); }
+-
+-        /* Fix Chrome/Google autofill forcing a white input background (site-wide) */
+-        .form-control:-webkit-autofill,
+-        .form-control:-webkit-autofill:hover,
+-        .form-control:-webkit-autofill:focus,
+-        .form-control:-webkit-autofill:active {
+-            -webkit-text-fill-color: var(--text-main) !important;
+-            -webkit-box-shadow: 0 0 0 1000px var(--surface-soft) inset !important;
+-            box-shadow: 0 0 0 1000px var(--surface-soft) inset !important;
+-            caret-color: var(--text-main);
+-            transition: background-color 5000s ease-in-out 0s;
+-        }
+-
+-        /* Buttons */
+-        .btn-outline-secondary {
+-            color: var(--text-muted) !important;
+-            border-color: var(--border) !important;
+-        }
+-        .btn-outline-secondary:hover {
+-            background: var(--accent) !important;
+-            border-color: var(--accent) !important;
+-            color: #fff !important;
+-        }
+-        .btn-primary {
+-            background: linear-gradient(135deg, var(--accent-soft), var(--accent)) !important;
+-            border: none !important;
+-            box-shadow: 0 10px 24px rgba(244, 114, 90, 0.3);
+-        }
+-        .btn-danger {
+-            background: var(--danger) !important;
+-            border-color: var(--danger) !important;
+-        }
+-
+-        /* Alerts (overridden further in msgStatus markup) */
+-        .alert {
+-            background: rgba(255, 255, 255, 0.06) !important;
+-            border: 1px solid rgba(255, 255, 255, 0.10) !important;
+-            color: var(--text-main) !important;
+-            border-radius: 14px !important;
+-            position: relative !important;
+-            z-index: 1 !important;
+-            overflow: hidden;
+-            /* Glassmorphism: a light translucent frost + blur so every top-of-page
+-               flash message reads as frosted glass, not a flat panel. */
+-            backdrop-filter: blur(14px) saturate(160%);
+-            -webkit-backdrop-filter: blur(14px) saturate(160%);
+-        }
+-        .alert-dismissible {
+-            padding-right: 3rem !important;
+-        }
+-        .alert-dismissible .btn-close {
+-            position: absolute !important;
+-            top: 50% !important;
+-            right: 1rem !important;
+-            left: auto !important;
+-            transform: translateY(-50%);
+-            margin: 0 !important;
+-            padding: 0.5rem !important;
+-        }
+-        .alert-danger { border-color: rgba(248, 113, 113, 0.4) !important; color: var(--danger) !important; background: rgba(248, 113, 113, 0.08) !important; }
+-        .alert-success { border-color: rgba(52, 211, 153, 0.4) !important; color: var(--success) !important; background: rgba(52, 211, 153, 0.08) !important; }
+-        .alert-warning { border-color: rgba(251, 191, 36, 0.4) !important; color: var(--warning) !important; background: rgba(251, 191, 36, 0.08) !important; }
+-        .alert-secondary,
+-        .alert-info { border-color: rgba(247, 236, 232, 0.18) !important; color: #efe3da !important; background: linear-gradient(135deg, rgba(247, 236, 232, 0.15), rgba(247, 236, 232, 0.05)) !important; }
+-        .btn-close { filter: invert(0.8); }
+-
+-        /* Tables */
+-        table { color: var(--text-main); }
+-        .table { --bs-table-color: var(--text-main); --bs-table-bg: transparent; --bs-table-hover-bg: var(--surface-soft); --bs-table-hover-color: var(--text-main); --bs-table-striped-bg: var(--surface-soft); }
+-        .table > :not(caption) > * > * { border-color: var(--border) !important; background-color: transparent; }
+-
+-        /* List group */
+-        .list-group-item {
+-            background: var(--surface) !important;
+-            border-color: var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        .list-group-item-action:hover,
+-        .list-group-item-action:focus {
+-            background: var(--surface-soft) !important;
+-            color: var(--text-main) !important;
+-        }
+-
+-        /* Badges / status pills */
+-        .badge {
+-            display: inline-flex;
+-            align-items: center;
+-            font-weight: 600;
+-            border-radius: 999px;
+-            padding: 0.3em 0.7em;
+-        }
+-        .badge.text-success { color: #fff !important; background: rgba(52, 211, 153, 0.18); border: 1px solid rgba(52, 211, 153, 0.4); }
+-        .badge.text-danger  { color: #fff !important; background: rgba(248, 113, 113, 0.18); border: 1px solid rgba(248, 113, 113, 0.4); }
+-        .badge.text-warning { color: #fff !important; background: rgba(251, 191, 36, 0.18); border: 1px solid rgba(251, 191, 36, 0.4); }
+-        .badge.text-info    { color: #fff !important; background: rgba(56, 189, 248, 0.18); border: 1px solid rgba(56, 189, 248, 0.4); }
+-        .badge.text-primary { color: #fff !important; background: rgba(244, 114, 90, 0.18); border: 1px solid rgba(244, 114, 90, 0.4); }
+-
+-        /* Card header variants used across pages */
+-        .card-header.bg-dark,
+-        .card-header.bg-primary {
+-            background: var(--surface-soft) !important;
+-            color: var(--text-main) !important;
+-            border-bottom: 1px solid var(--border) !important;
+-            font-weight: 700;
+-        }
+-
+-        .alert-primary { border-color: rgba(244, 114, 90, 0.4) !important; color: var(--accent-soft) !important; background: rgba(244, 114, 90, 0.08) !important; }
+-
+-        /* Select & input groups */
+-        .form-select {
+-            background-color: var(--surface-soft) !important;
+-            border: 1.5px solid var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        .form-select:focus {
+-            border-color: var(--accent) !important;
+-            box-shadow: 0 0 0 4px rgba(244, 114, 90, 0.18) !important;
+-        }
+-        .input-group-text {
+-            background: var(--surface-soft) !important;
+-            border: 1.5px solid var(--border) !important;
+-            color: var(--text-muted) !important;
+-        }
+-
+-        /* DataTables (CDN bootstrap5 theme) dark overrides */
+-        .dataTables_wrapper .dataTables_filter input,
+-        .dataTables_wrapper .dataTables_length select {
+-            background: var(--surface-soft) !important;
+-            border: 1.5px solid var(--border) !important;
+-            color: var(--text-main) !important;
+-            border-radius: 8px;
+-        }
+-        .dataTables_wrapper .dataTables_info,
+-        .dataTables_wrapper .dataTables_length,
+-        .dataTables_wrapper .dataTables_filter label {
+-            color: var(--text-muted) !important;
+-        }
+-        .dataTables_wrapper .page-link {
+-            background: var(--surface) !important;
+-            border-color: var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        .dataTables_wrapper .page-item.active .page-link {
+-            background: linear-gradient(135deg, var(--accent-soft), var(--accent)) !important;
+-            border-color: transparent !important;
+-            color: #fff !important;
+-        }
+-        .dataTables_wrapper .page-link:hover {
+-            background: var(--surface-soft) !important;
+-            border-color: var(--accent-soft) !important;
+-            color: var(--accent-soft) !important;
+-        }
+-        .dataTables_wrapper .page-item.disabled .page-link {
+-            background: var(--surface-soft) !important;
+-            color: var(--text-muted) !important;
+-        }
+-        /* On mobile there can be many page buttons (1 2 3 ... 340). We make the
+-           paginate box a flex scroll-container and give the pagination itself
+-           margin:auto. That combo is the reliable one: when the buttons fit they
+-           center relative to the card, and when they're wider than the screen the
+-           auto margins collapse to 0 so it scrolls from the start (instead of the
+-           first buttons being centered off-screen and unreachable).
+-           NOTE: plain `margin:0 auto` on a block inside an overflow container does
+-           NOT center reliably — hence the flex + margin:auto approach. */
+-        .dataTables_wrapper .dataTables_paginate {
+-            display: flex;
+-            overflow-x: auto;
+-            -webkit-overflow-scrolling: touch;
+-            max-width: 100%;
+-            width: 100%;
+-            padding-bottom: 4px;
+-            float: none !important;
+-            /* Hide the (coral) horizontal scrollbar that otherwise shows as a
+-               stuck orange line under the page numbers. Still swipe-scrollable. */
+-            scrollbar-width: none;
+-            -ms-overflow-style: none;
+-        }
+-        .dataTables_wrapper .dataTables_paginate::-webkit-scrollbar {
+-            display: none;
+-            width: 0;
+-            height: 0;
+-        }
+-        .dataTables_wrapper .dataTables_paginate .pagination {
+-            margin: auto !important;
+-            flex: 0 0 auto;
+-            flex-wrap: nowrap;
+-            width: max-content;
+-        }
+-        table.dataTable tbody tr {
+-            background: transparent !important;
+-            color: var(--text-main) !important;
+-        }
+-        table.dataTable.table-hover tbody tr:hover { background: var(--surface-soft) !important; }
+-        table.dataTable thead th { color: var(--text-main) !important; border-bottom: 1.5px solid var(--border) !important; }
+-
+-        /* Plain links used as buttons (e.g. back-to-list) */
+-        .link-pill {
+-            color: var(--text-muted) !important;
+-            background: var(--surface) !important;
+-            border: 1px solid var(--border) !important;
+-            border-radius: 999px;
+-            padding: 0.4rem 0.9rem;
+-            text-decoration: none !important;
+-            display: inline-flex;
+-            align-items: center;
+-            gap: 0.4rem;
+-        }
+-        .link-pill:hover { color: var(--accent-soft) !important; border-color: var(--accent-soft) !important; }
+-
+-        .text-danger { color: var(--danger) !important; }
+-        .text-success { color: var(--success) !important; }
+-        .text-warning { color: var(--warning) !important; }
+-        .text-muted { color: var(--text-muted) !important; }
+-
+-        .alert-primary { border-color: rgba(244, 114, 90, 0.4) !important; color: var(--accent-soft) !important; background: rgba(244, 114, 90, 0.08) !important; }
+-        .badge.text-dark { color: #fff !important; background: rgba(164, 137, 127, 0.18); border: 1px solid rgba(164, 137, 127, 0.4); }
+-
+-        /* DataTables: table border/header polish (pagination/length/filter already handled above) */
+-        table.dataTable thead th {
+-            border-bottom: 1.5px solid var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        table.dataTable.table-bordered { border-color: var(--border) !important; }
+-        table.dataTable.table-bordered th,
+-        table.dataTable.table-bordered td { border-color: var(--border) !important; }
+-
+-        /* Input groups */
+-        .input-group-text {
+-            background: var(--surface-soft) !important;
+-            border: 1.5px solid var(--border) !important;
+-            color: var(--text-muted) !important;
+-        }
+-
+-        /* Select dropdowns */
+-        .form-select {
+-            background-color: var(--surface-soft) !important;
+-            border: 1.5px solid var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        .form-select:focus {
+-            border-color: var(--accent) !important;
+-            box-shadow: 0 0 0 4px rgba(244, 114, 90, 0.18) !important;
+-        }
+-
+-        .form-control:disabled,
+-        .form-control[readonly] {
+-            background: var(--bg) !important;
+-            color: var(--text-muted) !important;
+-            border-color: var(--border) !important;
+-            opacity: 0.75;
+-        }
+-        .form-select:disabled {
+-            background-color: var(--bg) !important;
+-            color: var(--text-muted) !important;
+-            opacity: 0.75;
+-        }
+-        .btn:disabled {
+-            opacity: 0.5;
+-        }
+-        .btn-outline-light {
+-            color: var(--text-main) !important;
+-            border-color: rgba(255,255,255,0.25) !important;
+-        }
+-        .btn-outline-light:hover {
+-            background: rgba(255,255,255,0.1) !important;
+-        }
+-        .btn-secondary {
+-            background: var(--surface-soft) !important;
+-            border-color: var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        .btn-outline-danger {
+-            color: var(--danger) !important;
+-            border-color: var(--danger) !important;
+-        }
+-        .btn-outline-danger:hover {
+-            background: var(--danger) !important;
+-            color: #fff !important;
+-        }
+-        .btn-outline-dark {
+-            color: var(--text-main) !important;
+-            border-color: var(--border) !important;
+-        }
+-        .btn-outline-dark:hover {
+-            background: var(--accent) !important;
+-            border-color: var(--accent) !important;
+-            color: #fff !important;
+-        }
+-        .maxDev {
+-            background: var(--accent) !important;
+-        }
+-
+-        .dropdown-item.active {
+-            background: rgba(244, 114, 90, 0.12) !important;
+-            color: var(--accent-soft) !important;
+-        }
+-        .nav-cta {
+-            border-radius: 999px !important;
+-            padding: 0.45rem 1.3rem !important;
+-            background: linear-gradient(135deg, var(--accent-soft), var(--accent)) !important;
+-            border: none !important;
+-            color: #fff !important;
+-            font-weight: 700 !important;
+-            box-shadow: 0 8px 20px rgba(244, 114, 90, 0.3);
+-            transition: transform 0.18s ease;
+-        }
+-        .nav-cta:hover {
+-            transform: translateY(-1px);
+-            color: #fff !important;
+-        }
+-
+-        .btn-dark {
+-            background: var(--surface-soft) !important;
+-            border: 1px solid var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        .btn-dark:hover {
+-            background: var(--accent) !important;
+-            border-color: var(--accent) !important;
+-            color: #fff !important;
+-        }
+-        .btn-outline-primary {
+-            color: var(--accent-soft) !important;
+-            border-color: var(--accent-soft) !important;
+-            background: transparent !important;
+-        }
+-        .btn-outline-primary:hover {
+-            background: var(--accent) !important;
+-            border-color: var(--accent) !important;
+-            color: #fff !important;
+-        }
+-
+-        /* Footer */
+-        footer.site-footer {
+-            flex-shrink: 0;
+-            border-top: 1px solid var(--border);
+-            margin-top: 3rem;
+-            padding: 1.5rem 0;
+-            color: var(--text-muted);
+-            font-size: 0.85rem;
+-            text-align: center;
+-        }
+-        footer.site-footer a { color: var(--accent-soft); text-decoration: none; }
+-
+-        /* SweetAlert2 dark theme */
+-        .swal2-popup {
+-            background: var(--surface) !important;
+-            border: 1px solid var(--border) !important;
+-            border-radius: 20px !important;
+-            color: var(--text-main) !important;
+-        }
+-        .swal2-title { color: var(--text-main) !important; }
+-        .swal2-html-container { color: var(--text-muted) !important; }
+-        .swal2-icon.swal2-warning {
+-            border-color: var(--warning) !important;
+-            color: var(--warning) !important;
+-        }
+-        .swal2-icon.swal2-success [class^='swal2-success-line'] {
+-            background-color: var(--success) !important;
+-        }
+-        .swal2-icon.swal2-success .swal2-success-ring {
+-            border-color: rgba(52, 211, 153, 0.35) !important;
+-        }
+-        .swal2-icon.swal2-error {
+-            border-color: var(--danger) !important;
+-            color: var(--danger) !important;
+-        }
+-        .swal2-icon.swal2-info {
+-            border-color: var(--accent-soft) !important;
+-            color: var(--accent-soft) !important;
+-        }
+-        .swal2-confirm, .swal2-cancel {
+-            border-radius: 10px !important;
+-            box-shadow: none !important;
+-        }
+-        /* Confirm / OK button — coral to match the site theme (btn-primary) instead
+-           of SweetAlert2's default purple. The !important also overrides any inline
+-           confirmButtonColor set on individual Swal.fire calls, so every dialog
+-           (OK / Yes, reset / …) is uniformly coral. */
+-        .swal2-confirm.swal2-styled {
+-            background: linear-gradient(135deg, var(--accent-soft), var(--accent)) !important;
+-            color: #fff !important;
+-        }
+-        .swal2-cancel.swal2-styled {
+-            background: var(--surface-soft) !important;
+-            border: 1px solid var(--border) !important;
+-            color: var(--text-main) !important;
+-        }
+-        .swal2-styled:focus {
+-            box-shadow: 0 0 0 3px rgba(244, 114, 90, 0.35) !important;
+-        }
+-        .swal2-close { color: var(--text-muted) !important; }
+-        .swal2-close:hover { color: var(--text-main) !important; }
+-        .swal2-timer-progress-bar { background: var(--accent) !important; }
+-        /* Full-screen dim only for real modals (Failed! / confirm dialogs), whose
+-           container IS full-screen so the dim covers everything.
+-           Toasts (top-end "Please wait…") have a corner-sized container, so putting
+-           a background on them just paints a partial dark box with a gap on one
+-           edge — exclude them and force their container transparent instead. */
+-        .swal2-container.swal2-backdrop-show:not(:has(.swal2-toast)) {
+-            background: rgba(0, 0, 0, 0.7) !important;
+-        }
+-        .swal2-container:has(.swal2-toast) {
+-            background: transparent !important;
+-        }
+-
+-        /* ============================================================
+-           Underline input theme (style C) — applied site-wide.
+-           Inputs/selects/search become borderless with just a bottom
+-           line that turns coral on focus. Uses background-color (not the
+-           background shorthand) so the select dropdown arrow is preserved.
+-           ============================================================ */
+-        .form-control,
+-        .form-select,
+-        .input-group-text,
+-        .dataTables_wrapper .dataTables_filter input,
+-        .dataTables_wrapper .dataTables_length select {
+-            background-color: transparent !important;
+-            border: none !important;
+-            border-bottom: 2px solid var(--border) !important;
+-            border-radius: 0 !important;
+-            box-shadow: none !important;
+-        }
+-        .form-control:focus,
+-        .form-select:focus,
+-        .dataTables_wrapper .dataTables_filter input:focus,
+-        .dataTables_wrapper .dataTables_length select:focus {
+-            background-color: var(--surface-soft) !important;
+-            border-bottom-color: var(--accent) !important;
+-            border-radius: 10px 10px 0 0 !important;
+-            box-shadow: none !important;
+-            outline: none !important;
+-        }
+-    </style>
++    <!-- Dark coral theme + the Ember presentation layer.
++         Both used to be one 31 KB <style> block inside this file, which
++         meant the browser re-downloaded them with every page and could
++         never cache them. As files they are fetched once. Order matters:
++         ember.css is last, so it wins on equal specificity. -->
++    <link rel="stylesheet" href="<?= asset_ver('assets/css/theme.css') ?>">
++    <link rel="stylesheet" href="<?= asset_ver('assets/css/ember.css') ?>">
  
 -    <script src="https://code.jquery.com/jquery-3.6.0.js" integrity="sha256-H+K7U5CnXl1h5ywQfKtSj8PCmoN9aaq30gDh27Xc0jk=" crossorigin="anonymous"></script>
  </head>
  
  <body>
-@@ -701,8 +712,14 @@
+@@ -701,10 +58,21 @@
          </div>
      </footer>
  
 -    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-MrcW6ZMFYlzcLA8Nl+NtUVF0sA7MsXsP1UyJoMp4YLEuNSfAP+JcXn/tWtIaxVXM" crossorigin="anonymous"></script>
 -    <script src="https://cdnjs.cloudflare.com/ajax/libs/limonte-sweetalert2/11.1.0/sweetalert2.all.min.js" integrity="sha512-0UUEaq/z58JSHpPgPv8bvdhHFRswZzxJUT9y+Kld5janc9EWgGEVGfWV1hXvIvAJ8MmsR5d4XV9lsuA90xXqUQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+-
+-    <?= script_tag('assets/js/natacode.js') ?>
 +    <!-- jQuery sits here, not in <head>: it used to block first paint.
 +         It cannot carry defer, because natacode.js and each view's
 +         section('js') call $ while the document is still parsing. At the
 +         top of the footer the page has already painted. -->
-+    <script src="<?= base_url('assets/vendor/js/jquery.min.js') ?>"></script>
++    <script src="<?= asset_ver('assets/vendor/js/jquery.min.js') ?>"></script>
 +
-+    <script src="<?= base_url('assets/vendor/js/bootstrap.bundle.min.js') ?>" defer></script>
-+    <script src="<?= base_url('assets/vendor/js/sweetalert2.min.js') ?>" defer></script>
++    <script src="<?= asset_ver('assets/vendor/js/bootstrap.bundle.min.js') ?>" defer></script>
++    <script src="<?= asset_ver('assets/vendor/js/sweetalert2.min.js') ?>" defer></script>
++
++    <!-- defer, and after sweetalert2's own defer: natacode.js calls
++         Swal.mixin() at the top level. Deferred scripts run in document
++         order, so this guarantees Swal exists by then. Without defer this
++         file executed during parsing, before sweetalert2 had loaded, threw
++         a ReferenceError, and never defined Toast. -->
++    <script src="<?= asset_ver('assets/js/natacode.js') ?>" defer></script>
  
-     <?= script_tag('assets/js/natacode.js') ?>
- 
+     <script>
+         // Auto-close any open navbar dropdown as soon as the page scrolls.
 diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 --- /tmp/orig_app/Views/User/dashboard.php	2026-08-24 23:02:52.619981516 +0000
-+++ app/Views/User/dashboard.php	2026-08-24 23:07:43.048116182 +0000
-@@ -58,7 +58,7 @@
-                     <li class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
-                         Saldo
-                         <span class="badge text-danger">
++++ app/Views/User/dashboard.php	2026-08-26 08:51:31.737717278 +0000
+@@ -2,145 +2,199 @@
+ 
+ <?= $this->section('content') ?>
+ 
+-<div class="row">
+-    <div class="col-lg-12">
+-        <?= $this->include('Layout/msgStatus') ?>
++<?= $this->include('Layout/msgStatus') ?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-speedometer2"></i> Dashboard</span>
++        <h1>Welcome back, <?= getName($user) ?></h1>
++        <p>
++            <?= getLevel($user->level) ?> &middot; signed in
++            <?= $time::parse(session()->time_since)->humanize() ?>
++        </p>
++    </div>
++    <div class="em-head-act">
++        <a href="<?= base_url('keys/generate') ?>" class="em-btn is-primary">
++            <i class="bi bi-plus-lg"></i> Generate keys
++        </a>
++        <a href="<?= base_url('keys') ?>" class="em-btn">
++            <i class="bi bi-key"></i> All keys
++        </a>
+     </div>
++</header>
++
++<section class="em-stats">
++    <article class="em-stat is-accent em-rise em-rise-1">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Balance</span>
++            <span class="em-stat-ic"><i class="bi bi-wallet2"></i></span>
++        </div>
++        <div class="em-stat-val">$<?= number_format((float) $user->saldo, 2) ?></div>
++        <div class="em-stat-sub">available to spend</div>
++    </article>
++
++    <article class="em-stat is-info em-rise em-rise-2">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Total keys</span>
++            <span class="em-stat-ic"><i class="bi bi-key"></i></span>
++        </div>
++        <div class="em-stat-val"><?= number_format($stats['total']) ?></div>
++        <div class="em-stat-sub">
++            <?= (int) $user->level === 1 ? 'across every seller' : 'registered by you' ?>
++        </div>
++    </article>
++
++    <article class="em-stat is-ok em-rise em-rise-3">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Active</span>
++            <span class="em-stat-ic"><i class="bi bi-check2-circle"></i></span>
++        </div>
++        <div class="em-stat-val"><?= number_format($stats['active']) ?></div>
++        <div class="em-stat-sub<?= $stats['inactive'] > 0 ? ' is-bad' : '' ?>">
++            <?= number_format($stats['inactive']) ?> inactive
++        </div>
++    </article>
++
++    <article class="em-stat is-warn em-rise em-rise-4">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Expiring soon</span>
++            <span class="em-stat-ic"><i class="bi bi-hourglass-split"></i></span>
++        </div>
++        <div class="em-stat-val"><?= number_format($stats['soon']) ?></div>
++        <div class="em-stat-sub">within the next 7 days</div>
++    </article>
++</section>
+ 
++<div class="row g-3">
+     <div class="col-lg-8">
+-        <div class="card mb-3">
+-            <div class="card-header text-center bg-dark">
+-                <i class="bi bi-clock-history me-2"></i>Registration History
++        <section class="em-panel em-rise em-rise-2">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-clock-history"></i> Recent activity</h2>
++                <div class="em-panel-act">
++                    <a href="<?= base_url('keys') ?>" class="em-btn is-sm is-ghost">View all</a>
++                </div>
+             </div>
+-            <div class="card-body">
+-                <?php if (!empty($history)) : ?>
+-                    <?php
+-                        // فقط چند رجیستریِ آخر رو نشون بده. این عدد رو عوض کن.
+-                        // (راهِ بهتر: همین محدودیت رو تو کوئریِ کنترلر با findAll(4) بذاری)
+-                        $rh_limit = 6;
+-                        $history_show = array_slice($history, 0, $rh_limit);
+-                    ?>
+-                    <div class="rh-list">
+-                        <?php foreach ($history_show as $h) : ?>
+-                            <?php $in = explode("|", $h->info); ?>
+-                            <div class="rh-row">
+-                                <div class="rh-ava"><?= strtoupper(substr(esc($in[0]), 0, 1)) ?></div>
+-                                <div class="rh-body">
+-                                    <div class="rh-key"><?= esc($in[1]) ?>**</div>
+-                                    <div class="rh-sub"><?= esc($in[2]) ?> Hours &middot; <?= esc($in[3]) ?> device<?= ((int) $in[3] === 1) ? '' : 's' ?></div>
+-                                </div>
+-                                <div class="rh-right">
+-                                    <span class="rh-time"><?= $time::parse($h->created_at)->humanize() ?></span>
+-                                    <span class="rh-tag"><?= esc($in[0]) ?></span>
++
++            <?php if (! empty($history)) : ?>
++                <div class="em-panel-b is-flush">
++                    <?php foreach (array_slice($history, 0, 6) as $h) : ?>
++                        <?php
++                        // info is written as "game|key-prefix|duration|max_devices".
++                        // Pad it so a malformed legacy row cannot emit a notice.
++                        $in = array_pad(explode('|', (string) $h->info), 4, '');
++                        ?>
++                        <div class="rh-row">
++                            <div class="rh-ava"><?= strtoupper(substr(esc($in[0]), 0, 1)) ?></div>
++                            <div class="rh-body">
++                                <div class="rh-key"><span class="em-key"><?= esc($in[1]) ?>&hellip;</span></div>
++                                <div class="rh-sub">
++                                    <?= esc($in[0]) ?> &middot; <?= esc($in[2]) ?> hours &middot;
++                                    <?= esc($in[3]) ?> device<?= ((int) $in[3] === 1) ? '' : 's' ?>
+                                 </div>
+                             </div>
+-                        <?php endforeach; ?>
+-                    </div>
+-                <?php else : ?>
+-                    <p class="text-center text-muted mb-0">No registration history yet.</p>
+-                <?php endif; ?>
+-            </div>
+-        </div>
++                            <div class="rh-right">
++                                <span class="rh-time"><?= $time::parse($h->created_at)->humanize() ?></span>
++                            </div>
++                        </div>
++                    <?php endforeach; ?>
++                </div>
++            <?php else : ?>
++                <div class="em-empty">
++                    <div class="em-empty-ic"><i class="bi bi-inbox"></i></div>
++                    <h3>Nothing here yet</h3>
++                    <p>Keys you generate will show up in this list.</p>
++                    <a href="<?= base_url('keys/generate') ?>" class="em-btn is-primary">
++                        <i class="bi bi-plus-lg"></i> Generate your first key
++                    </a>
++                </div>
++            <?php endif; ?>
++        </section>
+     </div>
++
+     <div class="col-lg-4">
+-        <div class="card mb-3">
+-            <div class="card-header text-center bg-dark">
+-                <i class="bi bi-person-badge me-2"></i>Information
++        <section class="em-panel em-rise em-rise-3">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-person-badge"></i> Account</h2>
+             </div>
+-            <div class="card-body">
+-                <ul class="list-group list-hover mb-3">
+-                    <li class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+-                        Roles
+-                        <span class="badge text-danger">
+-                            <?= getLevel($user->level) ?>
+-                        </span>
+-                    </li>
+-                    <li class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+-                        Saldo
+-                        <span class="badge text-danger">
 -                            $<?= $user->saldo ?>
-+                            $<?= esc($user->saldo) ?>
-                         </span>
-                     </li>
-                 </ul>
+-                        </span>
+-                    </li>
+-                </ul>
+-                <ul class="list-group">
+-                    <li class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+-                        Login Time
+-                        <span class="badge text-danger">
+-                            <?= $time::parse(session()->time_since)->humanize() ?>
+-                        </span>
+-                    </li>
+-                    <li class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+-                        Auto Logout
+-                        <span class="badge text-danger">
+-                            <?= $time::now()->difference($time::parse(session()->time_login))->humanize() ?>
+-                        </span>
+-                    </li>
+-                </ul>
++            <div class="em-panel-b is-flush">
++                <div class="em-kv">
++                    <span>Username</span>
++                    <b><?= getName($user) ?></b>
++                </div>
++                <div class="em-kv">
++                    <span>Role</span>
++                    <b class="em-pill <?= (int) $user->level === 1 ? 'is-accent' : 'is-info' ?>">
++                        <?= getLevel($user->level) ?>
++                    </b>
++                </div>
++                <div class="em-kv">
++                    <span>Balance</span>
++                    <b>$<?= number_format((float) $user->saldo, 2) ?></b>
++                </div>
++                <div class="em-kv">
++                    <span>Signed in</span>
++                    <b><?= $time::parse(session()->time_since)->humanize() ?></b>
++                </div>
++                <div class="em-kv">
++                    <span>Auto logout</span>
++                    <b><?= $time::now()->difference($time::parse(session()->time_login))->humanize() ?></b>
++                </div>
+             </div>
+-        </div>
++        </section>
++
++        <section class="em-panel em-rise em-rise-4">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-lightning-charge"></i> Shortcuts</h2>
++            </div>
++            <div class="em-panel-b">
++                <div class="em-shortcuts">
++                    <a href="<?= base_url('keys/generate') ?>" class="em-btn"><i class="bi bi-plus-lg"></i> Generate</a>
++                    <a href="<?= base_url('keys') ?>" class="em-btn"><i class="bi bi-list-ul"></i> My keys</a>
++                    <a href="<?= base_url('check') ?>" class="em-btn"><i class="bi bi-search"></i> Check key</a>
++                    <a href="<?= base_url('settings') ?>" class="em-btn"><i class="bi bi-gear"></i> Settings</a>
++                </div>
++            </div>
++        </section>
+     </div>
+ </div>
++
+ <?= $this->endSection() ?>
+ 
+ <?= $this->section('css') ?>
+ <style>
+-    /* Registration History — compact list (mobile-first, no horizontal scroll) */
+-    .rh-row {
+-        display: flex;
+-        align-items: center;
+-        gap: 0.75rem;
+-        padding: 0.7rem 0.35rem;
+-    }
+-    .rh-row + .rh-row {
+-        border-top: 1px solid var(--border);
+-    }
++    /* Recent-activity rows. Kept page-local because nothing else uses them. */
++    .rh-row { display: flex; align-items: center; gap: .75rem; padding: .8rem 1.15rem; }
++    .rh-row + .rh-row { border-top: 1px solid var(--em-line); }
++    .rh-row:hover { background: var(--em-surface-2); }
+     .rh-ava {
+-        width: 40px;
+-        height: 40px;
+-        border-radius: 12px;
+-        flex-shrink: 0;
+-        background: linear-gradient(135deg, var(--accent-soft), var(--accent));
+-        display: flex;
+-        align-items: center;
+-        justify-content: center;
+-        color: #fff;
+-        font-weight: 700;
+-        font-size: 0.85rem;
+-        box-shadow: 0 6px 16px rgba(244, 114, 90, 0.3);
+-    }
+-    .rh-body {
+-        flex: 1;
+-        min-width: 0;
+-    }
+-    .rh-key {
+-        font-weight: 600;
+-        font-size: 0.94rem;
+-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+-        letter-spacing: 0.3px;
+-        color: var(--text-main);
+-        word-break: break-all;
+-    }
+-    .rh-sub {
+-        font-size: 0.76rem;
+-        color: var(--text-muted);
+-        margin-top: 0.1rem;
+-    }
+-    .rh-right {
+-        text-align: right;
+-        flex-shrink: 0;
+-    }
+-    .rh-time {
+-        display: block;
+-        font-size: 0.76rem;
+-        color: var(--text-muted);
+-        white-space: nowrap;
+-    }
+-    .rh-tag {
+-        display: block;
+-        margin-top: 0.25rem;
+-        font-size: 0.68rem;
+-        color: var(--accent-soft);
+-        font-weight: 600;
++        width: 38px; height: 38px; border-radius: 12px; flex-shrink: 0;
++        background: linear-gradient(135deg, var(--em-accent-2), var(--em-accent));
++        display: grid; place-items: center;
++        color: #fff; font-weight: 700; font-size: .85rem;
++        box-shadow: 0 6px 16px rgba(244, 114, 90, .28);
++    }
++    .rh-body { flex: 1; min-width: 0; }
++    .rh-sub { font-size: .76rem; color: var(--em-dim); margin-top: .25rem; }
++    .rh-right { text-align: right; flex-shrink: 0; }
++    .rh-time { font-size: .76rem; color: var(--em-dim); white-space: nowrap; }
++
++    /* key/value rows in the Account panel */
++    .em-kv {
++        display: flex; align-items: center; justify-content: space-between;
++        gap: 1rem; padding: .75rem 1.15rem; font-size: .87rem;
++    }
++    .em-kv + .em-kv { border-top: 1px solid var(--em-line); }
++    .em-kv span { color: var(--em-dim); }
++    .em-kv b { color: var(--em-text); font-weight: 600; text-align: right; }
++    .em-pill.is-accent { background: var(--em-wash); color: var(--em-accent); border-color: rgba(244,114,90,.3); }
++
++    .em-shortcuts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; }
++    .em-shortcuts .em-btn { width: 100%; }
++
++    @media (max-width: 640px) {
++        .rh-row { padding: .8rem .9rem; }
++        .rh-right { display: none; }
++        .em-kv { padding: .7rem .9rem; }
+     }
+ </style>
+-<?= $this->endSection() ?>
+\ No newline at end of file
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/error_404.php
 --- /tmp/orig_app/Views/errors/html/error_404.php	2026-08-24 23:02:52.624646037 +0000
-+++ app/Views/errors/html/error_404.php	2026-08-24 23:31:42.867837226 +0000
++++ app/Views/errors/html/error_404.php	2026-08-26 09:00:03.558655108 +0000
 @@ -3,8 +3,7 @@
  <head>
  	<meta charset="utf-8">
  	<title>404 Page Not Found</title>
 -	<link rel="preconnect" href="https://fonts.googleapis.com">
 -	<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800&display=swap" rel="stylesheet">
-+	<link href="<?= base_url('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
++	<link href="<?= asset_ver('assets/vendor/css/poppins.css') ?>" rel="stylesheet">
  
  	<style>
  		* { box-sizing: border-box; }
