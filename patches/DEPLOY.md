@@ -194,6 +194,10 @@ box until you rebuild it.
   not be in the duration list for any game.
 - In a browser, try `https://your-panel/.env` — it must be refused, not
   downloaded.
+- Open a seller's account page from Manage Users, top them up, and check the
+  movement appears in Balance history with your name against it.
+- As that seller, open /account and try /account/1 — both must show their own
+  page, never yours.
 
 ## Games, tiers and pricing are now edited in the panel
 
@@ -228,6 +232,43 @@ Two bugs fell out of building this:
   to charge.
 - **"$test" in the dropdown.** That label is gone; the 1-hour tier is
   "1 Hour (test key)" at $0.00.
+
+## Every account has a page now
+
+**Account → My Account**, and for an admin, the chart icon beside any user in
+Manage Users. It answers what nothing in the panel could answer before: how
+much has this seller sold, and who has been topping them up.
+
+- Balance, total topped up (and how many times), spent on keys, keys issued
+- Keys broken down per game, with active count, devices and when they last
+  issued one, plus a fourteen-day bar chart
+- Who topped the account up, how often, and how much each person gave
+- The full balance history: every movement, what it was for, who caused it,
+  the amount and the balance it left
+
+This needed a ledger, because nothing recorded balance movements — `saldo`
+held a number and that was all. `balance_log` is append-only and written in
+the same transaction as the balance change itself, so it can never disagree
+with the figure it explains. I verified that: after four purchases, two
+top-ups and one reduction, `users.saldo` and the last `balance_after` matched
+to the cent.
+
+Three things write to it: an admin editing a balance, a key purchase, and the
+opening credit from a referral code. The admin edit sets an absolute figure,
+so the movement is derived from a `SELECT … FOR UPDATE` — reading it unlocked
+would let a purchase land in between and be silently overwritten. A reduction
+is recorded as `adjustment`, not `topup`, and "spent on keys" counts only
+purchases; folding a manual deduction into that figure made it read high,
+which is a bug I caught by reading the rendered page against the raw rows.
+
+**Access control:** a seller sees only their own page. `/account/5` shows a
+seller their own page rather than an error, so there is nothing to probe —
+a valid id and an invalid one look identical to them. An admin sees anyone's.
+Both were tested.
+
+**History starts the day you run `MIGRATION.sql`.** Movements from before
+that cannot be reconstructed, so each account gets one `opening` row
+explaining the balance it already had.
 
 ## Cross-platform check
 

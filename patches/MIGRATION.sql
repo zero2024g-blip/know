@@ -189,3 +189,52 @@ WHERE g.`code` IN ('CODM', 'PUBGM', 'FF');
 --     SELECT g.code, d.hours, d.label, d.price, d.admin_only
 --       FROM games g JOIN game_durations d ON d.game_id = g.id_game
 --      ORDER BY g.sort_order, d.sort_order;
+
+-- ---------------------------------------------------------------------
+-- 6. Balance ledger — who was charged or credited, when, and by whom
+-- ---------------------------------------------------------------------
+-- Nothing recorded balance movements before this. `users.saldo` held a
+-- number and that was all: a seller could not see what they had spent,
+-- and no one could answer "who topped this account up, and when".
+--
+-- Every change to a balance writes a row here from now on:
+--   topup / adjustment  an admin changed the balance by hand
+--   key_purchase        keys were generated and paid for
+--   referral_signup     the opening credit from a referral code
+--
+-- `delta` is signed, `balance_after` is the balance once it was applied,
+-- and `actor` is the username who caused it. Rows are never edited or
+-- deleted — the point of a ledger is that it only grows.
+--
+-- Movements from before this table existed cannot be reconstructed, so
+-- history starts on the day you run this.
+
+CREATE TABLE IF NOT EXISTS `balance_log` (
+  `id_log`        INT AUTO_INCREMENT PRIMARY KEY,
+  `user_id`       INT           NOT NULL,
+  `delta`         DECIMAL(14,2) NOT NULL,
+  `balance_after` DECIMAL(14,2) NOT NULL,
+  `reason`        VARCHAR(32)   NOT NULL,
+  `actor`         VARCHAR(64)   NULL,
+  `note`          VARCHAR(255)  NULL,
+  `created_at`    DATETIME      NULL,
+  `updated_at`    DATETIME      NULL,
+  KEY `idx_bl_user` (`user_id`, `id_log`),
+  KEY `idx_bl_reason` (`user_id`, `reason`),
+  CONSTRAINT `fk_bl_user` FOREIGN KEY (`user_id`)
+      REFERENCES `users` (`id_users`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- An opening row per account, so a balance that already exists is
+-- explained rather than appearing from nowhere in the ledger. It is
+-- marked `opening` precisely because its real origin is unknown.
+INSERT INTO `balance_log` (`user_id`, `delta`, `balance_after`, `reason`, `actor`, `note`, `created_at`, `updated_at`)
+SELECT u.`id_users`, u.`saldo`, u.`saldo`, 'opening', NULL,
+       'Balance as it stood when the ledger was created', NOW(), NOW()
+  FROM `users` u
+ WHERE NOT EXISTS (SELECT 1 FROM `balance_log` b WHERE b.`user_id` = u.`id_users`);
+
+-- Check:
+--     SELECT u.username, b.reason, b.delta, b.balance_after, b.actor, b.created_at
+--       FROM balance_log b JOIN users u ON u.id_users = b.user_id
+--      ORDER BY b.id_log DESC LIMIT 20;

@@ -3943,8 +3943,19 @@ diff -ruN /tmp/orig_app/Config/Logger.php app/Config/Logger.php
  		/**
 diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 --- /tmp/orig_app/Config/Routes.php	2026-08-24 23:02:52.524373647 +0000
-+++ app/Config/Routes.php	2026-08-26 14:19:59.873462719 +0000
-@@ -44,13 +44,22 @@
++++ app/Config/Routes.php	2026-08-26 14:52:29.333576693 +0000
+@@ -38,19 +38,33 @@
+ $routes->match(['get', 'post'], 'login', 'Auth::login');
+ $routes->match(['get', 'post'], 'register', 'Auth::register');
+ $routes->match(['get', 'post'], 'settings', 'User::settings');
++
++// A seller's own account page. The optional id is honoured for admins only;
++// the controller decides, so a seller passing one just sees their own.
++$routes->get('account', 'Account::index');
++$routes->get('account/(:num)', 'Account::index/$1');
+ $routes->match(['get', 'post'], 'check', 'KeyCheck::check');
+ 
+ $routes->group('keys', function ($routes) {
  	$routes->match(['get', 'post'], '/', 'Keys::index');
  	$routes->match(['get', 'post'], 'generate', 'Keys::generate');
  	$routes->get('(:num)', 'Keys::edit_key/$1');
@@ -3968,10 +3979,97 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
  	$routes->match(['get', 'post'], 'manage-users', 'User::manage_users');
  	$routes->match(['get', 'post'], 'edit/(:num)', 'User::user_edit/$1');
  	/* --------------------------- Admin API Grouping -------------------------- */
+diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
+--- /tmp/orig_app/Controllers/Account.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Controllers/Account.php	2026-08-26 14:52:29.293557029 +0000
+@@ -0,0 +1,83 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Models\BalanceModel;
++use App\Models\KeysModel;
++use App\Models\UserModel;
++
++/**
++ * A seller's own account page: what they have sold, what they have spent,
++ * and every movement on their balance.
++ *
++ * An admin can open anyone's with /account/{id}. A seller can only ever see
++ * their own — the id is ignored for them rather than rejected, so there is
++ * nothing to probe: /account/1 and /account/999 both show a seller their own
++ * page, and neither confirms whether that account exists.
++ */
++class Account extends BaseController
++{
++    protected $users, $keys, $balance, $me;
++
++    public function __construct()
++    {
++        $this->users   = new UserModel();
++        $this->keys    = new KeysModel();
++        $this->balance = new BalanceModel();
++        $this->me      = $this->users->getUser();
++    }
++
++    public function index($id = null)
++    {
++        if (! $this->me) {
++            return redirect()->to('login');
++        }
++
++        $isAdmin = (int) $this->me->level === 1;
++
++        // Only an admin may look at someone else's.
++        $target = $this->me;
++        if ($isAdmin && $id !== null) {
++            $found = $this->users->getUser((int) $id);
++            if (! $found) {
++                return redirect()->to('admin/manage-users')
++                    ->with('msgDanger', 'That user no longer exists.');
++            }
++            $target = $found;
++        }
++
++        $uid      = (int) $target->id_users;
++        $username = $target->username;
++
++        $keyStats = $this->keys->stats($target);
++        $byGame   = $this->keys->byGameFor($username);
++        $daily    = $this->keys->dailyFor($username, 14);
++
++        // Fill the gaps so the sparkline has one column per day rather than
++        // only the days something happened.
++        $series = [];
++        $counts = [];
++        foreach ($daily as $d) {
++            $counts[$d->day] = (int) $d->n;
++        }
++        for ($i = 13; $i >= 0; $i--) {
++            $day = date('Y-m-d', strtotime("-{$i} days"));
++            $series[] = ['day' => $day, 'n' => $counts[$day] ?? 0];
++        }
++
++        return view('User/account', [
++            'title'     => $target === $this->me ? 'My account' : 'Account — ' . $username,
++            'user'      => $this->me,
++            'target'    => $target,
++            'isSelf'    => $uid === (int) $this->me->id_users,
++            'isAdmin'   => $isAdmin,
++            'time'      => new \CodeIgniter\I18n\Time(),
++            'keyStats'  => $keyStats,
++            'byGame'    => $byGame,
++            'series'    => $series,
++            'summary'   => $this->balance->summary($uid),
++            'ledger'    => $this->balance->history($uid, 50),
++            'topUps'    => $this->balance->topUpSources($uid),
++        ]);
++    }
++}
 diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 --- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
-+++ app/Controllers/Auth.php	2026-08-26 13:41:10.466818656 +0000
-@@ -189,15 +189,44 @@
++++ app/Controllers/Auth.php	2026-08-26 14:52:05.853424521 +0000
+@@ -189,15 +189,60 @@
              'saldo'    => $rCheck->set_saldo ?: 0,
              'uplink'   => $rCheck->created_by,
              'status'   => 1,
@@ -3997,8 +4095,24 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 +                return $this->registerFail($ipHash, 'This referral code has already been used.');
 +            }
 +
-+            if (! $this->userModel->insert($data_register)) {
++            $newUserId = $this->userModel->insert($data_register);
++            if (! $newUserId) {
 +                throw new \RuntimeException('User insert failed');
++            }
++
++            // The opening credit the referral code carried. Recorded so the
++            // account's first balance has an explanation instead of appearing
++            // from nowhere, and so the code that paid for it is traceable.
++            $opening = (float) ($data_register['saldo'] ?? 0);
++            if ($opening > 0) {
++                (new \App\Models\BalanceModel())->record(
++                    (int) $newUserId,
++                    $opening,
++                    $opening,
++                    \App\Models\BalanceModel::REFERRAL,
++                    $rCheck->created_by ?: null,
++                    'Opening credit from a referral code'
++                );
 +            }
 +
 +            if ($db->transStatus() === false) {
@@ -4021,7 +4135,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      }
  
      private function registerFail(string $ipHash, string $reason)
-@@ -241,6 +270,7 @@
+@@ -241,6 +286,7 @@
                  return (int) $row['blocked_until'] - $now;
              }
          } catch (\Throwable $e) {
@@ -4029,7 +4143,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          }
          return 0;
      }
-@@ -279,6 +309,7 @@
+@@ -279,6 +325,7 @@
              }
              return $remaining;
          } catch (\Throwable $e) {
@@ -4037,7 +4151,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
              return 0;
          }
      }
-@@ -289,9 +320,27 @@
+@@ -289,9 +336,27 @@
          try {
              db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete();
          } catch (\Throwable $e) {
@@ -4065,7 +4179,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      /** Human-friendly "try again in X" message. */
      private function waitMessage(int $seconds): string
      {
-@@ -311,9 +360,4 @@
+@@ -311,9 +376,4 @@
      /**
       * Real client IP (Cloudflare header first — the site is behind Cloudflare).
       */
@@ -4483,17 +4597,18 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-26 14:26:29.951309243 +0000
-@@ -2,6 +2,8 @@
++++ app/Controllers/Keys.php	2026-08-26 14:51:10.506409657 +0000
+@@ -2,6 +2,9 @@
  
  namespace App\Controllers;
  
++use App\Models\BalanceModel;
 +use App\Models\DurationModel;
 +use App\Models\GameModel;
  use App\Models\HistoryModel;
  use App\Models\KeysModel;
  use App\Models\UserModel;
-@@ -9,7 +11,7 @@
+@@ -9,7 +12,7 @@
  
  class Keys extends BaseController
  {
@@ -4502,7 +4617,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  
      public function __construct()
      {
-@@ -18,45 +20,12 @@
+@@ -18,45 +21,12 @@
          $this->model = new KeysModel();
          $this->time = new \CodeIgniter\I18n\Time;
  
@@ -4554,7 +4669,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function index()
-@@ -64,16 +33,18 @@
+@@ -64,16 +34,18 @@
          $model = $this->model;
          $user = $this->user;
  
@@ -4578,7 +4693,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'time' => $this->time,
          ];
          return view('Keys/list', $data);
-@@ -88,35 +59,52 @@
+@@ -88,35 +60,52 @@
  
      public function api_key_reset()
      {
@@ -4654,7 +4769,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function edit_key($key = false)
-@@ -273,14 +261,28 @@
+@@ -273,14 +262,28 @@
              $message = setMessage("Please top up to your beloved admin.", 'warning');
          }
  
@@ -4690,7 +4805,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'validation' => $validation,
          ];
          return view('Keys/generate', $data);
-@@ -293,9 +295,23 @@
+@@ -293,9 +296,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -4716,7 +4831,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
          $form_rules = [
              'game' => [
                  'label' => 'Games',
-@@ -306,15 +322,18 @@
+@@ -306,15 +323,18 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -4737,7 +4852,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +341,9 @@
+@@ -322,7 +342,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -4748,7 +4863,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +352,128 @@
+@@ -331,57 +353,146 @@
          ];
  
          $validation = Services::validation();
@@ -4795,9 +4910,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        $drtn = (int) $this->request->getPost('duration');
 +        $maxd = (int) $this->request->getPost('max_devices');
 +        $quantity = (int) $this->request->getPost('quantity');
- 
--                    // Add the generated key to the list
--                    $generatedKeys[] = $data_response;
++
 +        // One query decides the price and the permission at the same time:
 +        // the game must be active, the tier must belong to it, be active,
 +        // and be one this role may buy. Anything else comes back null.
@@ -4835,7 +4948,27 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    $validation->setError('duration', 'Insufficient balance');
 +                    return redirect()->back()->withInput()
 +                        ->with('msgWarning', 'Please top up to your beloved admin.');
-                 }
++                }
+ 
+-                    // Add the generated key to the list
+-                    $generatedKeys[] = $data_response;
++                // Read the balance back inside the transaction, so the ledger
++                // records what this debit actually left rather than a figure
++                // computed from a value read before the UPDATE.
++                $after = (float) $db->table('users')
++                    ->select('saldo')
++                    ->where('id_users', session('userid'))
++                    ->get()->getRowObject()->saldo;
++
++                (new BalanceModel())->record(
++                    (int) session('userid'),
++                    -$totalfees,
++                    $after,
++                    BalanceModel::PURCHASE,
++                    $user->username,
++                    $quantity . ' x ' . $tier->code . ' ' . $tier->label
++                        . ' (' . $maxd . ' device' . ((int) $maxd === 1 ? '' : 's') . ')'
++                );
 +            } else {
 +                // A free tier — the admin-only test key. The debit above must
 +                // be skipped, not run with a zero amount: `saldo = saldo - 0`
@@ -4854,7 +4987,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    $db->transRollback();
 +                    return redirect()->back()->withInput()
 +                        ->with('msgDanger', 'Your account is not active.');
-+                }
+                 }
 +            }
 +
 +            $generatedKeys = [];
@@ -4923,8 +5056,16 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  }
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
-+++ app/Controllers/User.php	2026-08-26 08:50:55.349777348 +0000
-@@ -33,11 +33,15 @@
++++ app/Controllers/User.php	2026-08-26 14:51:40.545103582 +0000
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Controllers;
+ 
++use App\Models\BalanceModel;
+ use App\Models\CodeModel;
+ use App\Models\HistoryModel;
+ use App\Models\UserModel;
+@@ -33,11 +34,15 @@
      public function index()
      {
          $historyModel = new HistoryModel();
@@ -4944,7 +5085,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          ];
          return view('User/dashboard', $data);
      }
-@@ -114,7 +118,10 @@
+@@ -114,7 +119,10 @@
          $data = [
              'title' => 'Users',
              'user' => $user,
@@ -4956,7 +5097,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation
          ];
-@@ -137,7 +144,6 @@
+@@ -137,7 +145,6 @@
              'title' => 'Settings',
              'user' => $user,
              'target' => $model->getUser($userid),
@@ -4964,25 +5105,84 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation,
          ];
-@@ -213,7 +219,7 @@
+@@ -211,19 +218,71 @@
+             $saldo = $this->request->getPost('saldo');
+             $uplink = $this->request->getPost('uplink');
  
++            $newSaldo = ($saldo < 1) ? 0.0 : (float) $saldo;
++
              $data_update = [
                  'username' => $username,
 -                'fullname' => esc($fullname),
 +                'fullname' => $fullname,   // escaped on output, not stored escaped
                  'level' => $level,
                  'status' => $status,
-                 'saldo' => (($saldo < 1) ? 0 : $saldo),
-@@ -222,7 +228,7 @@
+-                'saldo' => (($saldo < 1) ? 0 : $saldo),
++                'saldo' => $newSaldo,
+                 'uplink' => $uplink,
+             ];
  
-             $update = $model->update($userid, $data_update);
-             if ($update) {
+-            $update = $model->update($userid, $data_update);
+-            if ($update) {
 -                return redirect()->back()->with('msgSuccess', "Successfuly update $target->username.");
-+                return redirect()->back()->with('msgSuccess', "Successfuly update " . esc($target->username) . ".");
++            $db = \Config\Database::connect();
++            $db->transBegin();
++
++            try {
++                // This form sets an absolute balance, so the movement has to
++                // be derived: read the current figure FOR UPDATE, which holds
++                // the row until this transaction ends, and take the difference.
++                // Reading it outside the lock would let a key purchase land in
++                // between and be silently overwritten by this update.
++                $locked = $db->query(
++                    'SELECT saldo FROM users WHERE id_users = ? FOR UPDATE',
++                    [$userid]
++                )->getRowObject();
++
++                if (! $locked) {
++                    $db->transRollback();
++                    return redirect()->back()->with('msgDanger', 'That user no longer exists.');
++                }
++
++                $oldSaldo = (float) $locked->saldo;
++                $delta    = $newSaldo - $oldSaldo;
++
++                if (! $model->update($userid, $data_update)) {
++                    throw new \RuntimeException('User update failed');
++                }
++
++                // Only a real movement is worth a row. Editing a name or a
++                // role leaves the balance alone and should not show up in
++                // the ledger as a zero entry.
++                if (abs($delta) >= 0.005) {
++                    (new BalanceModel())->record(
++                        (int) $userid,
++                        $delta,
++                        $newSaldo,
++                        $delta > 0 ? BalanceModel::TOPUP : BalanceModel::ADJUST,
++                        $this->user->username ?? null,
++                        $delta > 0
++                            ? 'Topped up by admin'
++                            : 'Balance reduced by admin'
++                    );
++                }
++
++                if ($db->transStatus() === false) {
++                    throw new \RuntimeException('Transaction failed');
++                }
++                $db->transCommit();
++            } catch (\Throwable $e) {
++                $db->transRollback();
++                log_message('error', 'Balance edit failed: {msg}', ['msg' => $e->getMessage()]);
++                return redirect()->back()->withInput()
++                    ->with('msgDanger', 'Could not save. Nothing was changed.');
              }
++
++            return redirect()->back()->with('msgSuccess', "Successfuly update " . esc($target->username) . ".");
          }
      }
-@@ -253,10 +259,16 @@
+     
+@@ -253,10 +312,16 @@
          $password = $this->request->getPost('password');
  
          $user = $this->user;
@@ -5001,7 +5201,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $msg = "Wrong current password.";
              $validation->setError('current', $msg);
          } elseif ($current == $password) {
-@@ -285,7 +297,10 @@
+@@ -285,7 +350,10 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Something wrong! Please check the form');
          } else {
@@ -5013,7 +5213,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $this->model->update(session('userid'), ['password' => $newPassword]);
              return redirect()->back()->with('msgSuccess', 'Password Successfuly Changed.');
          }
-@@ -315,7 +330,7 @@
+@@ -315,7 +383,7 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
          } else {
@@ -5400,6 +5600,118 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +
 +    return base_url($path) . ($stamp ? '?v=' . $stamp : '');
 +}
+diff -ruN /tmp/orig_app/Models/BalanceModel.php app/Models/BalanceModel.php
+--- /tmp/orig_app/Models/BalanceModel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Models/BalanceModel.php	2026-08-26 14:57:10.362477005 +0000
+@@ -0,0 +1,108 @@
++<?php
++
++namespace App\Models;
++
++use CodeIgniter\Model;
++
++/**
++ * The balance ledger.
++ *
++ * Append-only: rows are written when money moves and never edited after.
++ * `users.saldo` stays the working figure; this explains how it got there.
++ */
++class BalanceModel extends Model
++{
++    protected $table      = 'balance_log';
++    protected $primaryKey = 'id_log';
++
++    protected $allowedFields = ['user_id', 'delta', 'balance_after', 'reason', 'actor', 'note'];
++    protected $useTimestamps = true;
++    protected $returnType    = 'object';
++
++    public const TOPUP    = 'topup';
++    public const ADJUST   = 'adjustment';
++    public const PURCHASE = 'key_purchase';
++    public const REFERRAL = 'referral_signup';
++    public const OPENING  = 'opening';
++
++    /**
++     * Record one movement.
++     *
++     * Call inside the same transaction as the balance change itself, so the
++     * two either both land or neither does. A ledger that can disagree with
++     * the balance it describes is worse than no ledger.
++     *
++     * $balanceAfter is passed in rather than read back here: reading it would
++     * be a second query against a row another request may already have moved.
++     */
++    public function record(
++        int $userId,
++        float $delta,
++        float $balanceAfter,
++        string $reason,
++        ?string $actor = null,
++        ?string $note = null
++    ): void {
++        $this->insert([
++            'user_id'       => $userId,
++            'delta'         => $delta,
++            'balance_after' => $balanceAfter,
++            'reason'        => $reason,
++            'actor'         => $actor,
++            'note'          => $note !== null ? mb_substr($note, 0, 255) : null,
++        ]);
++    }
++
++    /** Most recent movements for one account. */
++    public function history(int $userId, int $limit = 50): array
++    {
++        return $this->where('user_id', $userId)
++            ->orderBy('id_log', 'DESC')
++            ->findAll($limit);
++    }
++
++    /**
++     * Totals for the account page.
++     *
++     * Credits and debits are summed separately rather than netted, because
++     * "you were topped up 400 and spent 250" says more than "net 150".
++     */
++    public function summary(int $userId): array
++    {
++        $row = $this->db->table($this->table)
++            ->select("
++                COALESCE(SUM(CASE WHEN delta > 0 AND reason <> 'opening' THEN delta END), 0) AS credited,
++                COALESCE(SUM(CASE WHEN reason = 'key_purchase' THEN -delta END), 0)          AS spent,
++                COALESCE(SUM(CASE WHEN reason = 'adjustment' THEN -delta END), 0)            AS deducted,
++                COALESCE(SUM(CASE WHEN reason = 'topup' THEN delta END), 0)                  AS topped_up,
++                COALESCE(SUM(CASE WHEN reason = 'topup' THEN 1 END), 0)                      AS topup_count,
++                MAX(CASE WHEN reason = 'topup' THEN created_at END)                          AS last_topup
++            ", false)
++            ->where('user_id', $userId)
++            ->get()->getRowObject();
++
++        return [
++            'credited'    => (float) ($row->credited ?? 0),
++            // Only real purchases. Summing every negative movement would fold
++            // an admin's manual reduction into "spent on keys", which is a
++            // different thing and made the figure read high.
++            'spent'       => (float) ($row->spent ?? 0),
++            'deducted'    => (float) ($row->deducted ?? 0),
++            'topped_up'   => (float) ($row->topped_up ?? 0),
++            'topup_count' => (int)   ($row->topup_count ?? 0),
++            'last_topup'  => $row->last_topup ?? null,
++        ];
++    }
++
++    /** Who has topped this account up, and how much in total. */
++    public function topUpSources(int $userId): array
++    {
++        return $this->db->table($this->table)
++            ->select('actor, COUNT(*) AS times, SUM(delta) AS total, MAX(created_at) AS last_at', false)
++            ->where('user_id', $userId)
++            ->where('reason', self::TOPUP)
++            ->groupBy('actor')
++            ->orderBy('total', 'DESC')
++            ->get()->getResultObject();
++    }
++}
 diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
 --- /tmp/orig_app/Models/CodeModel.php	2026-08-24 23:02:52.605921932 +0000
 +++ app/Models/CodeModel.php	2026-08-26 13:35:23.632960449 +0000
@@ -5650,8 +5962,8 @@ diff -ruN /tmp/orig_app/Models/HistoryModel.php app/Models/HistoryModel.php
              ->get()->getResultObject();
 diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
 --- /tmp/orig_app/Models/KeysModel.php	2026-08-24 23:02:52.607423272 +0000
-+++ app/Models/KeysModel.php	2026-08-26 08:50:35.320234360 +0000
-@@ -27,6 +27,41 @@
++++ app/Models/KeysModel.php	2026-08-26 14:50:56.343710689 +0000
+@@ -27,6 +27,74 @@
              ->getRowObject();
      }
  
@@ -5688,6 +6000,39 @@ diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
 +            'inactive' => $total - $active,
 +            'soon'     => $soon,
 +        ];
++    }
++
++    /**
++     * Per-game breakdown of what one seller has issued.
++     *
++     * Scoped by `registrator`, the username stored on each key. Grouped on
++     * the code the key carries rather than joined to `games`, so keys for a
++     * game that was later removed still appear instead of vanishing from
++     * someone's own totals.
++     */
++    public function byGameFor(string $username): array
++    {
++        return $this->db->table($this->table . ' k')
++            ->select('k.game, COUNT(*) AS total,'
++                . ' SUM(CASE WHEN k.status = 1 THEN 1 ELSE 0 END) AS active,'
++                . ' SUM(k.max_devices) AS devices,'
++                . ' MAX(k.created_at) AS last_at', false)
++            ->where('k.registrator', $username)
++            ->groupBy('k.game')
++            ->orderBy('total', 'DESC')
++            ->get()->getResultObject();
++    }
++
++    /** Keys issued per day for the last $days days, for the sparkline. */
++    public function dailyFor(string $username, int $days = 14): array
++    {
++        return $this->db->table($this->table)
++            ->select('DATE(created_at) AS day, COUNT(*) AS n', false)
++            ->where('registrator', $username)
++            ->where('created_at >=', date('Y-m-d 00:00:00', strtotime("-{$days} days")))
++            ->groupBy('DATE(created_at)')
++            ->orderBy('day', 'ASC')
++            ->get()->getResultObject();
 +    }
 +
      public function API_getKeys()
@@ -6141,31 +6486,168 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/referral.php app/Views/Admin/referral.php
 --- /tmp/orig_app/Views/Admin/referral.php	2026-08-24 23:02:52.610578496 +0000
-+++ app/Views/Admin/referral.php	2026-08-24 23:07:43.047526877 +0000
-@@ -36,7 +36,7 @@
-         <?php if ($code) : ?>
-             <div class="card">
-                 <div class="card-header p-3">
--                    <i class="bi bi-clock-history me-2"></i>History Generate - Total <?= $total_code ?>
-+                    <i class="bi bi-clock-history me-2"></i>History Generate - Total <?= (int) $total_code ?>
++++ app/Views/Admin/referral.php	2026-08-26 15:01:08.451125840 +0000
+@@ -1,71 +1,109 @@
+ <?= $this->extend('Layout/Starter') ?>
+ 
+ <?= $this->section('content') ?>
+-<div class="row">
+-    <div class="col-lg-12">
+-        <?= $this->include('Layout/msgStatus') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-ticket-perforated"></i> Admin</span>
++        <h1>Referral codes</h1>
++        <p>
++            A code credits the balance you set here to whoever registers with it.
++            Each one works exactly once.
++        </p>
+     </div>
+-    <div class="col-lg-4 mb-3">
+-        <div class="card">
+-            <div class="card-header p-3">
+-                <i class="bi bi-person-plus-fill me-2"></i>Generate <?= $title ?>
++    <div class="em-head-act">
++        <a class="em-btn" href="<?= site_url('admin/manage-users') ?>">
++            <i class="bi bi-people-fill"></i> Manage users
++        </a>
++    </div>
++</header>
++
++<div class="row g-3">
++    <div class="col-lg-4">
++        <section class="em-panel em-rise em-rise-1">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-plus-circle"></i> New code</h2>
+             </div>
+-            <div class="card-body">
++            <div class="em-panel-b">
+                 <?= form_open() ?>
+-
+-                <div class="form-group mb-3">
+-                    <label for="set_saldo">You can set with multiple saldo</label>
+-                    <div class="input-group mt-2">
++                <div class="em-field">
++                    <label for="set_saldo">Opening balance</label>
++                    <div class="input-group">
+                         <span class="input-group-text"><i class="bi bi-currency-dollar"></i></span>
+-                        <input type="number" class="form-control" name="set_saldo" id="set_saldo" minlength="1" maxlength="11" value="5">
++                        <input type="number" class="form-control" name="set_saldo" id="set_saldo"
++                               min="0" max="99999999" step="0.01" value="5">
+                     </div>
+                     <?php if ($validation->hasError('set_saldo')) : ?>
+-                        <small id="help-saldo" class="text-danger"><?= $validation->getError('set_saldo') ?></small>
++                        <p class="em-hint text-danger"><?= $validation->getError('set_saldo') ?></p>
++                    <?php else : ?>
++                        <p class="em-hint">Credited to the new account the moment it registers.</p>
+                     <?php endif; ?>
                  </div>
-                 <div class="card-body">
-                     <div class="table-responsive">
-@@ -53,11 +53,11 @@
-                             <tbody>
-                                 <?php foreach ($code as $c) : ?>
-                                     <tr>
+-                <div class="form-group">
+-                    <button type="submit" class="btn btn-outline-primary">
+-                        <i class="bi bi-plus-circle me-1"></i>Create Code
+-                    </button>
+-                </div>
++                <button type="submit" class="em-btn is-primary">
++                    <i class="bi bi-plus-lg"></i> Create code
++                </button>
+                 <?= form_close() ?>
+             </div>
+-        </div>
++        </section>
+     </div>
++
+     <div class="col-lg-8">
+-        <?php if ($code) : ?>
+-            <div class="card">
+-                <div class="card-header p-3">
+-                    <i class="bi bi-clock-history me-2"></i>History Generate - Total <?= $total_code ?>
++        <section class="em-panel em-rise em-rise-2">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-clock-history"></i> Codes issued</h2>
++                <div class="em-panel-act">
++                    <span class="em-pill"><?= (int) $total_code ?> total</span>
+                 </div>
+-                <div class="card-body">
+-                    <div class="table-responsive">
+-                        <table class="table table-bordered table-hover text-center" style="width:100%">
+-                            <thead>
++            </div>
++
++            <?php if (empty($code)) : ?>
++                <div class="em-empty">
++                    <div class="em-empty-ic"><i class="bi bi-ticket-perforated"></i></div>
++                    <h3>No codes yet</h3>
++                    <p>Create one and hand it to the person signing up.</p>
++                </div>
++            <?php else : ?>
++                <div class="table-responsive">
++                    <table class="table align-middle">
++                        <thead>
++                            <tr>
++                                <th>#</th>
++                                <th>Code (hashed)</th>
++                                <th>Credit</th>
++                                <th>Used by</th>
++                                <th class="text-end">Created by</th>
++                            </tr>
++                        </thead>
++                        <tbody>
++                            <?php foreach ($code as $c) : ?>
+                                 <tr>
+-                                    <th>#</th>
+-                                    <th>Referral hashed</th>
+-                                    <th>Saldo</th>
+-                                    <th>Used by</th>
+-                                    <th>Create by</th>
++                                    <td><?= (int) $c->id_reff ?></td>
++                                    <td>
++                                        <span class="em-key" title="Codes are stored hashed, never in plain text">
++                                            <?= esc(substr($c->code, 0, 14)) ?>&hellip;
++                                        </span>
++                                    </td>
++                                    <td><span class="em-pill">$<?= number_format((float) $c->set_saldo, 2) ?></span></td>
++                                    <td>
++                                        <?php if ($c->used_by) : ?>
++                                            <span class="em-pill is-bad">
++                                                <span class="em-dot"></span><?= esc($c->used_by) ?>
++                                            </span>
++                                        <?php else : ?>
++                                            <span class="em-pill is-ok"><span class="em-dot"></span>Available</span>
++                                        <?php endif; ?>
++                                    </td>
++                                    <td class="text-end"><?= esc($c->created_by) ?></td>
+                                 </tr>
+-                            </thead>
+-                            <tbody>
+-                                <?php foreach ($code as $c) : ?>
+-                                    <tr>
 -                                        <td><?= $c->id_reff ?></td>
-+                                        <td><?= (int) $c->id_reff ?></td>
-                                         <td><?= substr($c->code, 1, 15) ?></td>
+-                                        <td><?= substr($c->code, 1, 15) ?></td>
 -                                        <td>$<?= $c->set_saldo ?></td>
-+                                        <td>$<?= esc($c->set_saldo) ?></td>
-                                         <td><?= $c->used_by ?: '&mdash;' ?></td>
+-                                        <td><?= $c->used_by ?: '&mdash;' ?></td>
 -                                        <td><?= $c->created_by ?></td>
-+                                        <td><?= esc($c->created_by) ?></td>
-                                     </tr>
-                                 <?php endforeach; ?>
-                             </tbody>
+-                                    </tr>
+-                                <?php endforeach; ?>
+-                            </tbody>
+-                        </table>
+-                    </div>
++                            <?php endforeach; ?>
++                        </tbody>
++                    </table>
+                 </div>
+-            </div>
+-        <?php endif; ?>
++            <?php endif; ?>
++        </section>
+     </div>
+ </div>
+-<?= $this->endSection() ?>
+\ No newline at end of file
++
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
 --- /tmp/orig_app/Views/Admin/user_edit.php	2026-08-24 23:02:52.611222252 +0000
 +++ app/Views/Admin/user_edit.php	2026-08-25 21:52:27.137347618 +0000
@@ -6210,8 +6692,8 @@ diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
                          <?php endif; ?>
 diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 --- /tmp/orig_app/Views/Admin/users.php	2026-08-24 23:02:52.611664182 +0000
-+++ app/Views/Admin/users.php	2026-08-26 09:00:20.774053368 +0000
-@@ -1,100 +1,186 @@
++++ app/Views/Admin/users.php	2026-08-26 14:53:42.695718583 +0000
+@@ -1,100 +1,190 @@
  <?= $this->extend('Layout/Starter') ?>
  
  <?= $this->section('content') ?>
@@ -6314,7 +6796,8 @@ diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 -<?= script_tag("https://cdn.datatables.net/1.10.25/js/dataTables.bootstrap5.min.js") ?>
 +<script src="<?= asset_ver('assets/vendor/js/dataTables.bootstrap5.min.js') ?>"></script>
  <script>
-+    var EDIT_BASE = <?= json_encode(rtrim(site_url('admin/edit'), '/')) ?>;
++    var EDIT_BASE    = <?= json_encode(rtrim(site_url('admin/edit'), '/')) ?>;
++    var ACCOUNT_BASE = <?= json_encode(rtrim(site_url('account'), '/')) ?>;
 +
 +    // DataTables writes renderer output as HTML, so every value coming back
 +    // from the API is escaped here before it is concatenated in.
@@ -6444,9 +6927,12 @@ diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 +                    orderable: false,
 +                    className: 'text-end',
 +                    render: function(v, type, row) {
-+                        return '<a class="em-btn is-sm" href="' + EDIT_BASE + '/' +
-+                               encodeURIComponent(row.id) + '">' +
-+                               '<i class="bi bi-pencil-square"></i> Edit</a>';
++                        var id = encodeURIComponent(row.id);
++                        return '<div class="em-actions">' +
++                               '<a class="em-iconbtn is-info" title="Sales and balance history" href="' +
++                               ACCOUNT_BASE + '/' + id + '"><i class="bi bi-graph-up"></i></a>' +
++                               '<a class="em-btn is-sm" href="' + EDIT_BASE + '/' + id + '">' +
++                               '<i class="bi bi-pencil-square"></i> Edit</a></div>';
                      }
                  }
              ]
@@ -7141,8 +7627,20 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
                                          'Your device key has been reset.',
 diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
 --- /tmp/orig_app/Views/Layout/Header.php	2026-08-24 23:02:52.617286818 +0000
-+++ app/Views/Layout/Header.php	2026-08-26 14:22:01.043599092 +0000
-@@ -50,6 +50,11 @@
++++ app/Views/Layout/Header.php	2026-08-26 14:53:42.695447126 +0000
+@@ -37,6 +37,11 @@
+                                 <li>
+                                     <hr class="dropdown-divider">
+                                 </li>
++                                <li>
++                                    <a class="dropdown-item <?= url_is('account') ? 'active' : '' ?>" href="<?= site_url('account') ?>">
++                                        <i class="bi bi-person-badge"></i> My Account
++                                    </a>
++                                </li>
+                                 <?php if ($user->level == 1) : ?>
+                                     <li class="dropdown-item text-muted">Admin</li>
+                                     <li>
+@@ -50,6 +55,11 @@
                                          </a>
                                      </li>
                                      <li>
@@ -7889,6 +8387,308 @@ diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
  
      <script>
          // Auto-close any open navbar dropdown as soon as the page scrolls.
+diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
+--- /tmp/orig_app/Views/User/account.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/User/account.php	2026-08-26 14:57:10.405265385 +0000
+@@ -0,0 +1,298 @@
++<?= $this->extend('Layout/Starter') ?>
++
++<?= $this->section('content') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<?php
++$peak = 0;
++foreach ($series as $s) {
++    $peak = max($peak, $s['n']);
++}
++$reasonMeta = [
++    'topup'           => ['Top-up',        'is-ok',   'bi-plus-circle'],
++    'adjustment'      => ['Adjustment',    'is-warn', 'bi-dash-circle'],
++    'key_purchase'    => ['Keys',          'is-bad',  'bi-key'],
++    'referral_signup' => ['Referral',      'is-info', 'bi-ticket-perforated'],
++    'opening'         => ['Opening',       '',        'bi-flag'],
++];
++?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow">
++            <i class="bi bi-person-badge"></i> <?= $isSelf ? 'My account' : 'Account' ?>
++        </span>
++        <h1><?= getName($target) ?></h1>
++        <p>
++            <?= getLevel($target->level) ?>
++            &middot; <span class="em-key"><?= esc($target->username) ?></span>
++            <?php if ($target->uplink) : ?>
++                &middot; invited by <?= esc($target->uplink) ?>
++            <?php endif; ?>
++            <?php if ($target->created_at) : ?>
++                &middot; joined <?= $time::parse($target->created_at)->humanize() ?>
++            <?php endif; ?>
++        </p>
++    </div>
++    <div class="em-head-act">
++        <?php if (! $isSelf) : ?>
++            <a class="em-btn" href="<?= site_url('admin/edit/' . (int) $target->id_users) ?>">
++                <i class="bi bi-pencil-square"></i> Edit user
++            </a>
++            <a class="em-btn" href="<?= site_url('admin/manage-users') ?>">
++                <i class="bi bi-people-fill"></i> All users
++            </a>
++        <?php else : ?>
++            <a class="em-btn" href="<?= site_url('keys') ?>">
++                <i class="bi bi-list-ul"></i> My keys
++            </a>
++        <?php endif; ?>
++    </div>
++</header>
++
++<section class="em-stats">
++    <article class="em-stat is-accent em-rise em-rise-1">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Balance</span>
++            <span class="em-stat-ic"><i class="bi bi-wallet2"></i></span>
++        </div>
++        <div class="em-stat-val">$<?= number_format((float) $target->saldo, 2) ?></div>
++        <div class="em-stat-sub">available now</div>
++    </article>
++
++    <article class="em-stat is-ok em-rise em-rise-2">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Topped up</span>
++            <span class="em-stat-ic"><i class="bi bi-plus-circle"></i></span>
++        </div>
++        <div class="em-stat-val">$<?= number_format($summary['topped_up'], 2) ?></div>
++        <div class="em-stat-sub">
++            <?= (int) $summary['topup_count'] ?> time<?= (int) $summary['topup_count'] === 1 ? '' : 's' ?>
++            <?php if ($summary['last_topup']) : ?>
++                &middot; last <?= $time::parse($summary['last_topup'])->humanize() ?>
++            <?php endif; ?>
++        </div>
++    </article>
++
++    <article class="em-stat is-bad em-rise em-rise-3">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Spent on keys</span>
++            <span class="em-stat-ic"><i class="bi bi-cart"></i></span>
++        </div>
++        <div class="em-stat-val">$<?= number_format($summary['spent'], 2) ?></div>
++        <div class="em-stat-sub">
++            <?php if ($summary['deducted'] > 0) : ?>
++                plus $<?= number_format($summary['deducted'], 2) ?> deducted by an admin
++            <?php else : ?>
++                across every purchase
++            <?php endif; ?>
++        </div>
++    </article>
++
++    <article class="em-stat is-info em-rise em-rise-4">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Keys issued</span>
++            <span class="em-stat-ic"><i class="bi bi-key"></i></span>
++        </div>
++        <div class="em-stat-val"><?= number_format($keyStats['total']) ?></div>
++        <div class="em-stat-sub">
++            <?= number_format($keyStats['active']) ?> active
++            <?php if ($keyStats['soon'] > 0) : ?>
++                &middot; <?= number_format($keyStats['soon']) ?> expiring
++            <?php endif; ?>
++        </div>
++    </article>
++</section>
++
++<div class="row g-3">
++    <div class="col-lg-7">
++        <section class="em-panel em-rise em-rise-2">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-bar-chart"></i> Keys by game</h2>
++            </div>
++
++            <?php if (empty($byGame)) : ?>
++                <div class="em-empty">
++                    <div class="em-empty-ic"><i class="bi bi-key"></i></div>
++                    <h3>No keys issued yet</h3>
++                    <p>Anything generated on this account will be broken down here.</p>
++                </div>
++            <?php else : ?>
++                <div class="table-responsive">
++                    <table class="table align-middle">
++                        <thead>
++                            <tr>
++                                <th>Game</th>
++                                <th>Keys</th>
++                                <th>Active</th>
++                                <th>Devices</th>
++                                <th class="text-end">Last issued</th>
++                            </tr>
++                        </thead>
++                        <tbody>
++                            <?php foreach ($byGame as $g) : ?>
++                                <tr>
++                                    <td><span class="em-key"><?= esc($g->game) ?></span></td>
++                                    <td><b><?= number_format((int) $g->total) ?></b></td>
++                                    <td>
++                                        <span class="em-pill <?= (int) $g->active > 0 ? 'is-ok' : '' ?>">
++                                            <?= number_format((int) $g->active) ?>
++                                        </span>
++                                    </td>
++                                    <td><?= number_format((int) $g->devices) ?></td>
++                                    <td class="text-end">
++                                        <span class="em-when-inline">
++                                            <?= $g->last_at ? $time::parse($g->last_at)->humanize() : '—' ?>
++                                        </span>
++                                    </td>
++                                </tr>
++                            <?php endforeach; ?>
++                        </tbody>
++                    </table>
++                </div>
++            <?php endif; ?>
++
++            <div class="em-panel-b" style="border-top:1px solid var(--em-line)">
++                <div class="em-spark-head">
++                    <span class="em-stat-label">Last 14 days</span>
++                    <span class="em-spark-peak"><?= $peak ?> max/day</span>
++                </div>
++                <!-- Bars, not a line: fourteen discrete daily counts are not a
++                     continuous quantity, and a line between them would imply
++                     values that never existed. -->
++                <div class="em-spark" role="img"
++                     aria-label="Keys issued per day over the last fourteen days">
++                    <?php foreach ($series as $s) : ?>
++                        <span class="em-spark-col" title="<?= esc($s['day']) ?>: <?= (int) $s['n'] ?>">
++                            <span class="em-spark-bar<?= $s['n'] === 0 ? ' is-zero' : '' ?>"
++                                  style="height:<?= $peak > 0 ? max(4, (int) round($s['n'] / $peak * 100)) : 4 ?>%"></span>
++                        </span>
++                    <?php endforeach; ?>
++                </div>
++            </div>
++        </section>
++    </div>
++
++    <div class="col-lg-5">
++        <section class="em-panel em-rise em-rise-3">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-arrow-down-up"></i> Who topped this up</h2>
++            </div>
++            <?php if (empty($topUps)) : ?>
++                <div class="em-empty">
++                    <div class="em-empty-ic"><i class="bi bi-wallet2"></i></div>
++                    <h3>No top-ups recorded</h3>
++                    <p>Top-ups are recorded from the day the ledger was created.</p>
++                </div>
++            <?php else : ?>
++                <div class="em-panel-b is-flush">
++                    <?php foreach ($topUps as $t) : ?>
++                        <div class="em-kv">
++                            <span>
++                                <b><?= $t->actor ? esc($t->actor) : 'unknown' ?></b><br>
++                                <small class="text-muted">
++                                    <?= (int) $t->times ?> time<?= (int) $t->times === 1 ? '' : 's' ?>
++                                    &middot; last <?= $time::parse($t->last_at)->humanize() ?>
++                                </small>
++                            </span>
++                            <b class="em-amt-pos">+$<?= number_format((float) $t->total, 2) ?></b>
++                        </div>
++                    <?php endforeach; ?>
++                </div>
++            <?php endif; ?>
++        </section>
++    </div>
++</div>
++
++<section class="em-panel em-rise em-rise-4">
++    <div class="em-panel-h">
++        <h2><i class="bi bi-clock-history"></i> Balance history</h2>
++        <div class="em-panel-act">
++            <span class="em-pill"><?= count($ledger) ?> most recent</span>
++        </div>
++    </div>
++
++    <?php if (empty($ledger)) : ?>
++        <div class="em-empty">
++            <div class="em-empty-ic"><i class="bi bi-receipt"></i></div>
++            <h3>Nothing recorded yet</h3>
++            <p>Every movement from here on will be listed.</p>
++        </div>
++    <?php else : ?>
++        <div class="table-responsive">
++            <table class="table align-middle">
++                <thead>
++                    <tr>
++                        <th>What</th>
++                        <th>Detail</th>
++                        <th>By</th>
++                        <th class="text-end">Amount</th>
++                        <th class="text-end">Balance</th>
++                        <th class="text-end">When</th>
++                    </tr>
++                </thead>
++                <tbody>
++                    <?php foreach ($ledger as $row) : ?>
++                        <?php
++                        [$label, $tone, $icon] = $reasonMeta[$row->reason]
++                            ?? [ucfirst(str_replace('_', ' ', $row->reason)), '', 'bi-dot'];
++                        $delta = (float) $row->delta;
++                        ?>
++                        <tr>
++                            <td>
++                                <span class="em-pill <?= $tone ?>">
++                                    <i class="bi <?= $icon ?>"></i> <?= esc($label) ?>
++                                </span>
++                            </td>
++                            <td><span class="em-ledger-note"><?= esc($row->note ?? '—') ?></span></td>
++                            <td><?= $row->actor ? esc($row->actor) : '<span class="text-muted">system</span>' ?></td>
++                            <td class="text-end">
++                                <b class="<?= $delta >= 0 ? 'em-amt-pos' : 'em-amt-neg' ?>">
++                                    <?= $delta >= 0 ? '+' : '−' ?>$<?= number_format(abs($delta), 2) ?>
++                                </b>
++                            </td>
++                            <td class="text-end em-ledger-bal">$<?= number_format((float) $row->balance_after, 2) ?></td>
++                            <td class="text-end">
++                                <span class="em-when-inline">
++                                    <?= $time::parse($row->created_at)->humanize() ?>
++                                </span>
++                            </td>
++                        </tr>
++                    <?php endforeach; ?>
++                </tbody>
++            </table>
++        </div>
++    <?php endif; ?>
++</section>
++
++<?= $this->endSection() ?>
++
++<?= $this->section('css') ?>
++<style>
++    .em-amt-pos { color: var(--em-ok); font-variant-numeric: tabular-nums; }
++    .em-amt-neg { color: var(--em-bad); font-variant-numeric: tabular-nums; }
++    .em-ledger-bal { font-family: var(--em-mono); font-size: .85rem; color: var(--em-text); }
++    .em-ledger-note { color: var(--em-text-2); font-size: .86rem; }
++    .em-when-inline { font-family: var(--em-mono); font-size: .78rem; color: var(--em-dim); white-space: nowrap; }
++
++    .em-spark-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: .6rem; }
++    .em-spark-peak { font-family: var(--em-mono); font-size: .72rem; color: var(--em-dim); }
++    .em-spark { display: flex; align-items: flex-end; gap: 4px; height: 56px; }
++    .em-spark-col { flex: 1; height: 100%; display: flex; align-items: flex-end; }
++    .em-spark-bar {
++        display: block; width: 100%; border-radius: 3px 3px 0 0;
++        background: linear-gradient(180deg, var(--em-accent-2), var(--em-accent));
++        min-height: 2px;
++    }
++    .em-spark-bar.is-zero { background: var(--em-surface-3); }
++
++    /* Six columns do not fit a phone. The ledger keeps what identifies the
++       movement and its amount; the detail text and the running balance are
++       the two that can be read on a wider screen. */
++    @media (max-width: 700px) {
++        .em-panel table th:nth-child(2), .em-panel table td:nth-child(2),
++        .em-panel table th:nth-child(5), .em-panel table td:nth-child(5) { display: none; }
++    }
++</style>
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 --- /tmp/orig_app/Views/User/dashboard.php	2026-08-24 23:02:52.619981516 +0000
 +++ app/Views/User/dashboard.php	2026-08-26 08:51:31.737717278 +0000
@@ -8216,6 +9016,89 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 -<?= $this->endSection() ?>
 \ No newline at end of file
 +<?= $this->endSection() ?>
+diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
+--- /tmp/orig_app/Views/User/settings.php	2026-08-24 23:02:52.620264827 +0000
++++ app/Views/User/settings.php	2026-08-26 15:02:30.338564597 +0000
+@@ -2,16 +2,28 @@
+ 
+ <?= $this->section('content') ?>
+ 
+-<div class="row">
+-    <div class="col-lg-12">
+-        <?= $this->include('Layout/msgStatus') ?>
++<?= $this->include('Layout/msgStatus') ?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-gear"></i> Settings</span>
++        <h1>Your settings</h1>
++        <p>Change your password or the name shown next to your account.</p>
++    </div>
++    <div class="em-head-act">
++        <a class="em-btn" href="<?= site_url('account') ?>">
++            <i class="bi bi-person-badge"></i> My account
++        </a>
+     </div>
++</header>
++
++<div class="row g-3">
+     <div class="col-lg-6">
+-        <div class="card mb-3">
+-            <div class="card-header h6 p-3 bg-primary">
+-                <i class="bi bi-shield-lock me-2"></i>Change Password
++        <section class="em-panel em-rise em-rise-1">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-shield-lock"></i> Change password</h2>
+             </div>
+-            <div class="card-body">
++            <div class="em-panel-b">
+                 <?= form_open() ?>
+ 
+                 <input type="hidden" name="password_form" value="1">
+@@ -37,20 +49,20 @@
+                     <?php endif; ?>
+                 </div>
+                 <div class="form-group my-2">
+-                    <button type="submit" class="btn btn-outline-primary">
++                    <button type="submit" class="em-btn is-primary">
+                         <i class="bi bi-key me-1"></i>Change Password
+                     </button>
+                 </div>
+                 <?= form_close() ?>
+             </div>
+-        </div>
++        </section>
+     </div>
+     <div class="col-lg-6">
+-        <div class="card mb-3">
+-            <div class="card-header h6 p-3 bg-dark">
+-                <i class="bi bi-person-lines-fill me-2"></i>Account Information
++        <section class="em-panel em-rise em-rise-2">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-person-lines-fill"></i> Account information</h2>
+             </div>
+-            <div class="card-body">
++            <div class="em-panel-b">
+                 <?= form_open() ?>
+ 
+                 <input type="hidden" name="fullname_form" value="1">
+@@ -62,13 +74,13 @@
+                     <?php endif; ?>
+                 </div>
+                 <div class="form-group my-2">
+-                    <button type="submit" class="btn btn-dark">
++                    <button type="submit" class="em-btn is-primary">
+                         <i class="bi bi-check2-circle me-1"></i>Update Account
+                     </button>
+                 </div>
+                 <?= form_close() ?>
+             </div>
+-        </div>
++        </section>
+     </div>
+ </div>
+ <?= $this->endSection() ?>
+\ No newline at end of file
 diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/error_404.php
 --- /tmp/orig_app/Views/errors/html/error_404.php	2026-08-24 23:02:52.624646037 +0000
 +++ app/Views/errors/html/error_404.php	2026-08-26 09:00:03.558655108 +0000
