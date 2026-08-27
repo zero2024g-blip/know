@@ -112,6 +112,13 @@ Nothing else in the connector needs to change. The message is capped at 160
 characters and stripped to one line before it is stored, so it cannot break a
 line-oriented client.
 
+**You do not need to touch the connector for the downtime credit.** When you
+turn maintenance off in the panel, the panel itself pushes every still-running
+key forward by exactly how long maintenance lasted — keys that had already
+expired, and keys nobody has activated yet, are left alone. That is done in
+the panel's own code (`SettingModel::creditDowntime()`); the connector only
+ever reads the expiry, it never has to know maintenance happened.
+
 ---
 
 ## Wire format

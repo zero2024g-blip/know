@@ -873,9 +873,11 @@ just the switch and the message.
 The two lines it used to print are in `CONNECTOR-PROTOCOL.md` instead, since
 the connector is your own file and you edit it by hand.
 
-## Maintenance does not pause a key's clock
+## Maintenance and a key's clock — and how the downtime is returned
 
-Asked and answered by measurement, because the honest answer is "no".
+Asked and answered by measurement. On its own, maintenance does **not** pause
+a key's clock — so the panel now gives the downtime back when you turn it off
+(next section). Here is why it has to.
 
 `expired_date` is an absolute timestamp written **once**, at the key's first
 successful check: `now + duration hours`. Nothing else in the codebase writes
@@ -896,10 +898,118 @@ before the activation branch, so `expired_date` stays NULL and its clock has
 not started. Verified — a fresh key checked during maintenance still had
 `expired_date = NULL` afterwards.
 
-To actually compensate for downtime the panel would have to record when
-maintenance started and, on turning it off, add the elapsed time to every key
-whose `expired_date` is in the future. That is a write across the whole key
-table, so it is not in this build.
+To compensate for the downtime the panel records when maintenance started
+and, on turning it off, adds the elapsed time to every key whose
+`expired_date` is still in the future. That is exactly what the next section
+describes — and it is now in the build.
+
+## Maintenance now gives the downtime back to the keys
+
+Follows directly from the finding above that maintenance does not pause a
+key's clock. It could not, before — the expiry is absolute — so instead the
+downtime is returned when the switch goes off.
+
+Turning maintenance ON stamps the moment it started. Turning it OFF, before
+the apps are served again, shifts every key that was still running forward by
+exactly how long maintenance lasted, so each one is left with the same time
+remaining it had when the switch was thrown. Two kinds of key are left alone,
+on purpose:
+
+- keys that had already expired before maintenance began — they were not
+  running, so there is nothing to give back;
+- keys nobody has activated yet (`expired_date IS NULL`) — their clock has
+  not started.
+
+Measured on the running panel:
+
+    before ON     ACTIVE-2H 7200s left   EXPIRED -3600s   NEVER-RUN NULL
+    ON, wait 15s
+    OFF           ACTIVE-2H 7200s left   EXPIRED -3600s   NEVER-RUN NULL
+                  (+15s added to the active key, the other two untouched)
+
+Guards, each tested:
+
+- **Only on the real transition.** Saving the page again while it is already
+  on does not restart the clock; saving off while already off credits
+  nothing. Verified the `since` stamp was unchanged across a second "on"
+  save.
+- **Concurrency.** The stamp is read `FOR UPDATE` and cleared inside the same
+  transaction as the key update, so two admins turning it off at the same
+  instant cannot both credit the same downtime. Two simultaneous turn-offs
+  added the downtime exactly once (100s, not 200s).
+- **A runaway is capped at 30 days.** A switch left on for a month, or a
+  server clock that jumps, cannot push every key years into the future; the
+  cap is applied and logged.
+
+The maintenance page shows how long it has been on (what will be returned)
+and, after a turn-off, how much went back to how many keys. It is all done in
+`SettingModel::creditDowntime()`; nothing else writes `expired_date` except
+this and the admin edit form.
+
+## A found hole: the DataTables endpoints put client column names into SQL
+
+Found during this review, fixed, and confirmed by test. Both list endpoints
+(`keys/api`, `admin/api/users`) are backed by
+`hermawan/codeigniter4-datatables`, which builds `ORDER BY` and `LIKE` from
+the request's **column identifiers** — `columns[i][name]` and
+`columns[i][data]` — treating them as trusted SQL fragments. They are not
+trusted: they come from the query string. A logged-in seller could send
+
+    columns[0][name] = CASE WHEN (SELECT SUBSTRING(password,1,1)
+                                    FROM users WHERE id_users=1)='$'
+                            THEN id_keys ELSE user_key END
+
+and read the admin's password hash out one character at a time by watching
+how the rows re-ordered — a blind SQL injection, available to any seller, and
+the row-scoping (`WHERE registrator = …`) did nothing to stop it because the
+injection was in the ORDER BY, not the data.
+
+The same library also read `columns[i][search][value]` and `search[value]`
+without checking they were there, so a hand-written or truncated request
+threw `Undefined array key` and the endpoint answered **500** with a stack
+trace instead of an empty table.
+
+Both are fixed in one place: `BaseController::normalizeDataTableRequest()`,
+called at the top of each endpoint with the list of columns that endpoint
+actually has. It
+
+- rebuilds the request into the exact shape the library expects, so a
+  missing key is filled in rather than fatal;
+- **whitelists** every column identifier against that list — anything else is
+  replaced with a safe default and made unsearchable, so no client string
+  ever reaches ORDER BY or LIKE;
+- caps the page length (500), the column count (32) and the sort-term count
+  (4), so `length=999999` cannot ask for the whole table.
+
+Verified after the fix: every injected `CASE WHEN` payload returns the
+**same** row order (the injection is inert), real search and sort still work,
+malformed and scalar-shaped requests answer 200 with an empty or sane result,
+and the row-scoping still holds — a seller's `keys/api` returns zero rows
+belonging to anyone else. Zero log lines across the whole run.
+
+## A full privilege sweep: what a seller cannot do
+
+Re-run this round as a matrix, admin vs. seller, against the running panel:
+
+    admin-only PAGES as a seller (GET)     -> all redirect to dashboard
+    admin/api/users as a seller            -> 403 JSON, no user list
+    POST create-referral / games save+del  -> nothing written, saldo unchanged
+    POST admin/edit + manage-users         -> level stays 2, saldo frozen
+    POST maintenance/save                  -> setting stays 0
+    another seller's key: view/edit/reset  -> refused, key untouched
+    keys/delete (admin only)               -> 403, key count unchanged
+    own key edit                           -> only status moves; game, user_key,
+                                              duration, devices, registrator,
+                                              expiry all frozen
+    keys/api                               -> only the seller's own rows
+    account/1 (admin's balance)            -> admin's figures not shown
+
+Also confirmed still holding from earlier rounds: the atomic balance debit
+(two concurrent buys on a 1-unit balance produce one key, not two), the
+device-slot lock (five devices racing a 2-device key bind exactly two), the
+login lockout (correct password refused while the IP is blocked), and the
+session fingerprint (a stolen cookie replayed from another browser is
+rejected).
 
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a

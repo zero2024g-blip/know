@@ -11383,8 +11383,22 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
  }
 diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseController.php
 --- /tmp/orig_app/Controllers/BaseController.php	2026-08-24 23:02:52.529199628 +0000
-+++ app/Controllers/BaseController.php	2026-08-26 08:11:56.109693212 +0000
-@@ -56,4 +56,91 @@
++++ app/Controllers/BaseController.php	2026-08-27 22:23:36.141582774 +0000
+@@ -23,6 +23,13 @@
+ 
+ class BaseController extends Controller
+ {
++    /** Most rows one DataTables call may ask for. */
++    private const DT_MAX_LENGTH = 500;
++
++    /** Most columns, and most sort terms, one call may carry. */
++    private const DT_MAX_COLUMNS = 32;
++    private const DT_MAX_ORDER   = 4;
++
+ 	/**
+ 	 * Instance of the main Request object.
+ 	 *
+@@ -56,4 +63,205 @@
  		//--------------------------------------------------------------------
  		// E.g.: $this->session = \Config\Services::session();
  	}
@@ -11402,6 +11416,120 @@ diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseContr
 +        '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
 +        '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
 +    ];
++
++    /**
++     * Put the DataTables request into the shape the library assumes.
++     *
++     * hermawan/codeigniter4-datatables reads `columns[i][search][value]` and
++     * `search[value]` without checking they are there. A request that omits
++     * them -- a hand-written call, a proxy that drops array parameters, a
++     * half-loaded page -- throws "Undefined array key" and the endpoint
++     * answers 500 with a stack trace in the log instead of an empty table.
++     *
++     * So the shape is filled in here before the library sees it, and three
++     * things are pinned down on the way through:
++     *
++     *   - the page length, because `length=999999` would otherwise ask the
++     *     database for the whole table in one query;
++     *   - `columns[i][data]` and `columns[i][name]`, which the library puts
++     *     into ORDER BY and LIKE **as written** whenever they do not match a
++     *     column it knows. `columns[0][name]=if(1=1,sleep(0),1)` reached the
++     *     server as SQL. Only names this endpoint declares are allowed
++     *     through now; anything else is replaced with a safe default and
++     *     made unsearchable;
++     *   - how many columns and sort terms one request may carry.
++     *
++     * @param list<string> $allowedData  values `columns[i][data]` may take
++     * @param list<string> $allowedNames values `columns[i][name]` may take
++     */
++    protected function normalizeDataTableRequest(array $allowedData, array $allowedNames = []): void
++    {
++        $safeData = $allowedData[0] ?? '';
++        foreach (['get', 'post'] as $source) {
++            $in = $source === 'get' ? $this->request->getGet() : $this->request->getPost();
++
++            if (! is_array($in)) {
++                $in = [];
++            }
++
++            // A request with none of these parameters at all is normalized
++            // too: the library reads them regardless of whether the caller
++            // sent any, so an empty table is the right answer, not a 500.
++            if ($source === 'post' && $in === [] && strtolower($this->request->getMethod()) !== 'post') {
++                continue;
++            }
++
++            // Written back as strings: CodeIgniter's Superglobals::get() is
++            // typed array|string|null, and an int in there is a TypeError on
++            // the next read.
++            $length = (int) ($in['length'] ?? 10);
++            // -1 is DataTables for "all"; anything else is clamped to a page.
++            $length = $length === -1 ? self::DT_MAX_LENGTH
++                : min(max($length, 1), self::DT_MAX_LENGTH);
++
++            $in['draw']   = (string) (int) ($in['draw'] ?? 1);
++            $in['start']  = (string) max(0, (int) ($in['start'] ?? 0));
++            $in['length'] = (string) $length;
++
++            // Every one of these can arrive as a scalar -- `?search=oops`
++            // -- and indexing a string by 'value' is a fatal on PHP 8.
++            $search = $in['search'] ?? [];
++            $search = is_array($search) ? $search : [];
++            $in['search'] = [
++                'value' => is_scalar($search['value'] ?? null) ? (string) $search['value'] : '',
++                'regex' => 'false',
++            ];
++
++            $columns = [];
++            foreach (array_slice((array) ($in['columns'] ?? []), 0, self::DT_MAX_COLUMNS, true) as $i => $col) {
++                $col = is_array($col) ? $col : [];
++                $colSearch = $col['search'] ?? [];
++                $colSearch = is_array($colSearch) ? $colSearch : [];
++
++                $data = is_scalar($col['data'] ?? null) ? (string) $col['data'] : '';
++                $name = is_scalar($col['name'] ?? null) ? (string) $col['name'] : '';
++
++                // The whitelist. A column this endpoint never declared is not
++                // an error worth a 500 -- it is simply not a column, so it
++                // sorts by the default and searches nothing.
++                $known = in_array($data, $allowedData, true);
++                $data  = $known ? $data : $safeData;
++                $name  = in_array($name, $allowedNames, true) ? $name : '';
++
++                $columns[$i] = [
++                    'data'       => $data,
++                    'name'       => $name,
++                    'searchable' => (! $known || ($col['searchable'] ?? 'true') === 'false') ? 'false' : 'true',
++                    'orderable'  => ($col['orderable'] ?? 'true') === 'false' ? 'false' : 'true',
++                    'search'     => [
++                        'value' => is_scalar($colSearch['value'] ?? null) ? (string) $colSearch['value'] : '',
++                        'regex' => 'false',
++                    ],
++                ];
++            }
++            $in['columns'] = $columns;
++
++            $order = [];
++            foreach (array_slice((array) ($in['order'] ?? []), 0, self::DT_MAX_ORDER, true) as $i => $ord) {
++                $ord = is_array($ord) ? $ord : [];
++                $column = (int) ($ord['column'] ?? 0);
++
++                // A sort term pointing at a column that was not sent orders
++                // by nothing the library can name, so it is dropped.
++                if (! isset($columns[$column])) {
++                    continue;
++                }
++
++                $order[$i] = [
++                    'column' => (string) $column,
++                    'dir'    => ($ord['dir'] ?? 'asc') === 'desc' ? 'desc' : 'asc',
++                ];
++            }
++            $in['order'] = $order;
++
++            $this->request->setGlobal($source, $in);
++        }
++    }
 +
 +    protected function clientIp(): string
 +    {
@@ -12474,7 +12602,7 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-26 20:33:44.148181586 +0000
++++ app/Controllers/Keys.php	2026-08-27 22:25:21.570229105 +0000
 @@ -2,6 +2,9 @@
  
  namespace App\Controllers;
@@ -12574,7 +12702,25 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'time' => $this->time,
          ];
          return view('Keys/list', $data);
-@@ -88,35 +64,52 @@
+@@ -81,42 +57,69 @@
+ 
+     public function api_get_keys()
+     {
+-        // ? API for DataTable Keys
++        // ? API for DataTable Keys.
++        //
++        // The two lists are the columns this endpoint really has: the select
++        // aliases in KeysModel::API_getKeys(), and the real column names the
++        // list page sends. Anything else the client asks to sort or search by
++        // is not a column here, and must never reach the query.
++        $this->normalizeDataTableRequest(
++            ['id', 'game', 'user_key', 'duration', 'expired', 'max_devices', 'devices', 'status', 'registrator'],
++            ['id_keys', 'game', 'user_key', 'duration', 'expired_date', 'max_devices', 'devices', 'status', 'registrator']
++        );
++
+         $model = $this->model;
+         return $model->API_getKeys();
+     }
  
      public function api_key_reset()
      {
@@ -12633,16 +12779,16 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -        ];
 +        $total = $db_key->devices ? explode(',', $db_key->devices) : [];
 +        $rules = ['devices_total' => count($total), 'devices_max' => (int) $db_key->max_devices];
- 
--        $real_response = array_merge($data, $rules);
--        return $this->response->setJSON($real_response);
++
 +        if ($db_key->devices && $reset) {
 +            $model->set('devices', null)
 +                ->where('user_key', $keys)
 +                ->update();
 +            $rules = ['reset' => true, 'devices_total' => 0, 'devices_max' => (int) $db_key->max_devices];
 +        }
-+
+ 
+-        $real_response = array_merge($data, $rules);
+-        return $this->response->setJSON($real_response);
 +        return $this->response->setJSON(array_merge(
 +            ['registered' => true, 'keys' => $keys, 'csrf' => csrf_hash()],
 +            $rules
@@ -12650,7 +12796,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function edit_key($key = false)
-@@ -133,7 +126,6 @@
+@@ -133,7 +136,6 @@
                          'title' => 'Key',
                          'user' => $user,
                          'key' => $dKey,
@@ -12658,7 +12804,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                          'time' => $this->time,
                          'key_info' => getDevice($dKey->devices),
                          'messages' => setMessage('Please carefuly edit information'),
-@@ -148,12 +140,172 @@
+@@ -148,12 +150,172 @@
          return redirect()->to('keys')->with('msgDanger', $msgDanger);
      }
  
@@ -12832,7 +12978,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  
          if (!$dKey) {
              $msgDanger = "The user key no longer exists~";
-@@ -273,14 +425,28 @@
+@@ -273,14 +435,28 @@
              $message = setMessage("Please top up to your beloved admin.", 'warning');
          }
  
@@ -12868,7 +13014,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'validation' => $validation,
          ];
          return view('Keys/generate', $data);
-@@ -293,9 +459,23 @@
+@@ -293,9 +469,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -12894,7 +13040,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
          $form_rules = [
              'game' => [
                  'label' => 'Games',
-@@ -306,15 +486,18 @@
+@@ -306,15 +496,18 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -12915,7 +13061,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +505,9 @@
+@@ -322,7 +515,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -12926,7 +13072,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +516,146 @@
+@@ -331,57 +526,146 @@
          ];
  
          $validation = Services::validation();
@@ -13119,8 +13265,8 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  }
 diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.php
 --- /tmp/orig_app/Controllers/Maintenance.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Maintenance.php	2026-08-27 21:24:55.192011067 +0000
-@@ -0,0 +1,123 @@
++++ app/Controllers/Maintenance.php	2026-08-27 22:15:18.611057985 +0000
+@@ -0,0 +1,171 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -13169,6 +13315,8 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +            'message'  => SettingModel::maintenanceMessage(),
 +            'stamp'    => $this->settings->maintenanceStamp(),
 +            'default'  => SettingModel::DEFAULT_MESSAGE,
++            'since'    => (int) SettingModel::get(SettingModel::MAINTENANCE_SINCE, 0),
++            'credit'   => SettingModel::lastCredit(),
 +        ]);
 +    }
 +
@@ -13191,7 +13339,24 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +            $msg = mb_substr(preg_replace('/\s+/u', ' ', trim((string) $raw)), 0, 160);
 +        }
 +
++        $was    = SettingModel::maintenance();
++        $credit = null;
++
 +        try {
++            // Turning it ON: remember when, so the downtime can be given back.
++            // Only on the transition -- saving the page again while it is
++            // already on must not restart the clock.
++            if ($on === '1' && ! $was) {
++                $this->settings->put(SettingModel::MAINTENANCE_SINCE, (string) time(), $this->me->username);
++            }
++
++            // Turning it OFF: hand the downtime back to every key that was
++            // still running, BEFORE the apps start being served again, so no
++            // key is charged for the gap between the two writes.
++            if ($on === '0' && $was) {
++                $credit = $this->settings->creditDowntime($this->me->username);
++            }
++
 +            $this->settings->put(SettingModel::MAINTENANCE, $on, $this->me->username);
 +
 +            if ($msg !== null) {
@@ -13215,6 +13380,16 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +            ? 'Maintenance is ON. Apps will be refused until you turn it off.'
 +            : 'Maintenance is OFF. Apps are being served again.';
 +
++        if ($credit !== null) {
++            $flash .= ' ' . $this->humanSeconds($credit['seconds'])
++                . ' given back to ' . $credit['keys']
++                . ($credit['keys'] === 1 ? ' key' : ' keys') . '.';
++
++            if ($credit['clamped']) {
++                $flash .= ' (Capped at 30 days.)';
++            }
++        }
++
 +        // The banner posts from whatever page the admin happened to be on, and
 +        // sends it along so they land back there with the banner gone rather
 +        // than being thrown to this screen.
@@ -13225,6 +13400,25 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +        }
 +
 +        return redirect()->to('admin/maintenance')->with('msgSuccess', $flash);
++    }
++
++    /** "1h 4m", "45s" -- short enough to sit inside a flash message. */
++    private function humanSeconds(int $s): string
++    {
++        if ($s < 60) {
++            return $s . 's';
++        }
++
++        $d = intdiv($s, 86400);
++        $h = intdiv($s % 86400, 3600);
++        $m = intdiv($s % 3600, 60);
++
++        $bits = [];
++        if ($d) { $bits[] = $d . 'd'; }
++        if ($h) { $bits[] = $h . 'h'; }
++        if ($m && ! $d) { $bits[] = $m . 'm'; }
++
++        return implode(' ', $bits);
 +    }
 +
 +    /**
@@ -13246,7 +13440,7 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +}
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
-+++ app/Controllers/User.php	2026-08-27 01:22:37.043249858 +0000
++++ app/Controllers/User.php	2026-08-27 22:23:58.759307745 +0000
 @@ -2,42 +2,45 @@
  
  namespace App\Controllers;
@@ -13310,7 +13504,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          ];
          return view('User/dashboard', $data);
      }
-@@ -98,9 +101,18 @@
+@@ -98,9 +101,25 @@
  
      public function api_get_users()
      {
@@ -13328,11 +13522,18 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 +                ->setJSON(['error' => 'Access denied.']);
 +        }
 +
++        // Same whitelist idea as the keys endpoint: only the aliases
++        // UserModel::API_getUser() selects, and the real column names.
++        $this->normalizeDataTableRequest(
++            ['id', 'username', 'fullname', 'saldo', 'level', 'status', 'uplink'],
++            ['id_users', 'username', 'fullname', 'saldo', 'level', 'status', 'uplink']
++        );
++
 +        return $this->model->API_getUser();
      }
  
      public function manage_users()
-@@ -114,7 +126,10 @@
+@@ -114,7 +133,10 @@
          $data = [
              'title' => 'Users',
              'user' => $user,
@@ -13344,7 +13545,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation
          ];
-@@ -137,7 +152,6 @@
+@@ -137,7 +159,6 @@
              'title' => 'Settings',
              'user' => $user,
              'target' => $model->getUser($userid),
@@ -13352,7 +13553,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation,
          ];
-@@ -211,19 +225,71 @@
+@@ -211,19 +232,71 @@
              $saldo = $this->request->getPost('saldo');
              $uplink = $this->request->getPost('uplink');
  
@@ -13429,7 +13630,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          }
      }
      
-@@ -237,26 +303,152 @@
+@@ -237,26 +310,152 @@
  
          $user = $this->user;
          $validation = Services::validation();
@@ -13585,7 +13786,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $msg = "Wrong current password.";
              $validation->setError('current', $msg);
          } elseif ($current == $password) {
-@@ -285,7 +477,10 @@
+@@ -285,7 +484,10 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Something wrong! Please check the form');
          } else {
@@ -13597,7 +13798,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $this->model->update(session('userid'), ['password' => $newPassword]);
              return redirect()->back()->with('msgSuccess', 'Password Successfuly Changed.');
          }
-@@ -315,7 +510,7 @@
+@@ -315,7 +517,7 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
          } else {
@@ -14819,8 +15020,8 @@ diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionMode
 +}
 diff -ruN /tmp/orig_app/Models/SettingModel.php app/Models/SettingModel.php
 --- /tmp/orig_app/Models/SettingModel.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Models/SettingModel.php	2026-08-27 00:59:23.457174779 +0000
-@@ -0,0 +1,115 @@
++++ app/Models/SettingModel.php	2026-08-27 22:14:58.919483653 +0000
+@@ -0,0 +1,238 @@
 +<?php
 +
 +namespace App\Models;
@@ -14846,7 +15047,22 @@ diff -ruN /tmp/orig_app/Models/SettingModel.php app/Models/SettingModel.php
 +    public const MAINTENANCE     = 'connector.maintenance';
 +    public const MAINTENANCE_MSG = 'connector.maintenance_message';
 +
++    /** When the current maintenance began, as a unix timestamp. Empty when off. */
++    public const MAINTENANCE_SINCE = 'connector.maintenance_since';
++
++    /** What the last turn-off gave back: "unixtime|seconds|keys". */
++    public const MAINTENANCE_CREDIT = 'connector.maintenance_credit';
++
 +    public const DEFAULT_MESSAGE = 'Server is under Maintenance.';
++
++    /**
++     * The most downtime that will ever be handed back in one go: 30 days.
++     *
++     * A switch left on by accident, or a clock that jumped, must not push
++     * every key in the table years into the future. Anything longer is
++     * credited as 30 days and said plainly in the log.
++     */
++    public const MAX_CREDIT_SECONDS = 30 * 24 * 3600;
 +
 +    /**
 +     * Read once per request.
@@ -14924,6 +15140,114 @@ diff -ruN /tmp/orig_app/Models/SettingModel.php app/Models/SettingModel.php
 +        $msg = trim((string) self::get(self::MAINTENANCE_MSG, ''));
 +
 +        return $msg !== '' ? $msg : self::DEFAULT_MESSAGE;
++    }
++
++    /**
++     * Give the maintenance downtime back to every key that was still running.
++     *
++     * Keys hold an absolute expiry, so a key's clock keeps going while the
++     * apps are refused. Turning maintenance off shifts every unexpired key
++     * forward by exactly how long it was on -- which is what "the clock was
++     * paused" means, and leaves each key with the same time remaining it had
++     * when the switch was thrown.
++     *
++     * Deliberately untouched:
++     *   - keys that had already expired before maintenance began. They were
++     *     not running, so there is nothing to give back.
++     *   - keys never activated (expired_date IS NULL). Their clock has not
++     *     started, so they lost nothing.
++     *
++     * Runs in one transaction, and the "since" marker is taken with
++     * FOR UPDATE and cleared inside it. Two admins turning the switch off at
++     * the same moment cannot both credit the same downtime.
++     *
++     * @return array{seconds:int,keys:int,clamped:bool}|null
++     *         null when there is nothing to credit.
++     */
++    public function creditDowntime(?string $actor = null): ?array
++    {
++        $db = \Config\Database::connect();
++        $db->transBegin();
++
++        try {
++            $row = $db->query(
++                'SELECT value FROM settings WHERE name = ? FOR UPDATE',
++                [self::MAINTENANCE_SINCE]
++            )->getRowObject();
++
++            $since = (int) ($row->value ?? 0);
++            $now   = time();
++
++            // No marker, or a clock that ran backwards: nothing to give back.
++            if ($since <= 0 || $since >= $now) {
++                $db->transRollback();
++
++                return null;
++            }
++
++            $seconds = $now - $since;
++            $clamped = $seconds > self::MAX_CREDIT_SECONDS;
++
++            if ($clamped) {
++                log_message('warning',
++                    'Maintenance ran for {real}s, longer than the {cap}s cap; crediting the cap.',
++                    ['real' => $seconds, 'cap' => self::MAX_CREDIT_SECONDS]);
++                $seconds = self::MAX_CREDIT_SECONDS;
++            }
++
++            // Clear the marker first, inside the same transaction: if the
++            // update below fails, the rollback puts the marker back too.
++            $db->query('UPDATE settings SET value = ?, updated_at = NOW() WHERE name = ?',
++                ['', self::MAINTENANCE_SINCE]);
++
++            $db->query(
++                'UPDATE keys_code
++                    SET expired_date = DATE_ADD(expired_date, INTERVAL ? SECOND)
++                  WHERE expired_date IS NOT NULL
++                    AND expired_date > FROM_UNIXTIME(?)',
++                [$seconds, $since]
++            );
++            $keys = $db->affectedRows();
++
++            if ($db->transStatus() === false) {
++                throw new \RuntimeException('the key update did not go through');
++            }
++
++            $db->transCommit();
++            self::$cache = [];
++
++            log_message('notice',
++                'Maintenance downtime of {s}s returned to {n} keys by {who}.',
++                ['s' => $seconds, 'n' => $keys, 'who' => $actor ?? 'unknown']);
++
++            $this->put(self::MAINTENANCE_CREDIT, $now . '|' . $seconds . '|' . $keys, $actor);
++
++            return ['seconds' => $seconds, 'keys' => $keys, 'clamped' => $clamped];
++        } catch (\Throwable $e) {
++            $db->transRollback();
++            log_message('critical',
++                'Could not return the maintenance downtime to the keys: {msg}',
++                ['msg' => $e->getMessage()]);
++
++            return null;
++        }
++    }
++
++    /**
++     * What the last turn-off gave back, or null if it never has.
++     *
++     * @return array{at:int,seconds:int,keys:int}|null
++     */
++    public static function lastCredit(): ?array
++    {
++        $raw = (string) self::get(self::MAINTENANCE_CREDIT, '');
++        $bits = explode('|', $raw);
++
++        if (count($bits) !== 3 || (int) $bits[0] <= 0) {
++            return null;
++        }
++
++        return ['at' => (int) $bits[0], 'seconds' => (int) $bits[1], 'keys' => (int) $bits[2]];
 +    }
 +
 +    /** Who turned it on, and when. Null if it has never been set. */
@@ -15599,8 +15923,8 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +
 diff -ruN /tmp/orig_app/Views/Admin/maintenance.php app/Views/Admin/maintenance.php
 --- /tmp/orig_app/Views/Admin/maintenance.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/Admin/maintenance.php	2026-08-27 21:24:15.951930210 +0000
-@@ -0,0 +1,120 @@
++++ app/Views/Admin/maintenance.php	2026-08-27 22:15:32.052598270 +0000
+@@ -0,0 +1,145 @@
 +<?= $this->extend('Layout/Starter') ?>
 +
 +<?= $this->section('content') ?>
@@ -15636,6 +15960,31 @@ diff -ruN /tmp/orig_app/Views/Admin/maintenance.php app/Views/Admin/maintenance.
 +            returns the message below instead. The panel itself keeps working —
 +            you need it to turn this back off.
 +        </p>
++
++        <p class="em-note">
++            <i class="bi bi-clock-history"></i>
++            Nobody loses time: when you turn it off, every key that was still
++            running is pushed forward by exactly how long maintenance lasted.
++            Keys that had already expired, and keys nobody has activated yet,
++            are left alone.
++        </p>
++
++        <?php if ($isOn && $since > 0) : ?>
++            <p class="em-note">
++                On since <b><?= $time::createFromTimestamp($since)->humanize() ?></b>
++                — that is what will be given back to the keys.
++            </p>
++        <?php endif; ?>
++
++        <?php if ($credit) : ?>
++            <p class="em-note">
++                Last time it was turned off,
++                <b><?= (int) round($credit['seconds'] / 60) ?> minute<?= (int) round($credit['seconds'] / 60) === 1 ? '' : 's' ?></b>
++                went back to <b><?= (int) $credit['keys'] ?></b>
++                key<?= (int) $credit['keys'] === 1 ? '' : 's' ?>,
++                <?= $time::createFromTimestamp($credit['at'])->humanize() ?>.
++            </p>
++        <?php endif; ?>
 +
 +        <?php if ($stamp && $stamp->updated_by) : ?>
 +            <p class="em-note">
