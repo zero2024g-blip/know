@@ -568,6 +568,37 @@ on `encryption.key`. Changing that key invalidates every open session at
 once, so everybody gets "your session was ended for security" and signs in
 again. Harmless, but surprising if you rotate the key and do not expect it.
 
+## A missing `.env` used to fail in the worst possible way
+
+Reported from the live install and reproduced here exactly: the panel came
+up, rendered, and then every link went to `https://localhost:8080/…`. The
+design was gone too.
+
+One cause for all of it. Without a readable `.env`, CodeIgniter falls back to
+`Config/App.php`, whose stock `baseURL` is `http://localhost:8080/`. Pages
+still render — so it looks like the panel works — but every URL it builds,
+including every stylesheet, points at localhost.
+`forceGlobalSecureRequests` then upgrades the scheme, which is why the
+redirect was `https://localhost`. Nothing on screen mentioned `.env`.
+
+`setup-check.php` now runs in both front controllers before the framework
+boots, and answers instead of failing silently. Four states, each reproduced
+and tested rather than reasoned about:
+
+| State | What it says |
+|---|---|
+| no `.env` | how to make one from `env.template`, plus the Show-hidden-files hint File Manager needs |
+| `.env` unreadable | set it to 644 |
+| `.env` never edited, or `baseURL` still localhost | the exact line to write |
+| `.env` inside `public/` instead of the root | "not found" — **and it prints the absolute path it looked at** |
+
+That last line is the one that matters: it tells you where the file has to
+be, on your server, in your layout. The check costs one `file_exists()` once
+the panel is configured, and is invisible from then on.
+
+It lives at the project root, not in `app/`, so it is in the zip but not in
+`app.patch`.
+
 ## Cross-platform check
 
 Every page was loaded on twelve device profiles — iPhone SE / 14 Pro / 14 Pro
