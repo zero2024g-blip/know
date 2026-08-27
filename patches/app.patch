@@ -15139,7 +15139,7 @@ diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 --- /tmp/orig_app/Views/Admin/games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/Admin/games.php	2026-08-27 01:37:26.113707496 +0000
++++ app/Views/Admin/games.php	2026-08-27 17:48:58.020913162 +0000
 @@ -0,0 +1,443 @@
 +<?= $this->extend('Layout/Starter') ?>
 +
@@ -16805,8 +16805,8 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
          $("#devices").attr('rows', $(this).val());
 diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 --- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
-+++ app/Views/Keys/list.php	2026-08-27 01:33:34.491896879 +0000
-@@ -1,60 +1,208 @@
++++ app/Views/Keys/list.php	2026-08-27 17:47:58.808983691 +0000
+@@ -1,60 +1,209 @@
  <?= $this->extend('Layout/Starter') ?>
  
  <?= $this->section('content') ?>
@@ -16833,7 +16833,8 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +        </button>
 +        <?php if ((int) $user->level === 1) : ?>
 +            <a class="em-btn" href="<?= site_url('admin/deleted-keys') ?>"
-+               title="Keys that were deleted, and by whom">
++               title="Keys that were deleted, and by whom"
++               aria-label="Deleted keys">
 +                <i class="bi bi-archive"></i> <span class="em-blur-label">Deleted</span>
 +            </a>
 +        <?php endif; ?>
@@ -17057,7 +17058,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
          // ── تنها تنظیمِ صفحه‌بندی ──
          // این عدد = تعداد شماره‌صفحه‌ها (پیش‌فرض ۷). تعدادِ عددهای پشت‌سرهمِ اولِ لیست
          // برابرِ (این عدد − ۲) ئه. پس ۵ ⇒ «۱ ۲ ۳ … ۳۴۶»، ۶ ⇒ «۱ ۲ ۳ ۴ … ۳۴۶» و…
-@@ -63,10 +211,11 @@
+@@ -63,10 +212,11 @@
          var table = $('#datatable').DataTable({
              processing: true,
              serverSide: true,
@@ -17070,7 +17071,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
              columns: [{
                      data: 'id',
                      name: 'id_keys'
-@@ -76,55 +225,143 @@
+@@ -76,55 +226,143 @@
                  },
                  {
                      data: 'user_key',
@@ -17238,7 +17239,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
      function resetUserKey(keys) {
          Swal.fire({
              title: 'Are you sure?',
-@@ -141,18 +378,25 @@
+@@ -141,18 +379,25 @@
                      title: 'Please wait...'
                  })
  

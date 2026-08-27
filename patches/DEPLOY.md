@@ -608,6 +608,46 @@ the panel is configured, and is invisible from then on.
 It lives at the project root, not in `app/`, so it is in the zip but not in
 `app.patch`.
 
+## Two ways a front-end change shipped as a no-op
+
+Both reported from the live panel, both silent, both now checked by
+`tools/check-assets.sh` which exits non-zero on either.
+
+**Ten icons were blank.** The Bootstrap Icons font is subsetted to the glyphs
+the views actually use — 6 KB instead of 120 KB — and `subset-icons.sh` has to
+be re-run when a new `bi-` class appears. It was not. So every icon added over
+the last several rounds rendered as empty space on the live server:
+`bi-archive`, `bi-cone-striped`, `bi-funnel`, `bi-laptop`, `bi-play-circle`,
+`bi-plug`, `bi-plug-fill`, `bi-shield-exclamation`, `bi-sliders`,
+`bi-toggles`. Deleted Keys and Maintenance in the nav had no icon; the
+Deleted button on the keys list, which is icon-only on a phone, was a
+completely empty box — no icon because the glyph was missing, no label
+because `.em-blur-label` hides it below 700px.
+
+**And the compressed twins were a day stale.** `.htaccess` serves
+`foo.css.br` in preference to `foo.css` whenever the browser accepts brotli,
+which every browser does. `ember.css` and the icon CSS had `.br`/`.gz` copies
+from the previous day, so *every stylesheet change since then reached nobody* —
+the pager, the maintenance banner, the DataTables wrapping — while looking
+perfectly correct on disk and in git. Regenerated with `precompress.sh`, and
+verified by decompressing the `.br` and checking the new icon classes are
+inside it.
+
+The check catches both, and I proved it bites by breaking each on purpose.
+
+## The panel header overlapped on a phone
+
+`.em-panel-h h2` carried `flex: 1`, which is `1 1 0%` — it tells the row the
+heading is happy at zero width. On the Games page at 393px the heading got
+70px while the pills beside it kept 268px, and the icon, the code pill and
+the game name, none of which shrink below their content, spilled out and drew
+on top of one another.
+
+`flex: 1 1 auto` makes the heading ask for the width it needs, so when it and
+the buttons cannot share a line the row wraps instead. The heading also wraps
+internally now, so a long game name goes under the code pill rather than
+through it. It is a shared rule, so every panel header on every page gets it.
+
 ## Cross-platform check
 
 Every page was loaded on twelve device profiles — iPhone SE / 14 Pro / 14 Pro
