@@ -591,8 +591,17 @@ and tested rather than reasoned about:
 | `.env` unreadable | set it to 644 |
 | `.env` never edited, or `baseURL` still localhost | the exact line to write |
 | `.env` inside `public/` instead of the root | "not found" — **and it prints the absolute path it looked at** |
+| a file called `env.`, `env`, `.env.txt`, `ENV`… | names the file you actually have, and what to rename it to |
 
-That last line is the one that matters: it tells you where the file has to
+That last row was added after watching it happen: the file on the live
+server was named **`env.`** — the dot on the end instead of the front. It sat
+in the file listing looking correct, and CodeIgniter, which reads the name
+`.env` and nothing else, never saw it. Telling someone "no .env found" while
+they are looking straight at their env file is useless, so the check now
+scans for the near miss and names it back to them. Six wrong spellings
+tested: `env.`, `env`, `.env.txt`, `env.txt`, `ENV`, `.ENV`.
+
+That path line is the other one that matters: it tells you where the file has to
 be, on your server, in your layout. The check costs one `file_exists()` once
 the panel is configured, and is invisible from then on.
 
