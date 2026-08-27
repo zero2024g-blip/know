@@ -324,7 +324,38 @@ CREATE TABLE IF NOT EXISTS `keys_deleted` (
   KEY `idx_kd_when`  (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+
+-- ---------------------------------------------------------------------
+-- 9. Panel settings
+-- ---------------------------------------------------------------------
+-- One row per setting, so an admin can change behaviour from the panel
+-- instead of editing a file. Today it holds the maintenance switch for
+-- the app connector:
+--
+--   connector.maintenance          '1' = refuse every key check
+--   connector.maintenance_message  what the app is told instead
+--
+-- Reading it FAILS OPEN. If this table is missing or unreachable the
+-- apps keep working, because a database hiccup must not look like a
+-- deliberate shutdown. The failure is logged at 'critical'.
+
+CREATE TABLE IF NOT EXISTS `settings` (
+  `name`       VARCHAR(64) NOT NULL,
+  `value`      TEXT        NULL,
+  `updated_by` VARCHAR(66) NULL,
+  `created_at` DATETIME    NULL,
+  `updated_at` DATETIME    NULL,
+  PRIMARY KEY (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Off to begin with. INSERT IGNORE so re-running never switches a live
+-- panel back on or off under you.
+INSERT IGNORE INTO `settings` (`name`, `value`, `created_at`, `updated_at`)
+VALUES ('connector.maintenance', '0', NOW(), NOW());
+
+
 -- Check:
 --     SELECT username, device, login_at, logout_at, end_reason
 --       FROM login_sessions ORDER BY id_session DESC LIMIT 10;
 --     SELECT user_key, deleted_by, created_at FROM keys_deleted ORDER BY id_deleted DESC;
+--     SELECT name, value, updated_by, updated_at FROM settings;

@@ -450,6 +450,124 @@ I unpacked the finished zip into an empty directory, pointed a server at it
 in exactly that layout and ran the whole panel on PHP 8.5: every page 200,
 the pager working, the connector warning showing, and no log lines.
 
+## CodeIgniter is now 4.7.4, not 4.1.5
+
+This is the biggest change in this round, and it is a security change.
+
+4.1.5 was released in November 2021. Since then **sixteen** security
+advisories have been published that affect it. Pulled from Packagist's
+advisory database rather than memory:
+
+| CVE | Severity | Fixed in | What |
+|---|---|---|---|
+| CVE-2022-21647 | high | 4.1.6 | Deserialization of untrusted data |
+| CVE-2022-21715 | medium | 4.1.8 | XSS in `API\ResponseTrait` |
+| CVE-2022-24711 | **critical** | 4.1.9 | Remote CLI command execution |
+| CVE-2022-24712 | medium | 4.1.9 | **CSRF protection bypass** |
+| CVE-2022-39284 | low | 4.2.7 | Cookie Secure/HttpOnly not set |
+| CVE-2022-46170 | high | 4.2.11 | Session handler vulnerability |
+| CVE-2022-23556 | high | 4.2.11 | **IP spoofing behind a proxy** |
+| CVE-2023-32692 | **critical** | 4.3.5 | RCE in validation placeholders |
+| CVE-2023-46240 | high | 4.4.3 | Detailed error page in production |
+| CVE-2024-29904 | high | 4.4.7 | Denial of service in the Language class |
+| CVE-2025-24013 | medium | 4.5.8 | Header name/value validation |
+| CVE-2025-54418 | **critical** | 4.6.2 | ImageMagick command injection |
+| CVE-2026-48062 | **critical** | 4.7.2 | Upload extension bypass (`ext_in`) |
+| CVE-2026-63220 | medium | 4.7.4 | Spoofable forwarded HTTPS headers |
+| CVE-2026-63222 | high | 4.7.4 | Path traversal in `UploadedFile::move()` |
+| CVE-2026-63223 | **critical** | 4.7.4 | Upload validation bypass (`is_image`, `mime_in`) |
+
+Not all of them were reachable in this panel — it has no file upload, so the
+four upload and ImageMagick ones were never exploitable here. But two of them
+sit directly on paths this panel depends on: **CVE-2022-24712** is a bypass of
+exactly the CSRF protection every form in the panel relies on, and
+**CVE-2022-23556** lets a forged header spoof the client IP, which is what
+every rate limiter in this panel counts against.
+
+So the framework is replaced rather than patched. `composer audit` on the
+result reports no known advisories.
+
+**This raises the minimum PHP version to 8.2.** CodeIgniter 4.7 will not
+start below it. Set the PHP version in hPanel *before* uploading; if you
+forget, you get a plain "Your PHP version must be 8.2 or higher" page rather
+than a broken panel. It was tested on 8.5 as well.
+
+`tools/patch-php85.php` is gone with the upgrade: it existed to fix a
+`Time::createFromTimestamp` clash with PHP 8.4, which 4.7 fixes upstream.
+
+The port was not a leap of faith. Every page was loaded, every write path
+exercised (key generation and its debit, deletion and its archive, device
+reset, the maintenance switch, a balance edit and the ledger row it writes,
+referral creation, registration, the public key check, logout), both
+DataTables endpoints called, the connector's AES-256-GCM round-tripped, and
+the stolen-cookie test repeated. Table rendering was measured column by
+column on both versions at 375px and came out **identical**. Zero log lines.
+
+`vendor/` also went from 2.4 GB to 22 MB, because the development
+dependencies are no longer shipped.
+
+## One real hole, found by the upgrade
+
+`admin/api/users` — the DataTables endpoint behind Manage Users — was
+**answering sellers**.
+
+The route was declared as a group nested inside the `admin`-filtered group:
+
+    $routes->group('admin', ['filter' => 'admin'], function ($routes) {
+        $routes->group('api', function ($routes) {
+            $routes->match(['get', 'post'], 'users', 'User::api_get_users');
+        });
+    });
+
+On 4.1.5 the nested group inherited the filter. On 4.7 it does not — and
+`php spark routes` still *lists* `admin` against that route, so the route
+table looked correct while the endpoint was open. A seller got HTTP 200 and
+a JSON body.
+
+What leaked was bounded: `UserModel::API_getUser()` scopes to
+`uplink = <your username>`, so a seller saw only accounts listed under them —
+today, none. But it was open, it looked closed, and any future route added
+inside that nested group would have been open too.
+
+Fixed twice over: the group is flattened, so there is no inheritance to
+reason about, and `api_get_users()` now checks the level itself and returns
+403. Both were verified — a seller now gets 403, an admin still gets the data.
+
+Every other admin route was then probed the same way, GET and POST, as a
+seller: all refused, and nothing in the database changed.
+
+## The rest of the review
+
+What was checked, and what it found:
+
+- **Output escaping.** Swept every view for unescaped variables. The 27
+  `$validation->getError()` echoes were the only ones, and they are not
+  reachable as XSS — no built-in message in CodeIgniter interpolates
+  `{value}`, and the one rule that echoes `{param}` (`in_list`) is fed from
+  game codes, which are `alpha_numeric`. They are escaped now anyway: it
+  costs nothing and it removes a class of bug rather than an instance.
+- **JavaScript injection.** Every PHP value interpolated into a `<script>`
+  block goes through `json_encode` with the hex flags, or an `(int)` cast, or
+  is an asset URL. Nothing user-controlled reaches JS unescaped.
+- **SQL.** Three raw queries in the whole application; all three are
+  parameterised with `?` placeholders. Everything else is Query Builder.
+- **Authorization.** Every admin route probed as a seller and signed out,
+  GET and POST. One hole (above), now closed.
+- **Object references.** `/account/999` shows a seller their own page rather
+  than an error, so a valid id and an invalid one are indistinguishable to
+  them. `/keys/5` for a key that is not theirs redirects.
+- **Rate limiting.** Login, registration, the public key check and the
+  connector each have their own counter and their own table.
+- **Secrets.** No literal password, key or token anywhere outside `vendor/`.
+  The connector key and the encryption key come from `.env`.
+- **File protection.** `.htaccess` at the root, plus the stock deny files in
+  `app/` and `writable/`.
+
+One thing to know rather than fix: the session fingerprint is an HMAC keyed
+on `encryption.key`. Changing that key invalidates every open session at
+once, so everybody gets "your session was ended for security" and signs in
+again. Harmless, but surprising if you rotate the key and do not expect it.
+
 ## Cross-platform check
 
 Every page was loaded on twelve device profiles — iPhone SE / 14 Pro / 14 Pro
