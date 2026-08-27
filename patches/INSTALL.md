@@ -187,25 +187,24 @@ AES-256-GCM است و **با نسخهٔ قدیمی سازگار نیست** — �
 2. اسم کپی را به **`.env`** تغییر بده (نقطه در اول، بدون پسوند)
 3. راست‌کلیک → **Edit** و مقادیر زیر را پر کن
 
+> ⚠️ بخش `/public` در آخر `app.baseURL` حتماً باید باشد. اگر برش داری،
+> CSS و JS بالا نمی‌آید و صفحه بی‌ریخت می‌شود. اسلش بعد از `public`
+> اختیاری است — هر دو حالت را تست کردم، یکی است.
+
 ```ini
 CI_ENVIRONMENT = production
-
-#  ⚠️ بخش /public در آخر حتماً باید باشد.
-#  اگر برش داری، CSS و JS پنل بالا نمی‌آید و صفحه بی‌ریخت می‌شود.
-#  اسلش بعد از public اختیاری است — هر دو حالت را تست کردم، یکی است.
 app.baseURL = 'https://panel.zeromods.id/public'
 
 app.forceGlobalSecureRequests = true
 app.behindCloudflare          = true
 
 database.default.hostname = localhost
-database.default.database = <اسم دیتابیس>
-database.default.username = <یوزر دیتابیس>
-database.default.password = <رمز دیتابیس>
+database.default.database = YOUR_DB_NAME
+database.default.username = YOUR_DB_USER
+database.default.password = YOUR_NEW_PASSWORD
 database.default.DBDriver = MySQLi
 database.default.port     = 3306
 
-# ۶۴ کاراکتر hex — راهنمای ساختنش پایین‌تر
 encryption.key  = hex2bin:xxxxxxxx...
 connect.aesKey  = xxxxxxxx...
 
@@ -213,6 +212,9 @@ app.sessionExpiration = 604800
 cookie.expires        = 604800
 cookie.secure         = true
 ```
+
+`encryption.key` و `connect.aesKey` هر کدام ۶۴ کاراکتر hex هستند —
+ساختنشان همین پایین.
 
 `env.template` همهٔ این خط‌ها را از قبل دارد — فقط جاهای
 `PUT_..._HERE` را پر کن.
