@@ -66,6 +66,54 @@ would be worse than not replying.
 
 ---
 
+## Wiring your own `Connect.php` to the maintenance switch
+
+`Connect.php` is your file — it is never shipped and never overwritten — so
+these two lines are yours to add. Both are optional and independent.
+
+**1. The switch itself.** In `__construct()`, find:
+
+    $this->maintenance = false;
+
+and replace it with:
+
+    $this->maintenance = \App\Models\SettingModel::maintenance();
+
+Now Admin → Maintenance drives it, and the setting takes effect on the very
+next request — nothing is cached between requests. It fails **open**: if the
+settings table cannot be read at all, apps keep working, because a database
+hiccup must not look like a deliberate shutdown.
+
+**2. The message the app is shown.** Further down, in the branch that answers
+while maintenance is on, is a hard-coded string:
+
+    if ($isMT) {
+        $data = [
+            'status' => -1,
+            'reason' => "Server is under Maintenance.",   #E-2
+        ];
+        return $this->aes_encrypt($data);
+    }
+
+Replace that one string with:
+
+            'reason' => \App\Models\SettingModel::maintenanceMessage(),
+
+and the "Message shown to the app" field on the maintenance page becomes the
+text your app displays. Leave the field empty and it falls back to
+`Server is under Maintenance.`, so the app is never shown a blank reason.
+
+Verified end to end against a running panel: with the message set to
+"Update in progress", a sealed connector request came back
+
+    {"status":-1,"reason":"Update in progress","cnonce":"...","ts":...}
+
+Nothing else in the connector needs to change. The message is capped at 160
+characters and stripped to one line before it is stored, so it cannot break a
+line-oriented client.
+
+---
+
 ## Wire format
 
 One line of ASCII, three parts separated by dots:

@@ -13119,8 +13119,8 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  }
 diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.php
 --- /tmp/orig_app/Controllers/Maintenance.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Maintenance.php	2026-08-27 00:59:53.164959007 +0000
-@@ -0,0 +1,116 @@
++++ app/Controllers/Maintenance.php	2026-08-27 21:24:55.192011067 +0000
+@@ -0,0 +1,123 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -13169,9 +13169,6 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +            'message'  => SettingModel::maintenanceMessage(),
 +            'stamp'    => $this->settings->maintenanceStamp(),
 +            'default'  => SettingModel::DEFAULT_MESSAGE,
-+            // The connector is the user's own file, so whether it actually
-+            // reads the switch is something only the file can answer.
-+            'wiredUp'  => $this->connectorReadsTheSwitch(),
 +        ]);
 +    }
 +
@@ -13184,15 +13181,22 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +        $on = $this->request->getPost('maintenance');
 +        $on = is_scalar($on) && (string) $on === '1' ? '1' : '0';
 +
-+        $msg = $this->request->getPost('message');
-+        $msg = is_scalar($msg) ? trim((string) $msg) : '';
-+        // Bounded and single-line: this text is echoed back to every app that
-+        // asks, and a newline in it would break a line-oriented client.
-+        $msg = mb_substr(preg_replace('/\s+/u', ' ', $msg), 0, 160);
++        // A form that carries no message field -- the one-click switch in the
++        // page banner -- must not wipe the message the admin typed here.
++        $raw = $this->request->getPost('message');
++        $msg = null;
++        if (is_scalar($raw)) {
++            // Bounded and single-line: this text is echoed back to every app
++            // that asks, and a newline in it would break a line-oriented client.
++            $msg = mb_substr(preg_replace('/\s+/u', ' ', trim((string) $raw)), 0, 160);
++        }
 +
 +        try {
 +            $this->settings->put(SettingModel::MAINTENANCE, $on, $this->me->username);
-+            $this->settings->put(SettingModel::MAINTENANCE_MSG, $msg, $this->me->username);
++
++            if ($msg !== null) {
++                $this->settings->put(SettingModel::MAINTENANCE_MSG, $msg, $this->me->username);
++            }
 +        } catch (\Throwable $e) {
 +            log_message('error', 'Could not save the maintenance switch: {msg}',
 +                ['msg' => $e->getMessage()]);
@@ -13207,35 +13211,38 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +        log_message('notice', 'Maintenance switched {state} by {who}.',
 +            ['state' => $on === '1' ? 'ON' : 'OFF', 'who' => $this->me->username]);
 +
-+        return redirect()->to('admin/maintenance')->with('msgSuccess',
-+            $on === '1'
-+                ? 'Maintenance is ON. Apps will be refused until you turn it off.'
-+                : 'Maintenance is OFF. Apps are being served again.');
++        $flash = $on === '1'
++            ? 'Maintenance is ON. Apps will be refused until you turn it off.'
++            : 'Maintenance is OFF. Apps are being served again.';
++
++        // The banner posts from whatever page the admin happened to be on, and
++        // sends it along so they land back there with the banner gone rather
++        // than being thrown to this screen.
++        $back = (string) $this->request->getPost('back');
++
++        if ($back !== '' && $this->isLocalPath($back)) {
++            return redirect()->to($back)->with('msgSuccess', $flash);
++        }
++
++        return redirect()->to('admin/maintenance')->with('msgSuccess', $flash);
 +    }
 +
 +    /**
-+     * Does the connector on this server actually read the switch?
++     * Is this a path on this panel, and nothing else?
 +     *
-+     * The connector is deliberately not shipped, so it may be a copy that
-+     * still has `$this->maintenance = false;` hard-coded — in which case the
-+     * switch on this page looks like it works and does nothing. Rather than
-+     * let that sit undiscovered, read the file and say plainly which it is.
-+     *
-+     * Returns true (wired), false (present but hard-coded), or null (no
-+     * connector file at all).
++     * The return path comes from a form field, so it is only ever allowed to
++     * be a relative path of our own. Anything with a scheme, a host, or a
++     * backslash is dropped -- that is how an open redirect starts.
 +     */
-+    private function connectorReadsTheSwitch(): ?bool
++    private function isLocalPath(string $path): bool
 +    {
-+        $path = APPPATH . 'Controllers/Connect.php';
-+
-+        if (! is_file($path) || ! is_readable($path)) {
-+            return null;
-+        }
-+
-+        $src = (string) file_get_contents($path);
-+
-+        return str_contains($src, 'SettingModel::maintenance()');
++        return $path !== ''
++            && $path[0] === '/'
++            && ! str_starts_with($path, '//')
++            && ! str_contains($path, '\\')
++            && ! preg_match('#^/*\w+:#', $path);
 +    }
++
 +}
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
@@ -13796,8 +13803,8 @@ diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
 +}
 diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 --- /tmp/orig_app/Helpers/nata_helper.php	2026-08-24 23:02:52.536343011 +0000
-+++ app/Helpers/nata_helper.php	2026-08-26 14:17:39.269611059 +0000
-@@ -1,97 +1,147 @@
++++ app/Helpers/nata_helper.php	2026-08-27 21:23:22.419359654 +0000
+@@ -1,97 +1,153 @@
 -<?php
 -
 -/**
@@ -13976,21 +13983,27 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +    return (object) ['total' => $total, 'devices' => trim($listDevice)];
 +}
 +
-+function setDevice($devicesPost, $max)
++/**
++ * Turn the edit form's device box into the comma list the column stores.
++ *
++ * Anything that is not a device id is dropped: the box is one id per line,
++ * ids are [A-Za-z0-9-], and at most $max of them are kept.
++ *
++ * Returns NULL when nothing survives, which is what an empty box means --
++ * the key is released and every device may re-bind. That matters because
++ * a box holding only a stray space, or only punctuation, used to reach
++ * implode() with $result never assigned and threw a TypeError: the panel
++ * answered "Whoops!" and the save was lost.
++ */
++function setDevice($devicesPost, $max): ?string
 +{
-+    // dont touch this forever please -_-
-+    if ($devicesPost) {
-+        $clean_enter = reduce_multiples($devicesPost, "\n", true);
-+        $ez = [''];
-+        $ef = array_unique(array_filter(preg_replace("/[^A-Za-z0-9-]/", "", explode("\n", $clean_enter))));
-+        $ex = array_filter(array_merge($ez, $ef));
-+        foreach ($ex as $k => $item) {
-+            if ($k <= $max) {
-+                $result[] = trim($item);
-+            }
-+        }
-+        return implode(",", array_unique($result));
-+    }
++    $max = max(1, (int) $max);
++
++    $ids = preg_replace('/[^A-Za-z0-9-]/', '', explode("\n", (string) $devicesPost));
++    $ids = array_filter(array_map('trim', $ids), static fn ($id) => $id !== '');
++    $ids = array_slice(array_unique($ids), 0, $max);
++
++    return $ids ? implode(',', $ids) : null;
 +}
 +
 +/**
@@ -15586,8 +15599,8 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +
 diff -ruN /tmp/orig_app/Views/Admin/maintenance.php app/Views/Admin/maintenance.php
 --- /tmp/orig_app/Views/Admin/maintenance.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/Admin/maintenance.php	2026-08-27 01:00:34.070312609 +0000
-@@ -0,0 +1,181 @@
++++ app/Views/Admin/maintenance.php	2026-08-27 21:24:15.951930210 +0000
+@@ -0,0 +1,120 @@
 +<?= $this->extend('Layout/Starter') ?>
 +
 +<?= $this->section('content') ?>
@@ -15669,60 +15682,6 @@ diff -ruN /tmp/orig_app/Views/Admin/maintenance.php app/Views/Admin/maintenance.
 +    </div>
 +</section>
 +
-+<section class="em-panel em-rise em-rise-2">
-+    <div class="em-panel-h">
-+        <h2><i class="bi bi-plug"></i> Is your connector wired to it?</h2>
-+    </div>
-+
-+    <div class="em-panel-b">
-+        <?php if ($wiredUp === null) : ?>
-+            <div class="alert alert-danger d-flex align-items-start gap-2" role="alert">
-+                <i class="bi bi-x-circle-fill"></i>
-+                <div>
-+                    <b>There is no connector on the server.</b>
-+                    <code>app/Controllers/Connect.php</code> is missing, so
-+                    <code>/data/zezr_connector</code> returns 404 and no app can
-+                    check a key at all — with or without this switch.
-+                </div>
-+            </div>
-+        <?php elseif ($wiredUp) : ?>
-+            <div class="alert alert-success d-flex align-items-start gap-2" role="alert">
-+                <i class="bi bi-check-circle-fill"></i>
-+                <div>
-+                    <b>Wired up.</b> Your <code>Connect.php</code> reads this
-+                    switch, so the setting above takes effect on the next request.
-+                </div>
-+            </div>
-+        <?php else : ?>
-+            <!-- The connector is the user's own file. If it still has the old
-+                 hard-coded flag, the switch above silently does nothing, and
-+                 that is exactly the sort of thing you find out at the worst
-+                 moment. So it is checked and said plainly. -->
-+            <div class="alert alert-warning d-flex align-items-start gap-2" role="alert">
-+                <i class="bi bi-exclamation-triangle-fill"></i>
-+                <div>
-+                    <b>Not wired up yet — the switch above will do nothing.</b>
-+                    Your <code>Connect.php</code> still decides maintenance for
-+                    itself. One line fixes it.
-+                </div>
-+            </div>
-+
-+            <p class="em-note">In <code>app/Controllers/Connect.php</code>, find this line:</p>
-+            <pre class="em-code"><code>$this-&gt;maintenance = false;</code></pre>
-+
-+            <p class="em-note">and replace it with:</p>
-+            <pre class="em-code"><code>$this-&gt;maintenance = \App\Models\SettingModel::maintenance();</code></pre>
-+
-+            <p class="em-note">
-+                Optional, so the message on this page reaches the app too — find
-+                the hard-coded <code>"Server is under Maintenance."</code> in the
-+                same file and use
-+                <code>\App\Models\SettingModel::maintenanceMessage()</code> instead.
-+            </p>
-+        <?php endif; ?>
-+    </div>
-+</section>
-+
 +<?= $this->endSection() ?>
 +
 +<?= $this->section('css') ?>
@@ -15745,13 +15704,6 @@ diff -ruN /tmp/orig_app/Views/Admin/maintenance.php app/Views/Admin/maintenance.
 +    .em-radio-b b { display: block; font-size: .95rem; margin-bottom: .2rem; }
 +    .em-radio-b small { color: var(--em-text-2); font-size: .82rem; line-height: 1.5; }
 +
-+    .em-code {
-+        font-family: var(--em-mono); font-size: .82rem; direction: ltr;
-+        background: var(--em-surface-3); border: 1px solid var(--em-line);
-+        border-radius: 10px; padding: .8rem 1rem; margin: 0 0 1rem;
-+        overflow-x: auto; color: var(--em-text);
-+    }
-+    .em-code code { color: inherit; }
 +</style>
 +<?= $this->endSection() ?>
 +
@@ -17386,7 +17338,7 @@ diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
                                  <?php endif; ?>
 diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
 --- /tmp/orig_app/Views/Layout/Starter.php	2026-08-24 23:02:52.618152290 +0000
-+++ app/Views/Layout/Starter.php	2026-08-27 01:35:06.182747205 +0000
++++ app/Views/Layout/Starter.php	2026-08-27 21:24:55.192191631 +0000
 @@ -6,680 +6,45 @@
      <meta charset="utf-8">
      <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -18102,7 +18054,7 @@ diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
  </head>
  
  <body>
-@@ -688,6 +53,29 @@
+@@ -688,6 +53,38 @@
      <!-- End of menu -->
      <main>
          <div class="container p-3 py-4 mb-3" id="content">
@@ -18124,7 +18076,16 @@ diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
 +                        Keys and balances are untouched.
 +                    </div>
 +                    <?php if ((int) ($user->level ?? 2) === 1) : ?>
-+                        <a class="em-btn" href="<?= site_url('admin/maintenance') ?>">Turn it off</a>
++                        <?php /* A real switch, not a link to the page that holds one: the
++                                admin presses it here and the banner is gone on the next
++                                page. POST, because a GET that changes state can be fired
++                                by an <img src> on someone else's site. */ ?>
++                        <form action="<?= site_url('admin/maintenance/save') ?>" method="post">
++                            <?= csrf_field() ?>
++                            <input type="hidden" name="maintenance" value="0">
++                            <input type="hidden" name="back" value="<?= esc('/' . uri_string(), 'attr') ?>">
++                            <button type="submit" class="em-btn">Turn it off</button>
++                        </form>
 +                    <?php endif; ?>
 +                </div>
 +            <?php endif; ?>
@@ -18132,7 +18093,7 @@ diff -ruN /tmp/orig_app/Views/Layout/Starter.php app/Views/Layout/Starter.php
              <!-- Start content -->
              <?= $this->renderSection('content') ?>
  
-@@ -701,10 +89,21 @@
+@@ -701,10 +98,21 @@
          </div>
      </footer>
  

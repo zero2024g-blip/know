@@ -807,6 +807,100 @@ Also fixed there: **MLBB and FFM keys could never connect.** A game code
 missing from `$gameVersions` falls through to "Please Update Your App", and
 both were missing while having live keys — 10 of them.
 
+## Saving a key with an empty-looking device list threw "Whoops!"
+
+Clearing the Devices box on the key edit page and leaving a single space in
+it lost the save and showed the error screen. Reproduced against the running
+panel, HTTP 500 on the POST, the row unchanged:
+
+    input=" "        http=500  devices unchanged
+    input="..."      http=500  devices unchanged
+    input="AAA-111\nBBB-222"  http=303  devices=AAA-111,BBB-222
+
+`setDevice()` in `app/Helpers/nata_helper.php` treated any non-empty string as
+a device list. A space is non-empty, but nothing survives the `[^A-Za-z0-9-]`
+strip, so the `foreach` never ran, `$result` was never assigned, and PHP 8
+threw on `array_unique(null)`:
+
+    array_unique(): Argument #1 ($array) must be of type array, null given
+
+Not just a space — any text with no id characters in it (`...`, `@@@`) did the
+same. The function is now written so the empty result is a normal outcome: it
+returns `NULL`, which is exactly what an empty box already meant — the key is
+released and devices may re-bind. Same run after the fix:
+
+    " "  -> NULL       "..." -> NULL      "" -> NULL
+    "AAA-111\nBBB-222" -> AAA-111,BBB-222 (unchanged)
+    "a\nb\nc" with max 2 -> a,b           (the cap still holds)
+
+Zero log lines during the whole run.
+
+## "Turn it off" in the banner now actually turns it off
+
+The maintenance banner sits on every page while the switch is on. Its button
+was a **link to the maintenance screen**, not a switch — pressing it took you
+to the page and left the banner exactly where it was, which reads as a button
+that does not work.
+
+It is a one-click POST now: `maintenance=0`, with a CSRF token, and a `back`
+field holding the page you pressed it on so you land back there with the
+banner gone. Measured in a real browser at 1440px and at 393px:
+
+    banner before click = 1 | after click = 0 | url = /keys      (desktop)
+    banner before click = 1 | after click = 0 | url = /keys      (phone)
+
+Two things guard it:
+
+- `save()` no longer overwrites the message when the form carries no message
+  field, so the one-click switch cannot wipe the text you typed on the page.
+  Verified: message survived an on/off cycle from the banner.
+- the `back` field is a form value, so it is only ever allowed to be a
+  relative path of ours. Everything else falls back to the maintenance page:
+
+      //evil.com/x  https://evil.com  javascript:alert(1)  /\evil.com  keys  ""
+      -> all six redirected to /admin/maintenance
+
+A seller still cannot reach it. With a valid CSRF token and a real seller
+session, the POST redirected to the dashboard with "Access Denied!" and the
+setting stayed `0`.
+
+## The "Is your connector wired to it?" panel is gone
+
+Removed from `app/Views/Admin/maintenance.php`, along with the controller
+method that read `Connect.php` to produce it. The maintenance screen is now
+just the switch and the message.
+
+The two lines it used to print are in `CONNECTOR-PROTOCOL.md` instead, since
+the connector is your own file and you edit it by hand.
+
+## Maintenance does not pause a key's clock
+
+Asked and answered by measurement, because the honest answer is "no".
+
+`expired_date` is an absolute timestamp written **once**, at the key's first
+successful check: `now + duration hours`. Nothing else in the codebase writes
+it except the admin edit form. So the countdown is wall-clock, and maintenance
+does not touch it. A 24-hour key activated at noon dies at noon tomorrow
+whether the server answered anything in between or not.
+
+Measured on the running panel with a real connector call:
+
+    activate                  -> expired_date 2026-08-29 00:57:13, 99000s left
+    maintenance ON            -> app is refused, "Update in progress"
+    ...20 seconds of maintenance...
+                              -> 98967s left   (20 seconds gone)
+    maintenance OFF           -> app served again, expired_date unchanged
+
+A key that has **never** been activated loses nothing: the connector refuses
+before the activation branch, so `expired_date` stays NULL and its clock has
+not started. Verified — a fresh key checked during maintenance still had
+`expired_date = NULL` afterwards.
+
+To actually compensate for downtime the panel would have to record when
+maintenance started and, on turning it off, add the elapsed time to every key
+whose `expired_date` is in the future. That is a write across the whole key
+table, so it is not in this build.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.
