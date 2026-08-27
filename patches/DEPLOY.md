@@ -1011,6 +1011,124 @@ login lockout (correct password refused while the IP is blocked), and the
 session fingerprint (a stolen cookie replayed from another browser is
 rejected).
 
+## An admin can now open any seller's keys from their account page
+
+The account page for a seller (`/account/{id}`) gained a **View keys** button,
+and its "Keys issued" figure is now a link. Both open the keys list filtered
+to that seller: `/keys?owner=<username>`, headed "Keys by <name>" with an
+"All keys" way back.
+
+The filter is admin-only and safe by construction:
+
+- `Keys::ownerFilter()` returns null for a seller, so the parameter can never
+  widen a seller's own-rows scope. Verified: a seller hitting
+  `keys/api?owner=admin` still gets only their own rows.
+- the username is validated against a real user; an unknown or injected value
+  falls back to the whole table rather than erroring, and the query is
+  parameterized, so `owner=sara' OR '1'='1` is treated as a (non-existent)
+  name, not SQL.
+
+Tested on the running panel: `owner=sara` returned sara's 7 keys and nobody
+else's; `owner=alireza` returned alireza's 13; the page and the AJAX both stay
+scoped through paging and search.
+
+## The maintenance credit could revive already-dead keys — fixed
+
+A real bug in the downtime credit from the last round, found on review before
+it could bite. The credit query decided which keys were "still running at the
+start of maintenance" with
+
+    WHERE expired_date > FROM_UNIXTIME(<since>)
+
+`expired_date` is written by the app in its **own** timezone
+(`Config\App::$appTimezone`, `Asia/Tehran`). `FROM_UNIXTIME()` renders in
+**MySQL's** session timezone, which on the live server (Hostinger) is UTC. The
+two are 3.5 hours apart, so the boundary was off by the offset — and a key
+that had already expired up to 3.5 hours *before* maintenance began would be
+counted as "still running" and pushed into the future. A dead key coming back
+to life is exactly the "adds time to the wrong keys" failure to avoid.
+
+Proven on the panel: a key that died 2 hours before maintenance, in Tehran
+wall-clock, compared as `00:34 > 23:04` against the UTC boundary and was
+wrongly credited.
+
+The fix builds the boundary in PHP as an app-timezone wall-clock string, in
+the same clock `expired_date` is stored in, and compares against that. `DATE_ADD`
+works on the stored string and is timezone-agnostic, so the amount added was
+never wrong — only which rows were touched.
+
+Re-tested with keys planted at exact boundaries (Tehran clock):
+
+    died 2h before maintenance   -> untouched   (was: revived)
+    died 10s before maintenance  -> untouched   (was: revived)
+    1h of life left              -> +downtime   exactly
+    expired 5s into maintenance  -> +downtime   (correctly revived)
+
+And the guards still hold, each measured: the credit is applied once per real
+on→off transition (saving the page again while already on does not restart the
+clock), it is safe under two admins turning it off at the same instant (the
+"since" marker is read `FOR UPDATE` and cleared in the same transaction as the
+key update — 100s credited once, not 200s), a clock that ran backwards credits
+nothing (never a subtraction), and a switch left on for 45 days credits exactly
+30 (the cap), not 45. Zero log lines across the whole run.
+
+## Faster on a weak phone and a slow line
+
+A pass aimed at first-paint and parse cost, since that is what a low-end device
+on mobile data actually feels.
+
+- **Bootstrap CSS purged to what the panel uses: 232 KB → 42 KB raw** (18% of
+  the original), the single biggest render-blocking file on every page. Done
+  by scanning every view and script for the classes actually used — including
+  the ones DataTables emits at runtime — and dropping only rules for classes
+  nothing references; every base, element and `:root` rule is kept untouched.
+  Verified by pixel-diffing all 11 pages at desktop and phone before and
+  after: every static page is identical, and the two DataTables pages differ
+  only where the async table happened to be mid-load in one shot. Total CSS
+  the browser parses fell from ~303 KB to ~118 KB raw (~38 KB → ~23 KB over
+  the wire after brotli).
+
+- Measured under a throttled profile (4× CPU slowdown, 400 kbps, 400 ms
+  latency — a weak phone on a bad line): **first contentful paint on the keys
+  page fell from 14.1 s to 5.1 s, and the dashboard from 11.8 s to 5.0 s.**
+
+- **The table search now waits for a pause in typing (`searchDelay: 500`)**
+  before it queries the server, so a search on a slow link sends one request
+  instead of one per keystroke.
+
+- Two small mobile-smoothness rules: `text-size-adjust: 100%` stops a browser
+  reflowing the page a beat after paint by inflating the type, and
+  `overscroll-behavior` keeps a flick that reaches the end of the key table
+  from dragging the whole page.
+
+Repeat visits were already near-instant — `.htaccess` serves the pre-compressed
+`.br`/`.gz` twins and marks assets `immutable` for a year — so this pass is
+about the first visit and the parse, which is where a weak device spends its
+time.
+
+## A fresh injection and privilege sweep — clean
+
+Re-run end to end this round after the changes, against the running panel:
+
+- **SQL injection**: login (`admin' OR '1'='1` and four more) never
+  authenticates; the connector (SQLi in user_key / game / serial through the
+  encrypted envelope) treats every payload as a literal and leaves the table
+  intact; the new `owner` filter is parameterized and validated. No SQL errors
+  in the log on any attempt.
+- **DataTables** (the hole closed last round): every injected column-name
+  payload is still inert — identical row order — and malformed requests answer
+  200 with a sane result, not a 500.
+- **XSS**: payloads planted directly in the database (a user's fullname, a
+  key string, the maintenance message) fire nothing — the DataTables `esc()`
+  render helper and the server-side `esc()` on the banner neutralize all of
+  them. Confirmed in a real browser: no dialog, no script execution on
+  manage-users, the keys list, or the dashboard banner.
+- **CSRF**: a POST with a missing or wrong token never reaches an
+  authenticated action; only the correct token does.
+- **Privilege**: the full admin-vs-seller matrix from last round still holds —
+  a seller cannot reach or drive any admin action, edit another seller's key,
+  delete a key, or widen their key list with `owner=`.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.

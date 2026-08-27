@@ -12602,7 +12602,7 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-27 22:25:21.570229105 +0000
++++ app/Controllers/Keys.php	2026-08-27 23:01:29.357930006 +0000
 @@ -2,6 +2,9 @@
  
  namespace App\Controllers;
@@ -12678,7 +12678,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function index()
-@@ -64,16 +38,18 @@
+@@ -64,59 +38,123 @@
          $model = $this->model;
          $user = $this->user;
  
@@ -12686,24 +12686,62 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -            $keys = $model->where('registrator', $user->username)->findAll();
 -        } else {
 -            $keys = $model->findAll();
++        // An admin may narrow the list to one seller with ?owner=<username>,
++        // reached from that seller\'s account page. Validated to a real user
++        // here so the heading and the AJAX both carry a name that exists; a
++        // seller never gets this - the filter below pins them to their own.
++        $owner = $this->ownerFilter();
++
 +        // The view only asks "are there any?" - the table itself is filled
 +        // by the server-side DataTables endpoint. findAll() was loading
 +        // every row with every column and discarding it on each page load.
 +        if ((int) $user->level !== 1) {
 +            $model->where('registrator', $user->username);
++        } elseif ($owner !== null) {
++            $model->where('registrator', $owner);
          }
 +        $keyCount = $model->countAllResults();
  
          $data = [
-             'title' => 'Keys',
-             'user' => $user,
+-            'title' => 'Keys',
+-            'user' => $user,
 -            'keylist' => $keys,
+-            'time' => $this->time,
++            'title'   => $owner !== null ? 'Keys - ' . $owner : 'Keys',
++            'user'    => $user,
 +            'keylist' => $keyCount,
-             'time' => $this->time,
++            'owner'   => $owner,
++            'time'    => $this->time,
          ];
          return view('Keys/list', $data);
-@@ -81,42 +57,69 @@
+     }
  
++    /**
++     * The ?owner=<username> filter, or null.
++     *
++     * Admin only, and only for a username that actually exists - an unknown
++     * name returns null so the page shows the whole table rather than an
++     * empty one that looks broken. A seller always gets null: they are pinned
++     * to their own rows elsewhere and this must never widen that.
++     */
++    private function ownerFilter(): ?string
++    {
++        if ((int) $this->user->level !== 1) {
++            return null;
++        }
++
++        $owner = $this->request->getGet('owner');
++        if (! is_string($owner) || $owner === '') {
++            return null;
++        }
++
++        // getUser(), not first(): UserModel returns arrays from first() but
++        // objects from getUser(), and everything here reads ->username.
++        $found = (new \App\Models\UserModel())->getUser($owner, 'username');
++
++        return $found ? $found->username : null;
++    }
++
      public function api_get_keys()
      {
 -        // ? API for DataTable Keys
@@ -12719,7 +12757,8 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        );
 +
          $model = $this->model;
-         return $model->API_getKeys();
+-        return $model->API_getKeys();
++        return $model->API_getKeys($this->ownerFilter());
      }
  
      public function api_key_reset()
@@ -12779,16 +12818,16 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -        ];
 +        $total = $db_key->devices ? explode(',', $db_key->devices) : [];
 +        $rules = ['devices_total' => count($total), 'devices_max' => (int) $db_key->max_devices];
-+
+ 
+-        $real_response = array_merge($data, $rules);
+-        return $this->response->setJSON($real_response);
 +        if ($db_key->devices && $reset) {
 +            $model->set('devices', null)
 +                ->where('user_key', $keys)
 +                ->update();
 +            $rules = ['reset' => true, 'devices_total' => 0, 'devices_max' => (int) $db_key->max_devices];
 +        }
- 
--        $real_response = array_merge($data, $rules);
--        return $this->response->setJSON($real_response);
++
 +        return $this->response->setJSON(array_merge(
 +            ['registered' => true, 'keys' => $keys, 'csrf' => csrf_hash()],
 +            $rules
@@ -12796,7 +12835,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function edit_key($key = false)
-@@ -133,7 +136,6 @@
+@@ -133,7 +171,6 @@
                          'title' => 'Key',
                          'user' => $user,
                          'key' => $dKey,
@@ -12804,7 +12843,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                          'time' => $this->time,
                          'key_info' => getDevice($dKey->devices),
                          'messages' => setMessage('Please carefuly edit information'),
-@@ -148,12 +150,172 @@
+@@ -148,12 +185,172 @@
          return redirect()->to('keys')->with('msgDanger', $msgDanger);
      }
  
@@ -12978,7 +13017,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  
          if (!$dKey) {
              $msgDanger = "The user key no longer exists~";
-@@ -273,14 +435,28 @@
+@@ -273,14 +470,28 @@
              $message = setMessage("Please top up to your beloved admin.", 'warning');
          }
  
@@ -13014,7 +13053,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'validation' => $validation,
          ];
          return view('Keys/generate', $data);
-@@ -293,9 +469,23 @@
+@@ -293,9 +504,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -13040,7 +13079,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
          $form_rules = [
              'game' => [
                  'label' => 'Games',
-@@ -306,15 +496,18 @@
+@@ -306,15 +531,18 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -13061,7 +13100,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +515,9 @@
+@@ -322,7 +550,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -13072,7 +13111,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +526,146 @@
+@@ -331,57 +561,146 @@
          ];
  
          $validation = Services::validation();
@@ -13133,9 +13172,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +            $validation->setError('duration', 'That duration is not for sale.');
 +            return redirect()->back()->withInput()->with('msgDanger', 'Invalid duration.');
 +        }
- 
--                    // Add the generated key to the list
--                    $generatedKeys[] = $data_response;
++
 +        $totalfees = $unitPrice * $quantity;
 +
 +        $db = \Config\Database::connect();
@@ -13160,7 +13197,9 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    return redirect()->back()->withInput()
 +                        ->with('msgWarning', 'Please top up to your beloved admin.');
 +                }
-+
+ 
+-                    // Add the generated key to the list
+-                    $generatedKeys[] = $data_response;
 +                // Read the balance back inside the transaction, so the ledger
 +                // records what this debit actually left rather than a figure
 +                // computed from a value read before the UPDATE.
@@ -14705,11 +14744,12 @@ diff -ruN /tmp/orig_app/Models/HistoryModel.php app/Models/HistoryModel.php
              ->get()->getResultObject();
 diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
 --- /tmp/orig_app/Models/KeysModel.php	2026-08-24 23:02:52.607423272 +0000
-+++ app/Models/KeysModel.php	2026-08-26 14:50:56.343710689 +0000
-@@ -27,6 +27,74 @@
++++ app/Models/KeysModel.php	2026-08-27 22:58:30.832419309 +0000
+@@ -27,7 +27,84 @@
              ->getRowObject();
      }
  
+-    public function API_getKeys()
 +    /**
 +     * Counters for the dashboard cards.
 +     *
@@ -14778,9 +14818,31 @@ diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
 +            ->get()->getResultObject();
 +    }
 +
-     public function API_getKeys()
++    /**
++     * The server-side rows for the keys DataTable.
++     *
++     * @param string|null $owner  Admin only: show just this seller's keys.
++     *                            Ignored for a seller, who is always pinned
++     *                            to their own rows regardless of what is
++     *                            passed, so the parameter can never widen a
++     *                            seller's view.
++     */
++    public function API_getKeys(?string $owner = null)
      {
          $connect = db_connect();
+         $builder = $connect->table($this->table);
+@@ -35,7 +112,11 @@
+         $userModel = new UserModel();
+         $user = $userModel->getUser();
+         if ($user->level != 1) {
++            // A seller: their own keys, full stop. $owner is not consulted.
+             $builder->where('registrator', $user->username);
++        } elseif ($owner !== null && $owner !== '') {
++            // An admin narrowing the list to one seller.
++            $builder->where('registrator', $owner);
+         }
+ 
+         $builder->select('CONCAT(keys_code.id_keys) as id, game, user_key, duration, CONCAT(keys_code.expired_date) as expired, max_devices, devices, status, registrator');
 diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionModel.php
 --- /tmp/orig_app/Models/LoginSessionModel.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Models/LoginSessionModel.php	2026-08-27 00:07:50.692213641 +0000
@@ -15020,8 +15082,8 @@ diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionMode
 +}
 diff -ruN /tmp/orig_app/Models/SettingModel.php app/Models/SettingModel.php
 --- /tmp/orig_app/Models/SettingModel.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Models/SettingModel.php	2026-08-27 22:14:58.919483653 +0000
-@@ -0,0 +1,238 @@
++++ app/Models/SettingModel.php	2026-08-27 23:04:28.810542550 +0000
+@@ -0,0 +1,251 @@
 +<?php
 +
 +namespace App\Models;
@@ -15195,6 +15257,19 @@ diff -ruN /tmp/orig_app/Models/SettingModel.php app/Models/SettingModel.php
 +                $seconds = self::MAX_CREDIT_SECONDS;
 +            }
 +
++            // The boundary must be in the SAME clock as expired_date, or the
++            // wrong keys get credited. expired_date is written by the app in
++            // its own timezone (Config\App::$appTimezone); FROM_UNIXTIME()
++            // would instead render in MySQL's session timezone, and on a
++            // server where those differ (app Asia/Tehran, MySQL UTC) the
++            // boundary is off by the offset -- reviving keys that had already
++            // died hours before maintenance began. So the boundary is built
++            // here as an app-timezone wall-clock string and passed as a plain
++            // value. DATE_ADD works on the stored string and is timezone
++            // agnostic, so the credit amount is unaffected.
++            $tz       = config(\Config\App::class)->appTimezone ?: date_default_timezone_get();
++            $boundary = \CodeIgniter\I18n\Time::createFromTimestamp($since, $tz)->toDateTimeString();
++
 +            // Clear the marker first, inside the same transaction: if the
 +            // update below fails, the rollback puts the marker back too.
 +            $db->query('UPDATE settings SET value = ?, updated_at = NOW() WHERE name = ?',
@@ -15204,8 +15279,8 @@ diff -ruN /tmp/orig_app/Models/SettingModel.php app/Models/SettingModel.php
 +                'UPDATE keys_code
 +                    SET expired_date = DATE_ADD(expired_date, INTERVAL ? SECOND)
 +                  WHERE expired_date IS NOT NULL
-+                    AND expired_date > FROM_UNIXTIME(?)',
-+                [$seconds, $since]
++                    AND expired_date > ?',
++                [$seconds, $boundary]
 +            );
 +            $keys = $db->affectedRows();
 +
@@ -16286,8 +16361,8 @@ diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
                      <div class="col-md-12 mt-2">
 diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 --- /tmp/orig_app/Views/Admin/users.php	2026-08-24 23:02:52.611664182 +0000
-+++ app/Views/Admin/users.php	2026-08-27 01:33:34.491212083 +0000
-@@ -1,100 +1,205 @@
++++ app/Views/Admin/users.php	2026-08-27 23:16:59.231352479 +0000
+@@ -1,100 +1,209 @@
  <?= $this->extend('Layout/Starter') ?>
  
  <?= $this->section('content') ?>
@@ -16458,6 +16533,10 @@ diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
              processing: true,
              serverSide: true,
 +            deferRender: true,
++            // On a slow connection, firing a request on every keystroke floods
++            // a weak link and makes the box feel laggy. Wait until typing
++            // pauses, so one request goes out instead of a dozen.
++            searchDelay: 500,
              order: [
                  [0, "desc"]
              ],
@@ -17175,8 +17254,8 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
          $("#devices").attr('rows', $(this).val());
 diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 --- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
-+++ app/Views/Keys/list.php	2026-08-27 17:47:58.808983691 +0000
-@@ -1,60 +1,209 @@
++++ app/Views/Keys/list.php	2026-08-27 23:16:59.218702256 +0000
+@@ -1,60 +1,219 @@
  <?= $this->extend('Layout/Starter') ?>
  
  <?= $this->section('content') ?>
@@ -17190,10 +17269,20 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +<header class="em-head em-rise">
 +    <div class="em-head-main">
 +        <span class="em-eyebrow"><i class="bi bi-card-list"></i> Keys</span>
-+        <h1>Registered keys</h1>
-+        <p>Every key you have issued, with its device usage and expiry.</p>
++        <?php if (! empty($owner)) : ?>
++            <h1>Keys by <?= esc($owner) ?></h1>
++            <p>Every key <b><?= esc($owner) ?></b> issued, with its device usage and expiry.</p>
++        <?php else : ?>
++            <h1>Registered keys</h1>
++            <p>Every key you have issued, with its device usage and expiry.</p>
++        <?php endif; ?>
 +    </div>
 +    <div class="em-head-act">
++        <?php if (! empty($owner)) : ?>
++            <a class="em-btn" href="<?= site_url('keys') ?>">
++                <i class="bi bi-arrow-left"></i> All keys
++            </a>
++        <?php endif; ?>
 +        <a class="em-btn is-primary" href="<?= site_url('keys/generate') ?>">
 +            <i class="bi bi-plus-lg"></i> New key
 +        </a>
@@ -17428,20 +17517,24 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
          // ── تنها تنظیمِ صفحه‌بندی ──
          // این عدد = تعداد شماره‌صفحه‌ها (پیش‌فرض ۷). تعدادِ عددهای پشت‌سرهمِ اولِ لیست
          // برابرِ (این عدد − ۲) ئه. پس ۵ ⇒ «۱ ۲ ۳ … ۳۴۶»، ۶ ⇒ «۱ ۲ ۳ ۴ … ۳۴۶» و…
-@@ -63,10 +212,11 @@
+@@ -63,10 +222,15 @@
          var table = $('#datatable').DataTable({
              processing: true,
              serverSide: true,
 +            deferRender: true,
++            // On a slow connection, firing a request on every keystroke floods
++            // a weak link and makes the box feel laggy. Wait until typing
++            // pauses, so one request goes out instead of a dozen.
++            searchDelay: 500,
              order: [
                  [0, "desc"]
              ],
 -            ajax: "<?= site_url('keys/api') ?>",
-+            ajax: dtAjax("<?= site_url('keys/api') ?>"),
++            ajax: dtAjax("<?= site_url('keys/api') ?><?= ! empty($owner) ? '?owner=' . rawurlencode($owner) : '' ?>"),
              columns: [{
                      data: 'id',
                      name: 'id_keys'
-@@ -76,55 +226,143 @@
+@@ -76,55 +240,143 @@
                  },
                  {
                      data: 'user_key',
@@ -17609,7 +17702,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
      function resetUserKey(keys) {
          Swal.fire({
              title: 'Are you sure?',
-@@ -141,18 +379,25 @@
+@@ -141,18 +393,25 @@
                      title: 'Please wait...'
                  })
  
@@ -18644,8 +18737,8 @@ diff -ruN /tmp/orig_app/Views/Layout/pager.php app/Views/Layout/pager.php
 +</div>
 diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 --- /tmp/orig_app/Views/User/account.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/User/account.php	2026-08-27 01:23:56.315776741 +0000
-@@ -0,0 +1,317 @@
++++ app/Views/User/account.php	2026-08-27 23:00:01.142890557 +0000
+@@ -0,0 +1,329 @@
 +<?= $this->extend('Layout/Starter') ?>
 +
 +<?= $this->section('content') ?>
@@ -18685,6 +18778,9 @@ diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 +    </div>
 +    <div class="em-head-act">
 +        <?php if (! $isSelf) : ?>
++            <a class="em-btn is-primary" href="<?= site_url('keys?owner=' . rawurlencode($target->username)) ?>">
++                <i class="bi bi-key"></i> View keys
++            </a>
 +            <a class="em-btn" href="<?= site_url('admin/edit/' . (int) $target->id_users) ?>">
 +                <i class="bi bi-pencil-square"></i> Edit user
 +            </a>
@@ -18738,7 +18834,13 @@ diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 +        </div>
 +    </article>
 +
-+    <article class="em-stat is-info em-rise em-rise-4">
++    <?php
++        // For an admin looking at a seller, the card is a link into that
++        // seller's key list; on their own page it stays a plain figure.
++        $keysHref = (! $isSelf) ? site_url('keys?owner=' . rawurlencode($target->username))
++                  : ($isAdmin ? null : site_url('keys'));
++    ?>
++    <?= $keysHref ? '<a class="em-stat is-info em-rise em-rise-4 is-link" href="' . $keysHref . '">' : '<article class="em-stat is-info em-rise em-rise-4">' ?>
 +        <div class="em-stat-top">
 +            <span class="em-stat-label">Keys issued</span>
 +            <span class="em-stat-ic"><i class="bi bi-key"></i></span>
@@ -18749,8 +18851,11 @@ diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 +            <?php if ($keyStats['soon'] > 0) : ?>
 +                &middot; <?= number_format($keyStats['soon']) ?> expiring
 +            <?php endif; ?>
++            <?php if ($keysHref) : ?>
++                &middot; <span class="em-stat-link"><i class="bi bi-arrow-right-short"></i> view</span>
++            <?php endif; ?>
 +        </div>
-+    </article>
++    <?= $keysHref ? '</a>' : '</article>' ?>
 +</section>
 +
 +<div class="row g-3">
