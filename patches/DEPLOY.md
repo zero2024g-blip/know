@@ -375,6 +375,81 @@ page already shows their own ledger and who topped them up, which is the
 whole of what concerns them — that scoping lives in the model, so a template
 change cannot widen it.
 
+## The sign-in list pages, like the keys list
+
+Both sign-in panels now page on the server. Each has its own **Show
+25 / 50 / 100 / 200** control and its own Previous / 1 2 3 … / Next row, so
+an admin can keep a short list of their own sign-ins next to a long one of
+everyone's. The default is 50.
+
+The state travels in the URL — `sm`/`pm` for your own list, `sa`/`pa` for
+everyone's — and every link carries the whole page's state, so paging one
+list never resets the other. Bad values are clamped rather than trusted:
+`?pm=9999` lands on the last page, `?pm=-4` on the first, and a page size
+that is not one of the four offered falls back to 50. That last one is not
+cosmetic — taking the number as given would let `?sm=100000` ask the
+database for the entire table in one query.
+
+Only one page of rows is ever loaded. The total comes from a separate
+`COUNT`, so a seller with 4,000 sign-ins costs the same to render as one
+with 40.
+
+## The app connector is not in the build
+
+`app/Controllers/Connect.php` is deliberately **absent** from the zip. It
+ships as `Connect.php.new` beside where it would go.
+
+The reason is that you keep your own: the connector is the one file written
+against your apps' protocol, and an upgrade that silently replaced it would
+break every installed copy in the field. So upload the zip, then put your
+own `Connect.php` back — see step 5 of `INSTALL.md`.
+
+Forgetting is the one mistake this install can make quietly: the panel looks
+perfectly healthy while `/data/zezr_connector` returns 404 and no app can
+check a key. So the dashboard now says so, to admins only:
+
+> **The app connector is missing.**
+
+When you are ready for the new one, rename `Connect.php.new` to
+`Connect.php`. Its AES-256-GCM envelope is not compatible with the old
+protocol, so the apps have to be updated the same day —
+`CONNECTOR-PROTOCOL.md` has the format and a working client.
+
+## `/spark` is readable on the live site today
+
+Checked against `panel.zeromods.id` while writing this:
+
+    /.env                 403      /app/Config/App.php   403
+    /vendor/autoload.php  403      /composer.json        403
+    /spark                200   <- source disclosure
+
+`spark` is CodeIgniter's CLI entry point. It holds no secrets, so the impact
+is small — it confirms the framework and roughly its version — but it should
+not be readable, and the `.htaccess` in this build refuses it. I verified
+that under Apache 2.4 with the shipped file: `/spark` comes back 403 along
+with `/.env`, `/composer.json`, `/env.template`, `/MIGRATION.sql`,
+`/app/Config/App.php`, `/vendor/autoload.php`, `/writable/logs/` and
+`/tools/genkey.php`, while `/public/assets/css/ember.css` still serves.
+
+That it is 200 today means the `.htaccess` on the server is an older copy
+than the one in this build. Re-check the list in step 9.2 of `INSTALL.md`
+after you deploy.
+
+## Installing it — `INSTALL.md`
+
+`INSTALL.md` in the zip is the step-by-step, written in Persian and against
+what is actually on your server rather than a generic template. It was
+written after checking: LiteSpeed behind Cloudflare, everything inside
+`public_html` with `index.php` at the root, and `app.baseURL` ending in
+`/public`. It covers the backup, the migration, moving the old panel aside
+rather than deleting it, the upload, restoring your `Connect.php`, the
+`.env`, permissions, the PHP version, a test checklist, and a thirty-second
+rollback.
+
+I unpacked the finished zip into an empty directory, pointed a server at it
+in exactly that layout and ran the whole panel on PHP 8.5: every page 200,
+the pager working, the connector warning showing, and no log lines.
+
 ## Cross-platform check
 
 Every page was loaded on twelve device profiles — iPhone SE / 14 Pro / 14 Pro

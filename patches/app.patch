@@ -6016,8 +6016,8 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  }
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
-+++ app/Controllers/User.php	2026-08-26 20:33:25.807892221 +0000
-@@ -2,42 +2,37 @@
++++ app/Controllers/User.php	2026-08-27 00:20:11.392870154 +0000
+@@ -2,42 +2,45 @@
  
  namespace App\Controllers;
  
@@ -6069,10 +6069,18 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 +            // Both are scoped by role inside the model, not here.
 +            'history' => $historyModel->getAll(10, 'DESC', $this->user),
 +            'stats'   => $keysModel->stats($this->user),
++            // The app connector is deliberately not shipped, so that an
++            // upgrade never overwrites the copy you wrote for your own
++            // apps. That makes forgetting to put it back the one mistake
++            // this install can make quietly: the panel looks perfectly
++            // healthy while every app in the field fails to check its key.
++            // So say it here, where an admin will see it.
++            'connectorMissing' => (int) $this->user->level === 1
++                && ! is_file(APPPATH . 'Controllers/Connect.php'),
          ];
          return view('User/dashboard', $data);
      }
-@@ -114,7 +109,10 @@
+@@ -114,7 +117,10 @@
          $data = [
              'title' => 'Users',
              'user' => $user,
@@ -6084,7 +6092,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation
          ];
-@@ -137,7 +135,6 @@
+@@ -137,7 +143,6 @@
              'title' => 'Settings',
              'user' => $user,
              'target' => $model->getUser($userid),
@@ -6092,7 +6100,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              'time' => $this->time,
              'validation' => $validation,
          ];
-@@ -211,19 +208,71 @@
+@@ -211,19 +216,71 @@
              $saldo = $this->request->getPost('saldo');
              $uplink = $this->request->getPost('uplink');
  
@@ -6169,7 +6177,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          }
      }
      
-@@ -237,11 +286,40 @@
+@@ -237,26 +294,152 @@
  
          $user = $this->user;
          $validation = Services::validation();
@@ -6179,24 +6187,59 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 +        // in the model, so a view cannot widen it by passing a flag.
 +        $isAdmin = (int) $user->level === 1;
 +
-+        // Separate instances: a CI4 model carries its query builder, and
-+        // reusing one for two differently-scoped reads is how a `where`
-+        // ends up on a query that was meant to be unscoped.
-+        //
++        // Each list carries its own page and page size, so an admin can keep
++        // a short list of their own sign-ins next to a long one of everyone's.
++        //   pm / sm - page and size for your own
++        //   pa / sa - page and size for everyone's
++        $myPer  = $this->pageSize('sm');
++        $allPer = $this->pageSize('sa');
++
 +        // If login_sessions is missing - the migration has not been run yet -
 +        // show the page without the history rather than a 500. The empty
 +        // lists say the same thing to the reader either way, and the log
 +        // says why.
-+        $mine = [];
-+        $all  = [];
++        $mine = $all = [];
++        $myPager = $allPager = null;
++
 +        try {
-+            $mine = (new LoginSessionModel())->historyFor($user, false, 40);
-+            $all  = $isAdmin ? (new LoginSessionModel())->historyFor($user, true, 100) : [];
++            // Separate instances: a CI4 model carries its query builder, and
++            // reusing one for two differently-scoped reads is how a `where`
++            // ends up on a query that was meant to be unscoped.
++            $myPager = $this->pager(
++                'pm', 'sm', $myPer,
++                (new LoginSessionModel())->countFor($user, false),
++                'your-sign-ins'
++            );
++
++            $allPager = $isAdmin ? $this->pager(
++                'pa', 'sa', $allPer,
++                (new LoginSessionModel())->countFor($user, true),
++                'all-sign-ins'
++            ) : null;
++
++            // Both pagers are built first, then told about each other: every
++            // link has to carry the whole page's state, or paging one list
++            // would silently reset the other's page and size.
++            $myPager['keep'] = ['sm' => $myPer]
++                + ($allPager ? ['pa' => $allPager['page'], 'sa' => $allPer] : []);
++
++            if ($allPager) {
++                $allPager['keep'] = ['sa' => $allPer, 'pm' => $myPager['page'], 'sm' => $myPer];
++            }
++
++            $mine = (new LoginSessionModel())
++                ->historyFor($user, false, $myPer, $myPager['offset']);
++
++            if ($allPager) {
++                $all = (new LoginSessionModel())
++                    ->historyFor($user, true, $allPer, $allPager['offset']);
++            }
 +        } catch (\Throwable $e) {
 +            log_message('critical',
 +                'login_sessions unavailable ({msg}). Sign-in history is empty and '
 +                . 'session-theft protection is NOT active.',
 +                ['msg' => $e->getMessage()]);
++            $myPager = $allPager = null;
 +        }
 +
          $data = [
@@ -6207,11 +6250,71 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 +            'validation' => $validation,
 +            'mySessions'  => $mine,
 +            'allSessions' => $all,
++            'myPager'     => $myPager,
++            'allPager'    => $allPager,
 +            'thisSession' => LoginSessionModel::hashSessionId(LoginSessionModel::currentId()),
          ];
  
          return view('User/settings', $data);
-@@ -253,10 +331,16 @@
+     }
+     
++    /**
++     * A page size from the query string, or the default.
++     *
++     * Only the offered sizes are accepted. Taking the number as given would
++     * let ?sm=100000 ask the database for the whole table in one query.
++     */
++    private function pageSize(string $param): int
++    {
++        $wanted = $this->request->getGet($param);
++        $wanted = is_scalar($wanted) ? (int) $wanted : 0;
++
++        return in_array($wanted, LoginSessionModel::PAGE_SIZES, true)
++            ? $wanted
++            : LoginSessionModel::PAGE_SIZES[1];   // 50
++    }
++
++    /**
++     * Everything the pager partial needs for one list.
++     *
++     * The page is clamped to what exists, so ?pm=9999 shows the last page
++     * rather than an empty table, and ?pm=-1 shows the first.
++     */
++    private function pager(
++        string $pageParam,
++        string $sizeParam,
++        int $per,
++        int $total,
++        string $anchor
++    ): array {
++        $pages = max(1, (int) ceil($total / $per));
++
++        $page = $this->request->getGet($pageParam);
++        $page = is_scalar($page) ? (int) $page : 1;
++        $page = min($pages, max(1, $page));
++
++        $offset = ($page - 1) * $per;
++
++        return [
++            'offset' => $offset,
++            'param'  => $pageParam,
++            'size'   => $sizeParam,
++            'page'   => $page,
++            'pages'  => $pages,
++            'total'  => $total,
++            'per'    => $per,
++            'from'   => $total === 0 ? 0 : $offset + 1,
++            'to'     => min($total, $page * $per),
++            'sizes'  => LoginSessionModel::PAGE_SIZES,
++            'anchor' => $anchor,
++            // Filled in by the caller, once every list on the page is known.
++            'keep'   => [],
++        ];
++    }
++
+     private function passwd_act()
+     {
+         $current = $this->request->getPost('current');
          $password = $this->request->getPost('password');
  
          $user = $this->user;
@@ -6230,7 +6333,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $msg = "Wrong current password.";
              $validation->setError('current', $msg);
          } elseif ($current == $password) {
-@@ -285,7 +369,10 @@
+@@ -285,7 +468,10 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Something wrong! Please check the form');
          } else {
@@ -6242,7 +6345,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $this->model->update(session('userid'), ['password' => $newPassword]);
              return redirect()->back()->with('msgSuccess', 'Password Successfuly Changed.');
          }
-@@ -315,7 +402,7 @@
+@@ -315,7 +501,7 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
          } else {
@@ -7221,8 +7324,8 @@ diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
          $connect = db_connect();
 diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionModel.php
 --- /tmp/orig_app/Models/LoginSessionModel.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Models/LoginSessionModel.php	2026-08-26 20:04:16.416311824 +0000
-@@ -0,0 +1,203 @@
++++ app/Models/LoginSessionModel.php	2026-08-27 00:07:50.692213641 +0000
+@@ -0,0 +1,233 @@
 +<?php
 +
 +namespace App\Models;
@@ -7408,22 +7511,52 @@ diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionMode
 +                    ->first();
 +    }
 +
++    /** Page sizes the settings page offers, smallest first. */
++    public const PAGE_SIZES = [25, 50, 100, 200];
++
 +    /**
-+     * Sign-ins to show on the settings page.
++     * Restrict a query to what this viewer is allowed to see.
 +     *
-+     * $user is whose list this is. An admin passing $all sees every account's,
-+     * with the username on each row; a seller only ever gets their own —
-+     * the scoping is here, not in the view.
++     * An admin asking for everyone's gets no restriction; anyone else — and
++     * an admin looking at their own list — is pinned to their own rows. The
++     * scoping is here rather than in the controller or the view, so a caller
++     * cannot widen it by passing the wrong flag.
 +     */
-+    public function historyFor(object $viewer, bool $all = false, int $limit = 60): array
++    private function scopeTo(object $viewer, bool $all): void
 +    {
 +        $isAdmin = (int) $viewer->level === 1;
 +
 +        if (! ($all && $isAdmin)) {
 +            $this->where('user_id', (int) $viewer->id_users);
 +        }
++    }
 +
-+        return $this->orderBy('id_session', 'DESC')->findAll($limit);
++    /**
++     * Sign-ins to show on the settings page.
++     *
++     * $viewer is whose list this is. An admin passing $all sees every
++     * account's, with the username on each row; a seller only ever gets
++     * their own.
++     */
++    public function historyFor(object $viewer, bool $all = false, int $limit = 60, int $offset = 0): array
++    {
++        $this->scopeTo($viewer, $all);
++
++        return $this->orderBy('id_session', 'DESC')->findAll($limit, $offset);
++    }
++
++    /**
++     * How many rows that same list holds.
++     *
++     * Kept separate from historyFor() rather than counting what it returned:
++     * the page only ever loads one page of rows, so the total has to come
++     * from the database.
++     */
++    public function countFor(object $viewer, bool $all = false): int
++    {
++        $this->scopeTo($viewer, $all);
++
++        return $this->countAllResults();
 +    }
 +}
 diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
@@ -10267,6 +10400,95 @@ diff -ruN /tmp/orig_app/Views/Layout/msgStatus.php app/Views/Layout/msgStatus.ph
      <?php endif; ?>
  </div>
  
+diff -ruN /tmp/orig_app/Views/Layout/pager.php app/Views/Layout/pager.php
+--- /tmp/orig_app/Views/Layout/pager.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Layout/pager.php	2026-08-27 00:08:43.056868758 +0000
+@@ -0,0 +1,85 @@
++<?php
++/**
++ * Pager for a server-rendered list.
++ *
++ * Expects one $pager array:
++ *   param  query variable that carries the page number
++ *   page   the page being shown, 1-based
++ *   pages  how many pages there are
++ *   total  how many rows in the whole list
++ *   from   first row number on this page, 1-based
++ *   to     last row number on this page
++ *   per    rows per page
++ *   sizes  the page sizes on offer
++ *   size   query variable that carries the page size
++ *   keep   other query variables to carry through every link
++ *   anchor id to jump back to, so a page link lands on the table it moved
++ *
++ * There is no pager here when everything fits on one page — a row of
++ * controls that cannot do anything is just noise.
++ */
++$link = static function (array $set) use ($pager) {
++    $query = array_merge($pager['keep'], $set);
++    ksort($query);
++
++    return current_url() . '?' . http_build_query($query)
++        . ($pager['anchor'] ? '#' . $pager['anchor'] : '');
++};
++
++// First page, last page, and a window either side of the current one.
++// Anything else is an ellipsis: fifty numbered links is not navigation.
++$window = 1;
++$numbers = [];
++for ($n = 1; $n <= $pager['pages']; $n++) {
++    if ($n === 1 || $n === $pager['pages'] || abs($n - $pager['page']) <= $window) {
++        $numbers[] = $n;
++    } elseif (($numbers[count($numbers) - 1] ?? null) !== '…') {
++        $numbers[] = '…';
++    }
++}
++?>
++<div class="em-pager">
++    <div class="em-pager-count">
++        Showing <b><?= number_format($pager['from']) ?></b>–<b><?= number_format($pager['to']) ?></b>
++        of <b><?= number_format($pager['total']) ?></b>
++    </div>
++
++    <div class="em-pager-size">
++        <span>Show</span>
++        <?php foreach ($pager['sizes'] as $n) : ?>
++            <?php // Changing the page size lands you back on page 1: page 7 of
++                  // the old size is not page 7 of the new one. ?>
++            <a class="em-pagebtn<?= $n === $pager['per'] ? ' is-on' : '' ?>"
++               href="<?= esc($link([$pager['size'] => $n, $pager['param'] => 1]), 'attr') ?>"
++               <?= $n === $pager['per'] ? 'aria-current="true"' : '' ?>><?= $n ?></a>
++        <?php endforeach; ?>
++    </div>
++
++    <?php if ($pager['pages'] > 1) : ?>
++        <nav class="em-pager-nav" aria-label="Pages">
++            <?php if ($pager['page'] > 1) : ?>
++                <a class="em-pagebtn" href="<?= esc($link([$pager['param'] => $pager['page'] - 1]), 'attr') ?>"
++                   rel="prev">Previous</a>
++            <?php else : ?>
++                <span class="em-pagebtn is-off">Previous</span>
++            <?php endif; ?>
++
++            <?php foreach ($numbers as $n) : ?>
++                <?php if ($n === '…') : ?>
++                    <span class="em-pager-gap">…</span>
++                <?php elseif ($n === $pager['page']) : ?>
++                    <span class="em-pagebtn is-on" aria-current="page"><?= $n ?></span>
++                <?php else : ?>
++                    <a class="em-pagebtn" href="<?= esc($link([$pager['param'] => $n]), 'attr') ?>"><?= $n ?></a>
++                <?php endif; ?>
++            <?php endforeach; ?>
++
++            <?php if ($pager['page'] < $pager['pages']) : ?>
++                <a class="em-pagebtn" href="<?= esc($link([$pager['param'] => $pager['page'] + 1]), 'attr') ?>"
++                   rel="next">Next</a>
++            <?php else : ?>
++                <span class="em-pagebtn is-off">Next</span>
++            <?php endif; ?>
++        </nav>
++    <?php endif; ?>
++</div>
 diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 --- /tmp/orig_app/Views/User/account.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Views/User/account.php	2026-08-26 14:57:10.405265385 +0000
@@ -10571,8 +10793,8 @@ diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 --- /tmp/orig_app/Views/User/dashboard.php	2026-08-24 23:02:52.619981516 +0000
-+++ app/Views/User/dashboard.php	2026-08-26 20:05:14.587543663 +0000
-@@ -2,145 +2,195 @@
++++ app/Views/User/dashboard.php	2026-08-27 00:20:11.443282797 +0000
+@@ -2,145 +2,208 @@
  
  <?= $this->section('content') ?>
  
@@ -10580,6 +10802,19 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 -    <div class="col-lg-12">
 -        <?= $this->include('Layout/msgStatus') ?>
 +<?= $this->include('Layout/msgStatus') ?>
++
++<?php if (! empty($connectorMissing)) : ?>
++    <div class="alert alert-danger d-flex align-items-start gap-2" role="alert">
++        <i class="bi bi-plug-fill"></i>
++        <div>
++            <b>The app connector is missing.</b>
++            <code>app/Controllers/Connect.php</code> is not on the server, so
++            <code>/data/zezr_connector</code> returns 404 and no app can check a key.
++            Copy your own <code>Connect.php</code> back from your backup — or rename the
++            <code>Connect.php.new</code> shipped beside it if you want the new one.
++        </div>
++    </div>
++<?php endif; ?>
 +
 +<header class="em-head em-rise">
 +    <div class="em-head-main">
@@ -10623,7 +10858,7 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +            <?= (int) $user->level === 1 ? 'across every seller' : 'registered by you' ?>
 +        </div>
 +    </article>
-+
+ 
 +    <article class="em-stat is-ok em-rise em-rise-3">
 +        <div class="em-stat-top">
 +            <span class="em-stat-label">Active</span>
@@ -10644,7 +10879,7 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +        <div class="em-stat-sub">within the next 7 days</div>
 +    </article>
 +</section>
- 
++
 +<div class="row g-3">
      <div class="col-lg-8">
 -        <div class="card mb-3">
@@ -10894,7 +11129,7 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 --- /tmp/orig_app/Views/User/settings.php	2026-08-24 23:02:52.620264827 +0000
-+++ app/Views/User/settings.php	2026-08-26 20:22:45.131065056 +0000
++++ app/Views/User/settings.php	2026-08-27 00:12:41.100547974 +0000
 @@ -2,16 +2,28 @@
  
  <?= $this->section('content') ?>
@@ -10958,7 +11193,7 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
                  <?= form_open() ?>
  
                  <input type="hidden" name="fullname_form" value="1">
-@@ -62,13 +74,219 @@
+@@ -62,13 +74,225 @@
                      <?php endif; ?>
                  </div>
                  <div class="form-group my-2">
@@ -11035,11 +11270,11 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 +};
 +?>
 +
-+<section class="em-panel em-rise em-rise-3">
++<section class="em-panel em-rise em-rise-3" id="your-sign-ins">
 +    <div class="em-panel-h">
 +        <h2><i class="bi bi-laptop"></i> Your sign-ins</h2>
 +        <div class="em-panel-act">
-+            <span class="em-pill"><?= count($mySessions) ?> recent</span>
++            <span class="em-pill"><?= $myPager ? number_format($myPager['total']) : 0 ?> total</span>
 +        </div>
 +    </div>
 +
@@ -11073,16 +11308,19 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 +                </tbody>
 +            </table>
 +        </div>
++        <?php if ($myPager) : ?>
++            <?= view('Layout/pager', ['pager' => $myPager]) ?>
++        <?php endif; ?>
 +    <?php endif; ?>
 +</section>
 +
 +<?php if ((int) $user->level === 1) : ?>
-+    <section class="em-panel em-rise em-rise-4">
++    <section class="em-panel em-rise em-rise-4" id="all-sign-ins">
 +        <div class="em-panel-h">
 +            <h2><i class="bi bi-people"></i> All sign-ins</h2>
 +            <div class="em-panel-act">
 +                <span class="em-pill is-accent">Admin</span>
-+                <span class="em-pill"><?= count($allSessions) ?> recent</span>
++                <span class="em-pill"><?= $allPager ? number_format($allPager['total']) : 0 ?> total</span>
 +            </div>
 +        </div>
 +
@@ -11117,6 +11355,9 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 +                    </tbody>
 +                </table>
 +            </div>
++            <?php if ($allPager) : ?>
++                <?= view('Layout/pager', ['pager' => $allPager]) ?>
++            <?php endif; ?>
 +        <?php endif; ?>
 +    </section>
 +<?php endif; ?>
