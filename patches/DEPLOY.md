@@ -648,6 +648,48 @@ the buttons cannot share a line the row wraps instead. The heading also wraps
 internally now, so a long game name goes under the code pill rather than
 through it. It is a shared rule, so every panel header on every page gets it.
 
+## The database user needs four privileges, not twenty
+
+Asked what to tick in hPanel, so I measured it rather than guessed: made a
+MySQL user with `SELECT, INSERT, UPDATE, DELETE` on the panel database and
+nothing else, pointed the panel at it, and ran everything.
+
+Every page 200. Both DataTables endpoints. The connector's AES round trip.
+Key generation and its balance debit, key deletion and its archive row,
+device reset, the maintenance switch, a balance edit and the ledger row it
+writes, referral creation, registration, the public key check, login and
+logout. **Zero log lines.**
+
+So untick everything except those four. Specifically not needed: `DROP`,
+`CREATE`, `ALTER`, `INDEX`, `LOCK TABLES`, `CREATE TEMPORARY TABLES`,
+`CREATE ROUTINE`, `ALTER ROUTINE`, `EXECUTE`, `TRIGGER`, `EVENT`,
+`CREATE VIEW`, `SHOW VIEW`, `REFERENCES`. The panel's row locking is
+`SELECT … FOR UPDATE` inside a transaction, which needs no privilege of its
+own — that is why `LOCK TABLES` can go.
+
+`MIGRATION.sql` is the exception, and only while it runs. Confirmed by
+running it under the four-privilege user and watching it fail on the first
+`CREATE TABLE`, then adding `CREATE, ALTER, INDEX, REFERENCES` and watching
+it finish. So: tick everything, run the migration once, untick back down to
+the four. Verified the panel still runs afterwards.
+
+## The key edit page had never been redesigned
+
+It was the one page the redesign missed — still raw Bootstrap `card`,
+`card-header` and `btn-outline-light` while every other page had moved to the
+panel's own components. That is why its two header buttons sat oddly: they
+were `btn-outline-light`, which ember.css does not style, on a dark ground.
+
+They were also icon-only with no label and no title — a person-plus and a
+pair of people, meaning "Generate" and "All keys", which neither icon says.
+The page now has a proper header with the key as its title, the status as a
+pill, and those two actions as labelled buttons where every other page keeps
+them.
+
+While converting it: `theme.css` forced `.maxDev { background: accent
+!important }`, written when the device counter was a Bootstrap badge. As an
+`em-pill` it fought the pill's own styling, so the dead rule is gone.
+
 ## Cross-platform check
 
 Every page was loaded on twelve device profiles — iPhone SE / 14 Pro / 14 Pro

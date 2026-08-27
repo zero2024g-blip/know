@@ -16706,8 +16706,61 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                  var sel = select.options[select.selectedIndex];
 diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
 --- /tmp/orig_app/Views/Keys/key_edit.php	2026-08-24 23:02:52.615642502 +0000
-+++ app/Views/Keys/key_edit.php	2026-08-27 01:23:40.160834957 +0000
-@@ -32,34 +32,34 @@
++++ app/Views/Keys/key_edit.php	2026-08-27 18:54:18.185197624 +0000
+@@ -12,54 +12,74 @@
+ // }
+ ?>
+ 
+-<div class="row pb-5 justify-content-center">
+-    <div class="col-lg-8">
+-        <?= $this->include('Layout/msgStatus') ?>
++<?= $this->include('Layout/msgStatus') ?>
+ 
++<!-- This page was the one the redesign missed: it was still raw Bootstrap
++     cards and outline buttons while every other page had moved to the
++     panel's own components, which is why its two header buttons sat oddly
++     and looked nothing like the rest. Those buttons were also icon-only with
++     no label and no title - a person-plus and a pair of people, for
++     "Generate" and "All keys", which neither icon says. They are labelled
++     buttons in the page header now, where every other page keeps them. -->
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-pencil-square"></i> Key</span>
++        <h1><?= esc($key->user_key) ?></h1>
++        <p>Issued by <?= esc($key->registrator ?: 'unknown') ?><?= $key->expired_date ? ' &middot; expires ' . esc($key->expired_date) : ' &middot; not started yet' ?></p>
+     </div>
+-    <div class="col-lg-8 mb-3">
+-        <div class="card">
+-            <div class="card-header p3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+-                <div class="pt-1 text-nowrap">
+-                    <i class="bi bi-pencil-square me-2"></i>Key Information
+-                </div>
+-                <div class="text-end">
+-                    <a class="btn btn-sm btn-outline-light" href="<?= site_url('keys/generate') ?>"><i class="bi bi-person-plus"></i></a>
+-                    <a class="btn btn-sm btn-outline-light" href="<?= site_url('keys') ?>"><i class="bi bi-people"></i></a>
++    <div class="em-head-act">
++        <a class="em-btn" href="<?= site_url('keys') ?>">
++            <i class="bi bi-card-list"></i> All keys
++        </a>
++        <a class="em-btn is-primary" href="<?= site_url('keys/generate') ?>">
++            <i class="bi bi-plus-lg"></i> New key
++        </a>
++    </div>
++</header>
++
++<div class="row justify-content-center">
++    <div class="col-lg-8">
++        <section class="em-panel em-rise em-rise-1">
++            <div class="em-panel-h">
++                <h2><i class="bi bi-pencil-square"></i> Key information</h2>
++                <div class="em-panel-act">
++                    <span class="em-pill <?= (int) $key->status === 1 ? 'is-ok' : 'is-bad' ?>">
++                        <span class="em-dot"></span><?= (int) $key->status === 1 ? 'Active' : 'Blocked' ?>
++                    </span>
+                 </div>
+             </div>
+-            <div class="card-body">
++            <div class="em-panel-b">
                  <?= form_open('keys/edit') ?>
  
                  <div class="row">
@@ -16751,7 +16804,7 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
                              <?php endif; ?>
                          </div>
                      <?php endif; ?>
-@@ -68,28 +68,28 @@
+@@ -68,40 +88,40 @@
                          <?php $sel_status = ['' => '&mdash; Select Status &mdash;', '0' => 'Banned/Block', '1' => 'Active',]; ?>
                          <?= form_dropdown(['class' => 'form-select', 'name' => 'status', 'id' => 'status'], $sel_status, $key->status) ?>
                          <?php if ($validation->hasError('status')) : ?>
@@ -16779,15 +16832,31 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
                      </div>
                      <div class="col-lg-12 mb-3">
 -                        <label for="devices" class="form-label">Devices <span class="bg-dark text-white px-1 rounded maxDev"><?= $key_info->total ?>/<?= $key->max_devices ?></span> <small class="text-muted">(Separately with enter)</small></label>
-+                        <label for="devices" class="form-label">Devices <span class="bg-dark text-white px-1 rounded maxDev"><?= (int) $key_info->total ?>/<?= (int) $key->max_devices ?></span> <small class="text-muted">(Separately with enter)</small></label>
++                        <label for="devices" class="form-label">Devices <span class="em-pill is-info maxDev"><?= (int) $key_info->total ?>/<?= (int) $key->max_devices ?></span> <small class="text-muted">(Separately with enter)</small></label>
                          <textarea class="form-control" name="devices" id="devices" rows="<?= ($key_info->total > $key->max_devices) ? 3 : $key_info->total ?>"><?= old('devices') ?: ($key_info->total ? $key_info->devices : '') ?></textarea>
                          <?php if ($validation->hasError('devices')) : ?>
 -                            <small id="help-devices" class="text-danger"><?= $validation->getError('devices') ?></small>
 +                            <small id="help-devices" class="text-danger"><?= esc($validation->getError('devices')) ?></small>
                          <?php endif; ?>
                      </div>
-                     <div class="col-lg-6">
-@@ -153,13 +153,13 @@
+-                    <div class="col-lg-6">
+-                        <button class="btn btn-outline-primary btnUpdate" disabled>
+-                            <i class="bi bi-check2-circle me-1"></i>Update User Key
++                    <div class="col-lg-12">
++                        <button class="em-btn is-primary btnUpdate" disabled>
++                            <i class="bi bi-check2-circle me-1"></i>Update user key
+                         </button>
+                     </div>
+                     <?= form_close() ?>
+ 
+                 </div>
+             </div>
+-        </div>
++        </section>
+     </div>
+ </div>
+ 
+@@ -153,13 +173,13 @@
  <?= $this->section('js') ?>
  <script>
      $(document).ready(function() {
