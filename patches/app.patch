@@ -9827,7 +9827,7 @@ diff -ruN /tmp/orig_app/Config/Routing.php app/Config/Routing.php
 +}
 diff -ruN /tmp/orig_app/Config/Security.php app/Config/Security.php
 --- /tmp/orig_app/Config/Security.php	2026-08-24 23:02:52.524856607 +0000
-+++ app/Config/Security.php	2026-08-27 01:07:38.543266536 +0000
++++ app/Config/Security.php	2026-08-28 23:17:13.826438066 +0000
 @@ -6,90 +6,81 @@
  
  class Security extends BaseConfig
@@ -9936,7 +9936,7 @@ diff -ruN /tmp/orig_app/Config/Security.php app/Config/Security.php
 +     *
 +     * Randomize the CSRF Token for added security.
 +     */
-+    public bool $tokenRandomize = false;
++    public bool $tokenRandomize = true;
 +
 +    /**
 +     * --------------------------------------------------------------------------
@@ -12356,8 +12356,8 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +# -------- Errors -----------
 diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 --- /tmp/orig_app/Controllers/Games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Games.php	2026-08-28 22:49:14.280680195 +0000
-@@ -0,0 +1,287 @@
++++ app/Controllers/Games.php	2026-08-28 23:13:48.252824504 +0000
+@@ -0,0 +1,290 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -12468,9 +12468,10 @@ diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 +            ],
 +            'status'     => ['label' => 'status', 'rules' => 'required|in_list[0,1]'],
 +            'sort_order' => ['label' => 'order',  'rules' => 'permit_empty|integer|greater_than_equal_to[0]|less_than_equal_to[9999]'],
-+            'max_devices'  => ['label' => 'max devices',  'rules' => 'permit_empty|integer|greater_than_equal_to[0]|less_than_equal_to[1000]'],
-+            'device_price' => ['label' => 'device price', 'rules' => 'permit_empty|numeric|greater_than_equal_to[0]|less_than_equal_to[100000]'],
-+            'device_mode'  => ['label' => 'device mode',  'rules' => 'permit_empty|in_list[0,1,2]'],
++            'max_devices'    => ['label' => 'max devices',  'rules' => 'permit_empty|integer|greater_than_equal_to[1]|less_than_equal_to[1000]'],
++            'allow_unlimited'=> ['label' => 'unlimited',    'rules' => 'permit_empty|in_list[0,1]'],
++            'device_price'   => ['label' => 'device price', 'rules' => 'permit_empty|numeric|greater_than_equal_to[0]|less_than_equal_to[100000]'],
++            'device_mode'    => ['label' => 'device mode',  'rules' => 'permit_empty|in_list[0,1,2]'],
 +        ];
 +
 +        // Validate the code we will actually store, not the posted one, or a
@@ -12489,20 +12490,22 @@ diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 +                    . implode(' ', $validation->getErrors()));
 +        }
 +
-+        // Device rules for this game. max_devices 0 means "no game limit"
-+        // (still bounded by the hard cap elsewhere); the price per extra
-+        // device and whether the field is shown at all are independent.
-+        $maxDev = max(0, (int) $this->request->getPost('max_devices'));
-+        $maxDev = min($maxDev, 1000);
++        // Device rules for this game.
++        //   max_devices     the seller's cap, a plain 1..1000 number.
++        //   allow_unlimited whether a 0 at key creation makes an unlimited key.
++        //   device_mode     who may set the count (0 off / 1 admin / 2 all).
++        //   device_price    the charge per device beyond the first.
++        $maxDev = min(max(1, (int) $this->request->getPost('max_devices')), 1000);
 +
 +        $data = [
-+            'code'         => $code,
-+            'name'         => trim((string) $this->request->getPost('name')),
-+            'status'       => (int) $this->request->getPost('status'),
-+            'sort_order'   => (int) ($this->request->getPost('sort_order') ?: 0),
-+            'max_devices'  => $maxDev,
-+            'device_price' => round(max(0, (float) $this->request->getPost('device_price')), 2),
-+            'device_mode'  => in_array((string) $this->request->getPost('device_mode'), ['0', '1', '2'], true)
++            'code'            => $code,
++            'name'            => trim((string) $this->request->getPost('name')),
++            'status'          => (int) $this->request->getPost('status'),
++            'sort_order'      => (int) ($this->request->getPost('sort_order') ?: 0),
++            'max_devices'     => $maxDev,
++            'allow_unlimited' => (string) $this->request->getPost('allow_unlimited') === '1' ? 1 : 0,
++            'device_price'    => round(max(0, (float) $this->request->getPost('device_price')), 2),
++            'device_mode'     => in_array((string) $this->request->getPost('device_mode'), ['0', '1', '2'], true)
 +                ? (int) $this->request->getPost('device_mode') : 2,
 +        ];
 +
@@ -12712,7 +12715,7 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-28 22:51:09.184814372 +0000
++++ app/Controllers/Keys.php	2026-08-28 23:13:26.855646495 +0000
 @@ -2,6 +2,9 @@
  
  namespace App\Controllers;
@@ -13156,7 +13159,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                          'errors' => [
                              'greater_than_equal_to' => 'Minimum {field} is invalid.',
                              'numeric' => 'Invalid max of {field}.'
-@@ -273,14 +477,56 @@
+@@ -273,14 +477,55 @@
              $message = setMessage("Please top up to your beloved admin.", 'warning');
          }
  
@@ -13173,9 +13176,8 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +            $games[$g->code] = $g->name;
 +
 +            $mode      = (int) $g->device_mode;
-+            $rawCap    = (int) $g->max_devices;
-+            $unlimited = $rawCap <= 0;
-+            $cap       = $unlimited ? $hardCap : min($rawCap, $hardCap);
++            $cap       = min(max(1, (int) $g->max_devices), $hardCap);
++            $unlimited = (int) $g->allow_unlimited === 1;
 +
 +            // Does THIS viewer get to choose the count for this game?
 +            //   off        -> nobody;
@@ -13189,9 +13191,9 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                'max'       => $isAdmin ? $hardCap : $cap,
 +                'price'     => round(max(0, (float) $g->device_price), 2),
 +                'field'     => $field,
-+                // May THIS viewer type 0 for an unlimited key? An admin always
-+                // may; a seller only when the game itself is unlimited.
-+                'unlimited' => $isAdmin || $unlimited,
++                // May a 0 (unlimited) be typed for this game? It is an admin
++                // switch that applies to everyone alike, admin included.
++                'unlimited' => $unlimited,
 +            ];
 +        }
 +
@@ -13220,7 +13222,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'validation' => $validation,
          ];
          return view('Keys/generate', $data);
-@@ -293,9 +539,23 @@
+@@ -293,9 +538,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -13246,7 +13248,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
          $form_rules = [
              'game' => [
                  'label' => 'Games',
-@@ -306,15 +566,21 @@
+@@ -306,15 +565,21 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -13270,7 +13272,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +588,9 @@
+@@ -322,7 +587,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -13281,7 +13283,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +599,191 @@
+@@ -331,57 +598,194 @@
          ];
  
          $validation = Services::validation();
@@ -13313,10 +13315,19 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        $devRules = $this->gameModel->deviceRules($game);
 +        $HARD     = \App\Models\GameModel::DEVICE_HARD_CAP;
 +
++        // 0 means "unlimited", and it is refused whenever the game's
++        // allow-unlimited switch is off -- for a seller AND for an admin, so
++        // the switch is a hard gate, not a seller-only one.
++        if ($maxd === 0 && ! $devRules['unlimited']) {
++            return redirect()->back()->withInput()->with('msgDanger',
++                'Unlimited keys are turned off for this game. Devices must be at least 1.');
++        }
++
 +        if ($devRules['mode'] === \App\Models\GameModel::MODE_OFF) {
 +            $maxd = 1;
 +        } elseif ($isAdmin) {
-+            // 0 stays 0 (unlimited); anything else is clamped to [1, hard cap].
++            // An admin is bounded only by the hard cap. 0 (unlimited) is
++            // allowed only when the game's switch permits it, checked above.
 +            $maxd = $maxd === 0 ? 0 : max(1, min($maxd, $HARD));
 +        } elseif ($devRules['mode'] === \App\Models\GameModel::MODE_ADMIN) {
 +            // Sellers do not choose for this game.
@@ -13341,15 +13352,9 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -                        'max_devices' => $maxd,
 -                        'registrator' => $user->username,
 -                    ];
-+            // Seller, mode ALL.
-+            if ($maxd === 0) {
-+                if (! $devRules['unlimited']) {
-+                    return redirect()->back()->withInput()->with('msgDanger',
-+                        'Unlimited devices are not allowed for this game. Set 1 to '
-+                        . $devRules['cap'] . '.');
-+                }
-+                // 0 = unlimited, allowed because the game is unlimited.
-+            } elseif ($maxd < 1 || $maxd > $devRules['cap']) {
++            // Seller, mode ALL. 0 = unlimited (already gated above); otherwise
++            // it must sit within the game's finite cap.
++            if ($maxd !== 0 && ($maxd < 1 || $maxd > $devRules['cap'])) {
 +                return redirect()->back()->withInput()->with('msgDanger',
 +                    'For this game you may set 1 to ' . $devRules['cap']
 +                    . ($devRules['unlimited'] ? ' devices, or 0 for unlimited.' : ' devices.'));
@@ -14950,8 +14955,8 @@ diff -ruN /tmp/orig_app/Models/DurationModel.php app/Models/DurationModel.php
 +}
 diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 --- /tmp/orig_app/Models/GameModel.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Models/GameModel.php	2026-08-28 22:49:02.000684775 +0000
-@@ -0,0 +1,113 @@
++++ app/Models/GameModel.php	2026-08-28 23:12:47.127992945 +0000
+@@ -0,0 +1,114 @@
 +<?php
 +
 +namespace App\Models;
@@ -14963,7 +14968,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +    protected $table      = 'games';
 +    protected $primaryKey = 'id_game';
 +
-+    protected $allowedFields = ['code', 'name', 'status', 'sort_order', 'max_devices', 'device_price', 'device_mode'];
++    protected $allowedFields = ['code', 'name', 'status', 'sort_order', 'max_devices', 'allow_unlimited', 'device_price', 'device_mode'];
 +    protected $useTimestamps = true;
 +
 +    // Objects, not arrays. CI4 defaults to arrays and the rest of this panel
@@ -14979,7 +14984,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +    public function sellable(bool $isAdmin): array
 +    {
 +        $builder = $this->db->table('games g')
-+            ->select('g.id_game, g.code, g.name, g.max_devices, g.device_price, g.device_mode')
++            ->select('g.id_game, g.code, g.name, g.max_devices, g.allow_unlimited, g.device_price, g.device_mode')
 +            ->join('game_durations d', 'd.game_id = g.id_game', 'inner')
 +            ->where('g.status', 1)
 +            ->where('d.status', 1);
@@ -14989,7 +14994,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +        }
 +
 +        return $builder
-+            ->groupBy('g.id_game, g.code, g.name, g.max_devices, g.device_price, g.device_mode, g.sort_order')
++            ->groupBy('g.id_game, g.code, g.name, g.max_devices, g.allow_unlimited, g.device_price, g.device_mode, g.sort_order')
 +            ->orderBy('g.sort_order', 'ASC')
 +            ->orderBy('g.name', 'ASC')
 +            ->get()->getResultObject();
@@ -15018,12 +15023,12 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +
 +    /**
 +     * The device rules for one game code:
-+     *   cap       - the most devices a SELLER may put on a key. 0 in the table
-+     *               means "no limit"; that becomes the hard cap here, and
-+     *               `unlimited` is set so the caller can also let a seller ask
-+     *               for a truly unlimited key.
-+     *   unlimited - whether the game lets a key take unlimited devices (max
-+     *               was 0). Only then may a 0 typed at creation mean "no cap".
++     *   cap       - the most devices a SELLER may put on a key: a plain number
++     *               from 1 to the hard cap.
++     *   unlimited - whether an unlimited key (0 in the box) is allowed AT ALL
++     *               for this game. This is an explicit admin switch
++     *               (allow_unlimited), independent of the cap: with it off, a
++     *               0 is refused for everyone, admin included.
 +     *   price     - the charge for each device beyond the first.
 +     *   mode      - MODE_OFF / MODE_ADMIN / MODE_ALL, who may choose the count.
 +     *
@@ -15034,12 +15039,13 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +     */
 +    public function deviceRules(string $code): array
 +    {
-+        $g = $this->select('max_devices, device_price, device_mode')
++        $g = $this->select('max_devices, allow_unlimited, device_price, device_mode')
 +            ->where('code', $code)->first();
 +
-+        $rawCap    = (int) ($g->max_devices ?? 1);
-+        $unlimited = $rawCap <= 0;
-+        $cap       = $unlimited ? self::DEVICE_HARD_CAP : min($rawCap, self::DEVICE_HARD_CAP);
++        // The cap is always a finite 1..hard-cap number now. A stray 0 or
++        // negative from old data is read as 1, never as "unlimited" — unlimited
++        // is only ever the allow_unlimited switch below.
++        $cap = min(max(1, (int) ($g->max_devices ?? 1)), self::DEVICE_HARD_CAP);
 +
 +        $mode = (int) ($g->device_mode ?? self::MODE_ALL);
 +        if (! in_array($mode, [self::MODE_OFF, self::MODE_ADMIN, self::MODE_ALL], true)) {
@@ -15048,7 +15054,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +
 +        return [
 +            'cap'       => $cap,
-+            'unlimited' => $unlimited,
++            'unlimited' => (int) ($g->allow_unlimited ?? 0) === 1,
 +            'price'     => max(0, (float) ($g->device_price ?? 0)),
 +            'mode'      => $mode,
 +        ];
@@ -16094,8 +16100,8 @@ diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 --- /tmp/orig_app/Views/Admin/games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/Admin/games.php	2026-08-28 22:52:14.215444926 +0000
-@@ -0,0 +1,493 @@
++++ app/Views/Admin/games.php	2026-08-28 23:14:11.678837011 +0000
+@@ -0,0 +1,508 @@
 +<?= $this->extend('Layout/Starter') ?>
 +
 +<?= $this->section('content') ?>
@@ -16156,6 +16162,7 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +                        data-status="<?= (int) $g->status ?>"
 +                        data-sort="<?= (int) $g->sort_order ?>"
 +                        data-maxdev="<?= (int) ($g->max_devices ?? 1) ?>"
++                        data-unlim="<?= (int) ($g->allow_unlimited ?? 0) ?>"
 +                        data-devprice="<?= esc(number_format((float) ($g->device_price ?? 0), 2, '.', ''), 'attr') ?>"
 +                        data-devmode="<?= (int) ($g->device_mode ?? 2) ?>"
 +                        data-locked="<?= $keys > 0 ? '1' : '0' ?>">
@@ -16321,8 +16328,8 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +                    <div class="em-field">
 +                        <label for="g_maxdev">Max devices (sellers)</label>
 +                        <input type="number" class="form-control" name="max_devices" id="g_maxdev"
-+                               min="0" max="1000" value="1">
-+                        <p class="em-hint">The most a seller may pick. <b>0 = unlimited.</b></p>
++                               min="1" max="1000" value="1">
++                        <p class="em-hint">The most a seller may pick, from 1 to 1000.</p>
 +                    </div>
 +                </div>
 +                <div class="col-6">
@@ -16349,6 +16356,19 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +                    (their keys are single-device) but leaves it open for you.
 +                    <b>Off</b> hides it from everyone. You are never bound by
 +                    the seller limit above.
++                </p>
++            </div>
++
++            <div class="em-field">
++                <label class="em-check">
++                    <input type="checkbox" name="allow_unlimited" id="g_unlim" value="1">
++                    <span>Allow unlimited keys (typing 0 = no device limit)</span>
++                </label>
++                <p class="em-hint">
++                    Off by default. When off, a 0 in the Max Devices box is
++                    refused for everyone — admins included — with "devices must
++                    be at least 1", so nobody can slip past the cap with a 0.
++                    Turn it on only when you truly want unlimited-device keys.
 +                </p>
 +            </div>
 +        </div>
@@ -16483,6 +16503,7 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +            document.getElementById('g_status').value = d.status !== undefined ? d.status : '1';
 +            document.getElementById('g_sort').value   = d.sort   || 0;
 +            document.getElementById('g_maxdev').value = (d.maxdev !== undefined && d.maxdev !== '') ? d.maxdev : 1;
++            document.getElementById('g_unlim').checked = d.unlim === '1';
 +            document.getElementById('g_devprice').value = d.devprice || '0.00';
 +            // Default a NEW game to "everyone"; for an existing one honour it.
 +            document.getElementById('g_devmode').value = (d.devmode === undefined) ? '2' : d.devmode;
@@ -16509,7 +16530,7 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +                fillGame({
 +                    id: b.dataset.id, code: b.dataset.code, name: b.dataset.name,
 +                    status: b.dataset.status, sort: b.dataset.sort, locked: b.dataset.locked,
-+                    maxdev: b.dataset.maxdev, devprice: b.dataset.devprice, devmode: b.dataset.devmode
++                    maxdev: b.dataset.maxdev, unlim: b.dataset.unlim, devprice: b.dataset.devprice, devmode: b.dataset.devmode
 +                });
 +                open(gameModal);
 +            });

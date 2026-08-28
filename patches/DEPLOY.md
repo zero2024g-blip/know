@@ -1286,6 +1286,38 @@ unlimited key bound six different devices while a capped-2 key still stopped at
 two, and the keys list shows the device meter as "n/\u221E" for an unlimited
 key.
 
+## Unlimited keys are now an explicit per-game switch
+
+Follows your note that a seller with, say, a cap of 10 should not be able to
+type 0 and jump to unlimited. The cap and the unlimited option are now
+separate:
+  - **Max devices** is a plain seller cap, 1 to 1000. No more "0 = unlimited"
+    hidden in the cap.
+  - **Allow unlimited keys** is a new per-game switch, **off by default**. Only
+    when it is on does a 0 in the Max Devices box make an unlimited key. When
+    it is off, a 0 is refused **for everyone, admin included**, with "devices
+    must be at least 1" — so nobody can slip past the cap with a 0.
+Stored as `games.allow_unlimited`. Verified end to end: with the switch off, a
+seller's 0 and an admin's 0 were both refused and an over-cap number was
+refused; with it on, both could make an unlimited key, priced at the base tier.
+The connector still needs the one-line `max > 0` guard (CONNECTOR-PROTOCOL.md)
+for an unlimited key to actually accept devices.
+
+## Auth hardening and a security review (for your tester)
+
+Reviewed login and registration end to end and hardened one thing:
+**CSRF tokens are now randomized** (`Security::$tokenRandomize = true`), which
+masks the token per request against BREACH-style extraction. Confirmed forms
+and AJAX (the key reset/delete calls, which carry the token in a meta tag and
+rotate it from each response) still work in a real browser.
+
+Everything else was already sound and was proven with live attempts:
+registration cannot escalate `level`/`saldo`/`status` by mass assignment; a
+referral code funds exactly one account even under a concurrent race; the
+session id regenerates on login (no fixation); login is rate-limited and
+enumeration-safe; SQLi in login/register/connector is inert. A full summary a
+tester can read is in `SECURITY.md`.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.
