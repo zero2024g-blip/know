@@ -1295,13 +1295,28 @@ separate:
     hidden in the cap.
   - **Allow unlimited keys** is a new per-game switch, **off by default**. Only
     when it is on does a 0 in the Max Devices box make an unlimited key. When
-    it is off, a 0 is refused **for everyone, admin included**, with "devices
-    must be at least 1" — so nobody can slip past the cap with a 0.
+    it is off, a 0 is refused **for everyone, admin included** — on both the
+    New license page **and the Edit key page**, so neither form lets you slip a
+    0 past the cap.
+
+The refusal message is deliberately neutral — **"Devices must be at least 1."**
+It does **not** say unlimited is turned off, because that would tell a seller
+the option exists. Going further, the New license page now emits **no
+"unlimited" wording at all** for a viewer who has no game with the switch on:
+the flag, the note, and the "type 0" affordance are only rendered for a game
+that actually has unlimited enabled and that the viewer may set the count for.
+So a plain seller never sees a hint of the feature in the page or its source;
+only games where you deliberately turned it on show it.
+
 Stored as `games.allow_unlimited`. Verified end to end: with the switch off, a
-seller's 0 and an admin's 0 were both refused and an over-cap number was
-refused; with it on, both could make an unlimited key, priced at the base tier.
-The connector still needs the one-line `max > 0` guard (CONNECTOR-PROTOCOL.md)
-for an unlimited key to actually accept devices.
+seller's 0 and an admin's 0 were both refused on New license and on Edit key,
+and an over-cap number was refused; with it on, both could make an unlimited
+key, priced at the base tier. Also confirmed by rendering the New license page
+as a seller and as an admin with every game's switch off — the page HTML
+contained the word "unlimited" zero times — and with a game switched on, only
+that game showed the affordance. The connector still needs the one-line
+`max > 0` guard (CONNECTOR-PROTOCOL.md) for an unlimited key to actually
+accept devices.
 
 ## Auth hardening and a security review (for your tester)
 
