@@ -367,14 +367,18 @@ VALUES ('connector.maintenance', '0', NOW(), NOW());
 --     columns and backfill, they never drop or overwrite a key).
 -- ---------------------------------------------------------------------
 
--- 10a. Device limits per game. min/max are how many devices a SELLER may put
---      on a key of that game; lock_devices=1 fixes the count at min_devices
---      for sellers so they cannot hand themselves extra slots. An admin is
---      never bound by these. Existing games get the old free 1..100 range.
+-- 10a. Device controls per game, all set from Admin -> Games:
+--        max_devices  the most devices a SELLER may put on a key (0 = no
+--                     limit). An admin is never bound by it.
+--        device_price the charge for each device beyond the first (0 = free).
+--        device_field 1 = offer the Max Devices field; 0 = hide it for
+--                     everyone and make every key of this game a single
+--                     device.
+--      Defaults keep new games to one device until you raise the limit.
 ALTER TABLE `games`
-  ADD COLUMN `min_devices`  INT     NOT NULL DEFAULT 1   AFTER `name`,
-  ADD COLUMN `max_devices`  INT     NOT NULL DEFAULT 100 AFTER `min_devices`,
-  ADD COLUMN `lock_devices` TINYINT NOT NULL DEFAULT 0   AFTER `max_devices`;
+  ADD COLUMN `max_devices`  INT           NOT NULL DEFAULT 1    AFTER `name`,
+  ADD COLUMN `device_price` DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER `max_devices`,
+  ADD COLUMN `device_field` TINYINT       NOT NULL DEFAULT 1    AFTER `device_price`;
 
 -- 10b. Own a key by the seller's immutable id, not their username.
 --      A username can be deleted and registered again by someone else; the
@@ -407,3 +411,32 @@ UPDATE `keys_code` k
 -- Check which keys ended up owned by nobody:
 --   SELECT registrator, COUNT(*) FROM keys_code WHERE registrator_id IS NULL
 --     GROUP BY registrator;
+
+-- ---------------------------------------------------------------------
+-- 11. Sign-in IP, and a security log
+--     Added 2026-08-28. Both safe: one new column, one new table.
+-- ---------------------------------------------------------------------
+
+-- 11a. The readable address on each sign-in, for the list in Your settings.
+--      The existing ip_hash still does the rate-limit matching; this is only
+--      for display, behind the Hide/Show toggle.
+ALTER TABLE `login_sessions`
+  ADD COLUMN `ip_address` VARCHAR(45) NULL AFTER `ip_hash`;
+
+-- 11b. Failed and blocked attempts at login, register and key check, shown in
+--      Admin -> Security log. Written fail-open, so a failure to log never
+--      breaks the thing being logged. Rows older than 90 days are trimmed
+--      automatically.
+CREATE TABLE IF NOT EXISTS `security_log` (
+  `id_log`     INT AUTO_INCREMENT PRIMARY KEY,
+  `event`      VARCHAR(24) NOT NULL,
+  `scope`      VARCHAR(16) NOT NULL,
+  `username`   VARCHAR(66) NULL,
+  `ip_address` VARCHAR(45) NULL,
+  `user_agent` VARCHAR(255) NULL,
+  `device`     VARCHAR(96) NULL,
+  `detail`     VARCHAR(96) NULL,
+  `created_at` DATETIME NOT NULL,
+  KEY `idx_event`   (`event`, `created_at`),
+  KEY `idx_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

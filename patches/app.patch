@@ -9536,8 +9536,8 @@ diff -ruN /tmp/orig_app/Config/Publisher.php app/Config/Publisher.php
 +}
 diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 --- /tmp/orig_app/Config/Routes.php	2026-08-24 23:02:52.524373647 +0000
-+++ app/Config/Routes.php	2026-08-27 01:22:37.042814133 +0000
-@@ -1,82 +1,68 @@
++++ app/Config/Routes.php	2026-08-28 09:51:52.334536338 +0000
+@@ -1,82 +1,72 @@
  <?php
  
 -namespace Config;
@@ -9636,6 +9636,10 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 +    // Read-only admin screens. Both re-check the level themselves.
 +    $routes->get('balance-history', 'Account::ledger');
 +    $routes->get('deleted-keys', 'Keys::deleted');
++
++    // Security log: failed and blocked attempts at login, register and check.
++    $routes->get('security', 'Security::index');
++    $routes->match(['get', 'post'], 'security/api', 'Security::api');
 +    $routes->match(['get', 'post'], 'manage-users', 'User::manage_users');
 +    $routes->match(['get', 'post'], 'edit/(:num)', 'User::user_edit/$1');
 +
@@ -11086,8 +11090,8 @@ diff -ruN /tmp/orig_app/Config/WorkerMode.php app/Config/WorkerMode.php
 +}
 diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
 --- /tmp/orig_app/Controllers/Account.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Account.php	2026-08-27 23:49:52.564921677 +0000
-@@ -0,0 +1,126 @@
++++ app/Controllers/Account.php	2026-08-28 09:56:19.947962792 +0000
+@@ -0,0 +1,136 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -11203,7 +11207,7 @@ diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
 +            $reason = '';
 +        }
 +
-+        return view('Admin/balance_history', [
++        $data = [
 +            'title'  => 'Balance history',
 +            'user'   => $this->me,
 +            'time'   => new \CodeIgniter\I18n\Time(),
@@ -11211,13 +11215,32 @@ diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
 +            'totals' => $this->balance->globalTotals(),
 +            'reason' => $reason,
 +            'known'  => $known,
-+        ]);
++        ];
++
++        // A filter click asks for just the table panel (frag=1) and swaps it
++        // in place, so the page does not reload. The whole request still runs
++        // through this same admin-only method, so nothing is less guarded than
++        // the full page — only the layout around it is skipped.
++        if ($this->request->getGet('frag') === '1') {
++            return view('Admin/_ledger_panel', $data);
++        }
++
++        return view('Admin/balance_history', $data);
 +    }
 +}
 diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 --- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
-+++ app/Controllers/Auth.php	2026-08-26 20:04:16.416584746 +0000
-@@ -133,7 +133,25 @@
++++ app/Controllers/Auth.php	2026-08-28 09:51:10.185399704 +0000
+@@ -71,6 +71,8 @@
+         // 1) Already hard-blocked? show remaining time, no auth attempt.
+         $remain = $this->rateRemaining($ipHash);
+         if ($remain > 0) {
++            $this->noteAttempt(\App\Models\SecurityLogModel::BLOCKED, 'login',
++                $this->request->getPost('username'), 'hit while blocked (' . $remain . 's left)');
+             return redirect()->route('login')->with('msgDanger', $this->waitMessage($remain));
+         }
+ 
+@@ -133,7 +135,25 @@
                  'time_login' => $stay_log ? $time::now()->addHours(24) : $time::now()->addMinutes(30),
                  'time_since' => $time::now(),
              ]);
@@ -11228,7 +11251,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 +            // binds the session to this browser: see LoginSessionModel.
 +            try {
 +                (new \App\Models\LoginSessionModel())
-+                    ->begin($cekUser, \App\Models\LoginSessionModel::currentId(), $ipHash);
++                    ->begin($cekUser, \App\Models\LoginSessionModel::currentId(), $ipHash, $this->clientIp());
 +            } catch (\Throwable $e) {
 +                // A sign-in must not fail because the history table is
 +                // unavailable, but the gap has to be visible.
@@ -11244,7 +11267,39 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          }
  
          // Wrong credentials -> count the failed attempt.
-@@ -189,15 +207,60 @@
+@@ -143,10 +163,31 @@
+     private function loginFail(string $ipHash)
+     {
+         $blk = $this->rateFail($ipHash, self::LOGIN_LIMIT, self::LOGIN_WINDOW, self::LOGIN_BLOCK);
++        $this->noteAttempt(
++            $blk > 0 ? \App\Models\SecurityLogModel::BLOCKED : \App\Models\SecurityLogModel::LOGIN_FAIL,
++            'login',
++            $this->request->getPost('username'),
++            $blk > 0 ? 'rate limit: blocked ' . $blk . 's' : 'wrong credentials'
++        );
+         $msg = $blk > 0 ? $this->waitMessage($blk) : '<strong>Failed</strong> The login information is incorrect.';
+         return redirect()->route('login')->withInput()->with('msgDanger', $msg);
+     }
+ 
++    /**
++     * Record one refused attempt for the admin security log. Fail-open: the
++     * model swallows its own errors, so a login still fails cleanly if the
++     * table is gone. The username is whatever was typed — never trusted.
++     */
++    private function noteAttempt(string $event, string $scope, $username, string $detail): void
++    {
++        (new \App\Models\SecurityLogModel())->note(
++            $event, $scope,
++            is_scalar($username) ? (string) $username : null,
++            $this->clientIp(),
++            $detail
++        );
++    }
++
+     public function register_action()
+     {
+         $ipHash = md5('register_' . $this->clientIp());
+@@ -189,20 +230,71 @@
              'saldo'    => $rCheck->set_saldo ?: 0,
              'uplink'   => $rCheck->created_by,
              'status'   => 1,
@@ -11310,7 +11365,18 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      }
  
      private function registerFail(string $ipHash, string $reason)
-@@ -210,9 +273,17 @@
+     {
+         $blk = $this->rateFail($ipHash, self::REG_LIMIT, self::REG_WINDOW, self::REG_BLOCK);
++        $this->noteAttempt(
++            $blk > 0 ? \App\Models\SecurityLogModel::BLOCKED : \App\Models\SecurityLogModel::REGISTER_FAIL,
++            'register',
++            $this->request->getPost('username'),
++            $blk > 0 ? 'rate limit: blocked ' . $blk . 's' : mb_substr(strip_tags($reason), 0, 96)
++        );
+         $msg = $blk > 0 ? $this->waitMessage($blk) : $reason;
+         return redirect()->back()->withInput()->with('msgDanger', $msg);
+     }
+@@ -210,9 +302,17 @@
      public function logout()
      {
          if (session()->has('userid')) {
@@ -11329,7 +11395,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          }
          return redirect()->to('login');
      }
-@@ -241,6 +312,7 @@
+@@ -241,6 +341,7 @@
                  return (int) $row['blocked_until'] - $now;
              }
          } catch (\Throwable $e) {
@@ -11337,7 +11403,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          }
          return 0;
      }
-@@ -279,6 +351,7 @@
+@@ -279,6 +380,7 @@
              }
              return $remaining;
          } catch (\Throwable $e) {
@@ -11345,7 +11411,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
              return 0;
          }
      }
-@@ -289,9 +362,27 @@
+@@ -289,9 +391,27 @@
          try {
              db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete();
          } catch (\Throwable $e) {
@@ -11373,7 +11439,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      /** Human-friendly "try again in X" message. */
      private function waitMessage(int $seconds): string
      {
-@@ -311,9 +402,4 @@
+@@ -311,9 +431,4 @@
      /**
       * Real client IP (Cloudflare header first — the site is behind Cloudflare).
       */
@@ -11385,13 +11451,13 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
  }
 diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseController.php
 --- /tmp/orig_app/Controllers/BaseController.php	2026-08-24 23:02:52.529199628 +0000
-+++ app/Controllers/BaseController.php	2026-08-27 22:23:36.141582774 +0000
++++ app/Controllers/BaseController.php	2026-08-28 09:43:31.353862867 +0000
 @@ -23,6 +23,13 @@
  
  class BaseController extends Controller
  {
 +    /** Most rows one DataTables call may ask for. */
-+    private const DT_MAX_LENGTH = 500;
++    private const DT_MAX_LENGTH = 1000;
 +
 +    /** Most columns, and most sort terms, one call may carry. */
 +    private const DT_MAX_COLUMNS = 32;
@@ -12288,7 +12354,7 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +# -------- Errors -----------
 diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 --- /tmp/orig_app/Controllers/Games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Games.php	2026-08-27 23:55:24.116925208 +0000
++++ app/Controllers/Games.php	2026-08-28 09:45:44.194858941 +0000
 @@ -0,0 +1,286 @@
 +<?php
 +
@@ -12400,9 +12466,9 @@ diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 +            ],
 +            'status'     => ['label' => 'status', 'rules' => 'required|in_list[0,1]'],
 +            'sort_order' => ['label' => 'order',  'rules' => 'permit_empty|integer|greater_than_equal_to[0]|less_than_equal_to[9999]'],
-+            'min_devices' => ['label' => 'min devices', 'rules' => 'permit_empty|integer|greater_than_equal_to[1]|less_than_equal_to[1000]'],
-+            'max_devices' => ['label' => 'max devices', 'rules' => 'permit_empty|integer|greater_than_equal_to[1]|less_than_equal_to[1000]'],
-+            'lock_devices'=> ['label' => 'lock',        'rules' => 'permit_empty|in_list[0,1]'],
++            'max_devices'  => ['label' => 'max devices',  'rules' => 'permit_empty|integer|greater_than_equal_to[0]|less_than_equal_to[1000]'],
++            'device_price' => ['label' => 'device price', 'rules' => 'permit_empty|numeric|greater_than_equal_to[0]|less_than_equal_to[100000]'],
++            'device_field' => ['label' => 'device field', 'rules' => 'permit_empty|in_list[0,1]'],
 +        ];
 +
 +        // Validate the code we will actually store, not the posted one, or a
@@ -12421,20 +12487,20 @@ diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 +                    . implode(' ', $validation->getErrors()));
 +        }
 +
-+        // Device rules for this game. min is at least 1; max is never allowed
-+        // below min, so a mis-entered pair (max < min) cannot lock every
-+        // seller out of the game.
-+        $minDev = max(1, (int) ($this->request->getPost('min_devices') ?: 1));
-+        $maxDev = max($minDev, (int) ($this->request->getPost('max_devices') ?: $minDev));
++        // Device rules for this game. max_devices 0 means "no game limit"
++        // (still bounded by the hard cap elsewhere); the price per extra
++        // device and whether the field is shown at all are independent.
++        $maxDev = max(0, (int) $this->request->getPost('max_devices'));
++        $maxDev = min($maxDev, 1000);
 +
 +        $data = [
 +            'code'         => $code,
 +            'name'         => trim((string) $this->request->getPost('name')),
 +            'status'       => (int) $this->request->getPost('status'),
 +            'sort_order'   => (int) ($this->request->getPost('sort_order') ?: 0),
-+            'min_devices'  => $minDev,
 +            'max_devices'  => $maxDev,
-+            'lock_devices' => (string) $this->request->getPost('lock_devices') === '1' ? 1 : 0,
++            'device_price' => round(max(0, (float) $this->request->getPost('device_price')), 2),
++            'device_field' => (string) $this->request->getPost('device_field') === '0' ? 0 : 1,
 +        ];
 +
 +        if ($id && $existing) {
@@ -12578,8 +12644,8 @@ diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 +}
 diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
 --- /tmp/orig_app/Controllers/KeyCheck.php	2026-08-24 23:02:52.530359402 +0000
-+++ app/Controllers/KeyCheck.php	2026-08-26 13:36:09.327125375 +0000
-@@ -90,7 +90,14 @@
++++ app/Controllers/KeyCheck.php	2026-08-28 09:51:33.298898814 +0000
+@@ -90,12 +90,23 @@
                      }
                  }
              } catch (\Throwable $e) {
@@ -12595,7 +12661,34 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
              }
  
              if ($state['blocked_until'] > $now) {
-@@ -178,13 +185,9 @@
+                 // Currently hard-blocked — refuse without any key lookup.
+                 $error = $this->waitMessage($state['blocked_until'] - $now);
++                (new \App\Models\SecurityLogModel())->note(
++                    \App\Models\SecurityLogModel::BLOCKED, 'check',
++                    mb_substr($key, 0, 66), $this->clientIp(),
++                    'hit while blocked (' . ($state['blocked_until'] - $now) . 's left)');
+             } else {
+                 $validFormat = (bool) preg_match('/^[A-Za-z0-9_\-]{6,64}$/', $key);
+                 if ($validFormat) {
+@@ -127,6 +138,17 @@
+                         $error                  = $this->waitMessage($state['blocked_until'] - $now);
+                     }
+ 
++                    // For the admin security log: which key string was tried,
++                    // from where, and whether this attempt tipped into a block.
++                    (new \App\Models\SecurityLogModel())->note(
++                        $state['blocked_until'] > $now
++                            ? \App\Models\SecurityLogModel::BLOCKED
++                            : \App\Models\SecurityLogModel::CHECK_FAIL,
++                        'check',
++                        mb_substr($key, 0, 66),
++                        $this->clientIp(),
++                        $validFormat ? 'key not found' : 'bad key format');
++
+                     // Upsert WITHOUT replace (needs only INSERT + UPDATE, not DELETE).
+                     if ($db !== null) {
+                         try {
+@@ -178,13 +200,9 @@
          return 'Too many attempts. Please try again in ' . $seconds . ' seconds.';
      }
  
@@ -12616,7 +12709,7 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-28 00:02:30.776851308 +0000
++++ app/Controllers/Keys.php	2026-08-28 09:46:20.162190351 +0000
 @@ -2,6 +2,9 @@
  
  namespace App\Controllers;
@@ -13050,7 +13143,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  $form_reseller = [
                      'status' => [
                          'label' => 'status',
-@@ -273,14 +476,41 @@
+@@ -273,14 +476,47 @@
              $message = setMessage("Please top up to your beloved admin.", 'warning');
          }
  
@@ -13062,16 +13155,22 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        // only ever true for a seller.
 +        $games   = [];
 +        $devConf = [];
++        $hardCap = GameModel::DEVICE_HARD_CAP;
 +        foreach ($this->gameModel->sellable($isAdmin) as $g) {
-+            $games[$g->code]   = $g->name;
-+            $min = max(1, (int) $g->min_devices);
-+            $max = max($min, (int) $g->max_devices);
-+            // An admin is never bounded or locked on the client, so the field
-+            // does not fight them if they set a count outside the seller
-+            // range — the server lets an admin through anyway.
-+            $devConf[$g->code] = $isAdmin
-+                ? ['min' => 1, 'max' => 1000, 'locked' => false]
-+                : ['min' => $min, 'max' => $max, 'locked' => (int) $g->lock_devices === 1];
++            $games[$g->code] = $g->name;
++
++            $field = (int) $g->device_field === 1;
++            $rawCap = (int) $g->max_devices;
++            $cap = $rawCap <= 0 ? $hardCap : min($rawCap, $hardCap);
++
++            $devConf[$g->code] = [
++                // When the field is hidden, the count is always 1 for
++                // everyone. Otherwise a seller is capped; an admin is only
++                // ever bounded by the hard cap.
++                'max'   => $isAdmin ? $hardCap : $cap,
++                'price' => round(max(0, (float) $g->device_price), 2),
++                'field' => $field,
++            ];
 +        }
 +
 +        // code => hours => [label, price]. Admin-only tiers are dropped here
@@ -13099,7 +13198,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'validation' => $validation,
          ];
          return view('Keys/generate', $data);
-@@ -293,9 +523,23 @@
+@@ -293,9 +529,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -13125,7 +13224,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
          $form_rules = [
              'game' => [
                  'label' => 'Games',
-@@ -306,15 +550,20 @@
+@@ -306,15 +556,20 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -13148,7 +13247,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +571,9 @@
+@@ -322,7 +577,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -13159,7 +13258,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +582,170 @@
+@@ -331,57 +588,173 @@
          ];
  
          $validation = Services::validation();
@@ -13168,7 +13267,34 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -        if ($reduceCheck < 0) {
 -            $validation->setError('duration', 'Insufficient balance');
 -            return redirect()->back()->withInput()->with('msgWarning', 'Please top up to your beloved admin.');
--        } else {
++
++        // Validate BEFORE pricing. The old order priced un-validated input,
++        // so an unlisted duration reached getPrice() and came back free.
++        if (! $this->validate($form_rules)) {
++            return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the error');
++        }
++
++        // Re-read the posted values now that the rules have vetted them.
++        $drtn = (int) $this->request->getPost('duration');
++        $maxd = (int) $this->request->getPost('max_devices');
++        $quantity = (int) $this->request->getPost('quantity');
++
++        // Per-game device rules, enforced on the server, never trusting the
++        // number the form sent:
++        //   - field off  -> the Max Devices field is not offered for this
++        //                   game, so every key is a single device, admin and
++        //                   seller alike;
++        //   - seller     -> the count must be between 1 and the game's cap;
++        //   - admin      -> free, up to the hard cap.
++        $devRules = $this->gameModel->deviceRules($game);
++        if (! $devRules['field']) {
++            $maxd = 1;
++        } elseif (! $isAdmin) {
++            if ($maxd < 1 || $maxd > $devRules['cap']) {
++                return redirect()->back()->withInput()->with('msgDanger',
++                    'For this game you may set 1 to ' . $devRules['cap'] . ' devices.');
++            }
+         } else {
 -            if (!$this->validate($form_rules)) {
 -                return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the error');
 -            } else {
@@ -13188,44 +13314,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -                        'max_devices' => $maxd,
 -                        'registrator' => $user->username,
 -                    ];
- 
--                    // insert the key, then log ITS OWN history row (one per quantity)
--                    $idKeys = $this->model->insert($data_response);
--                    $history->insert([
--                        'keys_id' => $idKeys,
--                        'user_do' => $user->username,
--                        'info' => "$game|" . substr($license, 0, 5) . "|$drtn|$maxd",
--                    ]);
-+        // Validate BEFORE pricing. The old order priced un-validated input,
-+        // so an unlisted duration reached getPrice() and came back free.
-+        if (! $this->validate($form_rules)) {
-+            return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the error');
-+        }
- 
--                    // Add the generated key to the list
--                    $generatedKeys[] = $data_response;
-+        // Re-read the posted values now that the rules have vetted them.
-+        $drtn = (int) $this->request->getPost('duration');
-+        $maxd = (int) $this->request->getPost('max_devices');
-+        $quantity = (int) $this->request->getPost('quantity');
-+
-+        // Per-game device rules. The admin sets, per game, how many devices a
-+        // key may carry and whether a seller may choose at all. Enforced here
-+        // on the server, never trusting the number the form sent:
-+        //   - locked  -> a seller's count is FORCED to the game's minimum, so
-+        //                nobody can hand themselves extra device slots;
-+        //   - unlocked -> the seller's count must sit within [min, max].
-+        // An admin is not bounded: they can set any count up to the hard cap,
-+        // which is what "the admin can override it" means.
-+        $devRules = $this->gameModel->deviceRules($game);
-+        if (! $isAdmin) {
-+            if ($devRules['locked']) {
-+                $maxd = $devRules['min'];
-+            } elseif ($maxd < $devRules['min'] || $maxd > $devRules['max']) {
-+                return redirect()->back()->withInput()->with('msgDanger',
-+                    'For this game you may set between ' . $devRules['min']
-+                    . ' and ' . $devRules['max'] . ' devices.');
-+            }
++            $maxd = max(1, min($maxd, \App\Models\GameModel::DEVICE_HARD_CAP));
 +        }
 +
 +        // One query decides the price and the permission at the same time:
@@ -13236,17 +13325,27 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +            return redirect()->back()->withInput()
 +                ->with('msgDanger', 'That duration is not available on your account.');
 +        }
-+        $unitPrice = keyPrice((float) $tier->price, $maxd);
-+        if ($unitPrice === null) {
++        // Price = the tier's base (a single-device key) plus the game's charge
++        // for each device beyond the first. keyPrice() guards the base against
++        // a negative or unsellable tier.
++        $base = keyPrice((float) $tier->price, 1);
++        if ($base === null) {
 +            $validation->setError('duration', 'That duration is not for sale.');
 +            return redirect()->back()->withInput()->with('msgDanger', 'Invalid duration.');
 +        }
-+
-+        $totalfees = $unitPrice * $quantity;
++        $perKey    = $base + max(0, $maxd - 1) * $devRules['price'];
++        $totalfees = $perKey * $quantity;
 +
 +        $db = \Config\Database::connect();
 +        $db->transBegin();
-+
+ 
+-                    // insert the key, then log ITS OWN history row (one per quantity)
+-                    $idKeys = $this->model->insert($data_response);
+-                    $history->insert([
+-                        'keys_id' => $idKeys,
+-                        'user_do' => $user->username,
+-                        'info' => "$game|" . substr($license, 0, 5) . "|$drtn|$maxd",
+-                    ]);
 +        try {
 +            if ($totalfees > 0) {
 +                // Atomic conditional debit. Two concurrent requests used to
@@ -13266,7 +13365,9 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    return redirect()->back()->withInput()
 +                        ->with('msgWarning', 'Please top up to your beloved admin.');
 +                }
-+
+ 
+-                    // Add the generated key to the list
+-                    $generatedKeys[] = $data_response;
 +                // Read the balance back inside the transaction, so the ledger
 +                // records what this debit actually left rather than a figure
 +                // computed from a value read before the UPDATE.
@@ -13549,9 +13650,84 @@ diff -ruN /tmp/orig_app/Controllers/Maintenance.php app/Controllers/Maintenance.
 +    }
 +
 +}
+diff -ruN /tmp/orig_app/Controllers/Security.php app/Controllers/Security.php
+--- /tmp/orig_app/Controllers/Security.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Controllers/Security.php	2026-08-28 09:52:36.177527173 +0000
+@@ -0,0 +1,71 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Models\SecurityLogModel;
++use App\Models\UserModel;
++
++/**
++ * The security log: refused and blocked attempts at the front doors.
++ *
++ * Admin only. Every method re-checks the level itself, so moving the route
++ * cannot open it — the same rule the other admin screens follow.
++ */
++class Security extends BaseController
++{
++    protected $me;
++
++    public function __construct()
++    {
++        $this->me = (new UserModel())->getUser();
++    }
++
++    private function denyNonAdmin()
++    {
++        if (! $this->me || (int) $this->me->level !== 1) {
++            return redirect()->to('dashboard')->with('msgWarning', 'Access Denied!');
++        }
++
++        return null;
++    }
++
++    public function index()
++    {
++        if ($stop = $this->denyNonAdmin()) {
++            return $stop;
++        }
++
++        $model = new SecurityLogModel();
++
++        return view('Admin/security', [
++            'title'  => 'Security log',
++            'user'   => $this->me,
++            'time'   => new \CodeIgniter\I18n\Time(),
++            'counts' => [
++                'all'      => $model->countFor(),
++                'login'    => $model->countFor(SecurityLogModel::LOGIN_FAIL),
++                'register' => $model->countFor(SecurityLogModel::REGISTER_FAIL),
++                'check'    => $model->countFor(SecurityLogModel::CHECK_FAIL),
++                'blocked'  => $model->countFor(SecurityLogModel::BLOCKED),
++            ],
++        ]);
++    }
++
++    public function api()
++    {
++        if (! $this->me || (int) $this->me->level !== 1) {
++            return $this->response->setStatusCode(403)->setJSON(['error' => 'Access denied.']);
++        }
++
++        $this->normalizeDataTableRequest(
++            ['id', 'event', 'scope', 'username', 'ip_address', 'device', 'detail', 'created_at'],
++            ['id_log', 'event', 'scope', 'username', 'ip_address', 'device', 'detail', 'created_at']
++        );
++
++        // The event filter travels as a plain query value and is whitelisted
++        // inside the model, so it can only ever be one of the known events.
++        $event = (string) ($this->request->getGet('event') ?? '');
++
++        return (new SecurityLogModel())->apiRows($event);
++    }
++}
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
-+++ app/Controllers/User.php	2026-08-27 22:23:58.759307745 +0000
++++ app/Controllers/User.php	2026-08-28 10:00:33.446816346 +0000
 @@ -2,42 +2,45 @@
  
  namespace App\Controllers;
@@ -13741,7 +13917,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          }
      }
      
-@@ -237,26 +310,152 @@
+@@ -237,26 +310,161 @@
  
          $user = $this->user;
          $validation = Services::validation();
@@ -13819,6 +13995,15 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 +            'thisSession' => LoginSessionModel::hashSessionId(LoginSessionModel::currentId()),
          ];
  
++        // A sign-in pager click or IP toggle asks for just the sign-in panels
++        // (frag=1) and swaps them in place — no page reload. Same method, same
++        // scoping (historyFor/countFor already limit a seller to their own
++        // rows and gate the "all" list on level), so the fragment can show
++        // nothing the full page would not.
++        if ($this->request->getGet('frag') === '1') {
++            return view('User/_signins', $data);
++        }
++
          return view('User/settings', $data);
      }
      
@@ -13897,7 +14082,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $msg = "Wrong current password.";
              $validation->setError('current', $msg);
          } elseif ($current == $password) {
-@@ -285,7 +484,10 @@
+@@ -285,7 +493,10 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Something wrong! Please check the form');
          } else {
@@ -13909,7 +14094,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
              $this->model->update(session('userid'), ['password' => $newPassword]);
              return redirect()->back()->with('msgSuccess', 'Password Successfuly Changed.');
          }
-@@ -315,7 +517,7 @@
+@@ -315,7 +526,7 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
          } else {
@@ -14720,8 +14905,8 @@ diff -ruN /tmp/orig_app/Models/DurationModel.php app/Models/DurationModel.php
 +}
 diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 --- /tmp/orig_app/Models/GameModel.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Models/GameModel.php	2026-08-27 23:55:06.097357307 +0000
-@@ -0,0 +1,88 @@
++++ app/Models/GameModel.php	2026-08-28 09:45:26.129080457 +0000
+@@ -0,0 +1,99 @@
 +<?php
 +
 +namespace App\Models;
@@ -14733,7 +14918,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +    protected $table      = 'games';
 +    protected $primaryKey = 'id_game';
 +
-+    protected $allowedFields = ['code', 'name', 'status', 'sort_order', 'min_devices', 'max_devices', 'lock_devices'];
++    protected $allowedFields = ['code', 'name', 'status', 'sort_order', 'max_devices', 'device_price', 'device_field'];
 +    protected $useTimestamps = true;
 +
 +    // Objects, not arrays. CI4 defaults to arrays and the rest of this panel
@@ -14749,7 +14934,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +    public function sellable(bool $isAdmin): array
 +    {
 +        $builder = $this->db->table('games g')
-+            ->select('g.id_game, g.code, g.name, g.min_devices, g.max_devices, g.lock_devices')
++            ->select('g.id_game, g.code, g.name, g.max_devices, g.device_price, g.device_field')
 +            ->join('game_durations d', 'd.game_id = g.id_game', 'inner')
 +            ->where('g.status', 1)
 +            ->where('d.status', 1);
@@ -14759,7 +14944,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +        }
 +
 +        return $builder
-+            ->groupBy('g.id_game, g.code, g.name, g.min_devices, g.max_devices, g.lock_devices, g.sort_order')
++            ->groupBy('g.id_game, g.code, g.name, g.max_devices, g.device_price, g.device_field, g.sort_order')
 +            ->orderBy('g.sort_order', 'ASC')
 +            ->orderBy('g.name', 'ASC')
 +            ->get()->getResultObject();
@@ -14778,25 +14963,36 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +        return $this->where('code', $code)->first();
 +    }
 +
++    /** The most devices any one key may ever carry, whatever a game allows. */
++    public const DEVICE_HARD_CAP = 1000;
++
 +    /**
-+     * The device rules for one game code: how many devices a key may carry,
-+     * and whether a seller may choose at all.
++     * The device rules for one game code:
++     *   cap   - the most devices a SELLER may put on a key (0 in the table
++     *           means "no game limit"; it is still bounded by the hard cap).
++     *   price - the charge for each device beyond the first.
++     *   field - whether the Max Devices field is offered at all. When false,
++     *           every key of this game is a single device and the field is
++     *           hidden for everyone, seller and admin alike.
 +     *
-+     * Returns sane defaults (1..100, unlocked) for an unknown code so a
-+     * caller never has to special-case a missing row. min is clamped to at
-+     * least 1 and max to at least min, so a mis-entered pair can never invert.
++     * Sane defaults for an unknown code, so a caller never special-cases a
++     * missing row.
 +     *
-+     * @return array{min:int,max:int,locked:bool}
++     * @return array{cap:int,price:float,field:bool}
 +     */
 +    public function deviceRules(string $code): array
 +    {
-+        $g = $this->select('min_devices, max_devices, lock_devices')
++        $g = $this->select('max_devices, device_price, device_field')
 +            ->where('code', $code)->first();
 +
-+        $min = max(1, (int) ($g->min_devices ?? 1));
-+        $max = max($min, (int) ($g->max_devices ?? 100));
++        $rawCap = (int) ($g->max_devices ?? 1);
++        $cap    = $rawCap <= 0 ? self::DEVICE_HARD_CAP : min($rawCap, self::DEVICE_HARD_CAP);
 +
-+        return ['min' => $min, 'max' => $max, 'locked' => (bool) ($g->lock_devices ?? 0)];
++        return [
++            'cap'   => $cap,
++            'price' => max(0, (float) ($g->device_price ?? 0)),
++            'field' => (bool) ($g->device_field ?? 1),
++        ];
 +    }
 +
 +    /**
@@ -14953,8 +15149,8 @@ diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
          $builder->select('CONCAT(keys_code.id_keys) as id, game, user_key, duration, CONCAT(keys_code.expired_date) as expired, max_devices, devices, status, registrator');
 diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionModel.php
 --- /tmp/orig_app/Models/LoginSessionModel.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Models/LoginSessionModel.php	2026-08-27 00:07:50.692213641 +0000
-@@ -0,0 +1,233 @@
++++ app/Models/LoginSessionModel.php	2026-08-28 09:50:08.854382365 +0000
+@@ -0,0 +1,236 @@
 +<?php
 +
 +namespace App\Models;
@@ -14981,7 +15177,7 @@ diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionMode
 +    protected $primaryKey = 'id_session';
 +
 +    protected $allowedFields = [
-+        'user_id', 'username', 'session_id', 'fingerprint', 'ip_hash',
++        'user_id', 'username', 'session_id', 'fingerprint', 'ip_hash', 'ip_address',
 +        'user_agent', 'device', 'login_at', 'last_seen_at', 'logout_at', 'end_reason',
 +    ];
 +    protected $useTimestamps = true;
@@ -15087,7 +15283,7 @@ diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionMode
 +    }
 +
 +    /** Record a sign-in. Returns the row id. */
-+    public function begin(object $user, string $sessionId, string $ipHash): int
++    public function begin(object $user, string $sessionId, string $ipHash, ?string $ip = null): int
 +    {
 +        $ua = mb_substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
 +
@@ -15097,6 +15293,9 @@ diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionMode
 +            'session_id'   => self::hashSessionId($sessionId),
 +            'fingerprint'  => self::fingerprint($ua),
 +            'ip_hash'      => $ipHash,
++            // The readable address, for the admin's sign-in list. The hash
++            // above still does the rate-limit matching; this is display only.
++            'ip_address'   => $ip !== null ? mb_substr($ip, 0, 45) : null,
 +            'user_agent'   => $ua,
 +            'device'       => self::describe($ua),
 +            'login_at'     => date('Y-m-d H:i:s'),
@@ -15186,6 +15385,122 @@ diff -ruN /tmp/orig_app/Models/LoginSessionModel.php app/Models/LoginSessionMode
 +        $this->scopeTo($viewer, $all);
 +
 +        return $this->countAllResults();
++    }
++}
+diff -ruN /tmp/orig_app/Models/SecurityLogModel.php app/Models/SecurityLogModel.php
+--- /tmp/orig_app/Models/SecurityLogModel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Models/SecurityLogModel.php	2026-08-28 09:52:14.467555876 +0000
+@@ -0,0 +1,112 @@
++<?php
++
++namespace App\Models;
++
++use CodeIgniter\Model;
++use \Hermawan\DataTables\DataTable;
++
++/**
++ * A record of failed and blocked attempts across the front doors: login,
++ * registration and the public key check.
++ *
++ * This is what an admin looks at to see "who is hammering the panel". It
++ * stores the username that was tried (attacker-chosen, so never trusted as a
++ * real account), the address and device it came from, and why it was refused.
++ *
++ * Writing here must NEVER break the thing being logged — a login has to still
++ * fail cleanly even if this table is gone — so record() swallows everything
++ * and only notes the failure in the application log.
++ */
++class SecurityLogModel extends Model
++{
++    protected $table         = 'security_log';
++    protected $primaryKey    = 'id_log';
++    protected $returnType    = 'object';
++    protected $useTimestamps = false;
++    protected $allowedFields = [
++        'event', 'scope', 'username', 'ip_address', 'user_agent', 'device', 'detail', 'created_at',
++    ];
++
++    /** Events, kept short and fixed so the admin filter can rely on them. */
++    public const LOGIN_FAIL    = 'login_fail';
++    public const REGISTER_FAIL = 'register_fail';
++    public const CHECK_FAIL    = 'check_fail';
++    public const BLOCKED       = 'blocked';
++
++    /** Roughly 1 write in 50 trims anything older than this many days. */
++    private const KEEP_DAYS = 90;
++
++    /**
++     * Note one refused attempt. Fail-open: never throws.
++     *
++     * @param string      $event    one of the constants above
++     * @param string      $scope    'login' | 'register' | 'check'
++     * @param string|null $username the username that was tried (may be junk)
++     * @param string|null $ip       the caller's address
++     * @param string|null $detail   a short reason ("bad password", "rate limit")
++     */
++    public function note(string $event, string $scope, ?string $username, ?string $ip, ?string $detail = null): void
++    {
++        try {
++            $ua = mb_substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
++
++            $this->insert([
++                'event'      => mb_substr($event, 0, 24),
++                'scope'      => mb_substr($scope, 0, 16),
++                // The tried username is bounded and stored as-is; it is only
++                // ever shown through esc(), never used to look anything up.
++                'username'   => $username !== null ? mb_substr($username, 0, 66) : null,
++                'ip_address' => $ip !== null ? mb_substr($ip, 0, 45) : null,
++                'user_agent' => $ua !== '' ? $ua : null,
++                'device'     => LoginSessionModel::describe($ua),
++                'detail'     => $detail !== null ? mb_substr($detail, 0, 96) : null,
++                'created_at' => date('Y-m-d H:i:s'),
++            ], false);
++
++            if (random_int(1, 50) === 1) {
++                $this->where('created_at <', date('Y-m-d H:i:s', strtotime('-' . self::KEEP_DAYS . ' days')))
++                     ->delete();
++            }
++        } catch (\Throwable $e) {
++            log_message('error', 'security_log write failed: {m}', ['m' => $e->getMessage()]);
++        }
++    }
++
++    /** How many rows match the optional event filter. */
++    public function countFor(string $event = ''): int
++    {
++        $b = $this->builder();
++        if ($event !== '') {
++            $b->where('event', $event);
++        }
++
++        return (int) $b->countAllResults();
++    }
++
++    /**
++     * Server-side rows for the security-log DataTable. Admin-only; the caller
++     * (Security controller) enforces that. An optional event filter narrows
++     * to one kind of attempt; it is whitelisted against the known events so a
++     * client value can never reach the query as anything else.
++     */
++    public function apiRows(string $event = '')
++    {
++        $connect = db_connect();
++        $builder = $connect->table($this->table);
++
++        $allowed = [self::LOGIN_FAIL, self::REGISTER_FAIL, self::CHECK_FAIL, self::BLOCKED];
++        if (in_array($event, $allowed, true)) {
++            $builder->where('event', $event);
++        }
++
++        $builder->select('id_log AS id, event, scope, username, ip_address, device, detail,'
++            . ' CONCAT(created_at) AS created_at');
++
++        return DataTable::of($builder)
++            ->setSearchableColumns(['username', 'ip_address', 'device', 'detail', 'scope'])
++            ->format('created_at', function ($value) {
++                return $value ? \CodeIgniter\I18n\Time::parse($value)->toLocalizedString('d MMM yy - HH:mm') : '';
++            })
++            ->toJson(true);
 +    }
 +}
 diff -ruN /tmp/orig_app/Models/SettingModel.php app/Models/SettingModel.php
@@ -15463,19 +15778,11 @@ diff -ruN /tmp/orig_app/Models/UserModel.php app/Models/UserModel.php
                  $msg = 'Level account invalid!';
              } elseif ($userCek->status != 1) {
                  $msg = 'Status account changed!';
-diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_history.php
---- /tmp/orig_app/Views/Admin/balance_history.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/Admin/balance_history.php	2026-08-27 01:24:14.195194489 +0000
-@@ -0,0 +1,190 @@
-+<?= $this->extend('Layout/Starter') ?>
-+
-+<?= $this->section('content') ?>
-+
-+<?= $this->include('Layout/msgStatus') ?>
-+
+diff -ruN /tmp/orig_app/Views/Admin/_ledger_panel.php app/Views/Admin/_ledger_panel.php
+--- /tmp/orig_app/Views/Admin/_ledger_panel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Admin/_ledger_panel.php	2026-08-28 09:56:05.975815894 +0000
+@@ -0,0 +1,94 @@
 +<?php
-+// Label, tone and icon per movement type. Kept here rather than in the
-+// controller: it is presentation, and the account page uses the same map.
 +$reasonMeta = [
 +    'topup'           => ['Top-up',    'is-ok',     'bi-plus-circle'],
 +    'key_purchase'    => ['Key',       'is-info',   'bi-key'],
@@ -15484,48 +15791,7 @@ diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_
 +    'opening'         => ['Opening',   '',          'bi-flag'],
 +];
 +?>
-+
-+<header class="em-head em-rise">
-+    <div class="em-head-main">
-+        <span class="em-eyebrow"><i class="bi bi-clock-history"></i> Admin</span>
-+        <h1>Balance history</h1>
-+        <p>Every movement on every account, newest first.</p>
-+    </div>
-+    <div class="em-head-act">
-+        <a class="em-btn" href="<?= site_url('admin/manage-users') ?>">
-+            <i class="bi bi-person-check"></i> Manage users
-+        </a>
-+    </div>
-+</header>
-+
-+<div class="em-stats em-rise em-rise-1">
-+    <div class="em-stat is-ok">
-+        <div class="em-stat-top">
-+            <span class="em-stat-label">Topped up</span>
-+            <span class="em-stat-ic"><i class="bi bi-plus-circle"></i></span>
-+        </div>
-+        <div class="em-stat-val">$<?= number_format($totals['topped_up'], 2) ?></div>
-+        <div class="em-stat-sub"><?= (int) $totals['topup_count'] ?> top-up<?= $totals['topup_count'] === 1 ? '' : 's' ?></div>
-+    </div>
-+    <div class="em-stat is-info">
-+        <div class="em-stat-top">
-+            <span class="em-stat-label">Spent on keys</span>
-+            <span class="em-stat-ic"><i class="bi bi-key"></i></span>
-+        </div>
-+        <div class="em-stat-val">$<?= number_format($totals['spent'], 2) ?></div>
-+        <div class="em-stat-sub">across all sellers</div>
-+    </div>
-+    <div class="em-stat is-accent">
-+        <div class="em-stat-top">
-+            <span class="em-stat-label">Movements</span>
-+            <span class="em-stat-ic"><i class="bi bi-list-ul"></i></span>
-+        </div>
-+        <div class="em-stat-val"><?= number_format($totals['movements']) ?></div>
-+        <div class="em-stat-sub">since the ledger began</div>
-+    </div>
-+</div>
-+
-+<section class="em-panel em-rise em-rise-2">
++<section class="em-panel em-rise em-rise-2" id="ledger-panel">
 +    <div class="em-panel-h">
 +        <h2><i class="bi bi-funnel"></i> <?= $reason ? esc(ucfirst(str_replace('_', ' ', $reason))) : 'All movements' ?></h2>
 +        <div class="em-panel-act">
@@ -15535,10 +15801,11 @@ diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_
 +
 +    <div class="em-panel-b" style="padding-bottom:.4rem">
 +        <div class="em-filters">
-+            <a class="em-btn<?= $reason === '' ? ' is-primary' : '' ?>"
-+               href="<?= site_url('admin/balance-history') ?>">All</a>
++            <a class="em-btn em-lfilter<?= $reason === '' ? ' is-primary' : '' ?>"
++               data-reason="" href="<?= site_url('admin/balance-history') ?>">All</a>
 +            <?php foreach ($known as $r) : ?>
-+                <a class="em-btn<?= $reason === $r ? ' is-primary' : '' ?>"
++                <a class="em-btn em-lfilter<?= $reason === $r ? ' is-primary' : '' ?>"
++                   data-reason="<?= esc($r, 'attr') ?>"
 +                   href="<?= site_url('admin/balance-history') ?>?reason=<?= urlencode($r) ?>">
 +                    <?= esc($reasonMeta[$r][0] ?? ucfirst($r)) ?>
 +                </a>
@@ -15609,6 +15876,69 @@ diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_
 +        </div>
 +    <?php endif; ?>
 +</section>
+diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_history.php
+--- /tmp/orig_app/Views/Admin/balance_history.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Admin/balance_history.php	2026-08-28 09:56:36.617541465 +0000
+@@ -0,0 +1,153 @@
++<?= $this->extend('Layout/Starter') ?>
++
++<?= $this->section('content') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<?php
++// Label, tone and icon per movement type. Kept here rather than in the
++// controller: it is presentation, and the account page uses the same map.
++$reasonMeta = [
++    'topup'           => ['Top-up',    'is-ok',     'bi-plus-circle'],
++    'key_purchase'    => ['Key',       'is-info',   'bi-key'],
++    'adjustment'      => ['Adjusted',  'is-warn',   'bi-sliders'],
++    'referral_signup' => ['Referral',  'is-accent', 'bi-person-plus'],
++    'opening'         => ['Opening',   '',          'bi-flag'],
++];
++?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-clock-history"></i> Admin</span>
++        <h1>Balance history</h1>
++        <p>Every movement on every account, newest first.</p>
++    </div>
++    <div class="em-head-act">
++        <a class="em-btn" href="<?= site_url('admin/manage-users') ?>">
++            <i class="bi bi-person-check"></i> Manage users
++        </a>
++    </div>
++</header>
++
++<div class="em-stats em-rise em-rise-1">
++    <div class="em-stat is-ok">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Topped up</span>
++            <span class="em-stat-ic"><i class="bi bi-plus-circle"></i></span>
++        </div>
++        <div class="em-stat-val">$<?= number_format($totals['topped_up'], 2) ?></div>
++        <div class="em-stat-sub"><?= (int) $totals['topup_count'] ?> top-up<?= $totals['topup_count'] === 1 ? '' : 's' ?></div>
++    </div>
++    <div class="em-stat is-info">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Spent on keys</span>
++            <span class="em-stat-ic"><i class="bi bi-key"></i></span>
++        </div>
++        <div class="em-stat-val">$<?= number_format($totals['spent'], 2) ?></div>
++        <div class="em-stat-sub">across all sellers</div>
++    </div>
++    <div class="em-stat is-accent">
++        <div class="em-stat-top">
++            <span class="em-stat-label">Movements</span>
++            <span class="em-stat-ic"><i class="bi bi-list-ul"></i></span>
++        </div>
++        <div class="em-stat-val"><?= number_format($totals['movements']) ?></div>
++        <div class="em-stat-sub">since the ledger began</div>
++    </div>
++</div>
++
++<?= $this->include('Admin/_ledger_panel') ?>
 +
 +<?= $this->endSection() ?>
 +
@@ -15657,10 +15987,56 @@ diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_
 +    }
 +</style>
 +<?= $this->endSection() ?>
++
++<?= $this->section('js') ?>
++<script>
++    // Filter without a page load: fetch just the table panel (frag=1) and
++    // swap it in. The request is the same admin-only endpoint, so this is a
++    // faster repaint of the exact same data, not a new way to reach it.
++    (function () {
++        var panelSel = '#ledger-panel';
++
++        function bind() {
++            var panel = document.querySelector(panelSel);
++            if (!panel) return;
++            panel.querySelectorAll('.em-lfilter').forEach(function (a) {
++                a.addEventListener('click', function (e) {
++                    e.preventDefault();
++                    load(a.getAttribute('href'), a.getAttribute('href').indexOf('?') > -1);
++                });
++            });
++        }
++
++        function load(href, hasQuery) {
++            var panel = document.querySelector(panelSel);
++            panel.style.opacity = '.5';
++            var url = href + (hasQuery ? '&' : '?') + 'frag=1';
++            fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
++                .then(function (r) { return r.text(); })
++                .then(function (html) {
++                    var tmp = document.createElement('div');
++                    tmp.innerHTML = html;
++                    var fresh = tmp.querySelector(panelSel);
++                    if (fresh) {
++                        panel.replaceWith(fresh);
++                        // Update the address bar so a refresh keeps the filter.
++                        try { history.replaceState(null, '', href); } catch (e) {}
++                        bind();
++                    } else {
++                        panel.style.opacity = '';
++                    }
++                })
++                .catch(function () { panel.style.opacity = ''; });
++        }
++
++        bind();
++    })();
++</script>
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 --- /tmp/orig_app/Views/Admin/games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/Admin/games.php	2026-08-27 23:56:44.993775667 +0000
-@@ -0,0 +1,485 @@
++++ app/Views/Admin/games.php	2026-08-28 09:47:16.179972328 +0000
+@@ -0,0 +1,491 @@
 +<?= $this->extend('Layout/Starter') ?>
 +
 +<?= $this->section('content') ?>
@@ -15720,9 +16096,9 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +                        data-name="<?= esc($g->name, 'attr') ?>"
 +                        data-status="<?= (int) $g->status ?>"
 +                        data-sort="<?= (int) $g->sort_order ?>"
-+                        data-mindev="<?= (int) ($g->min_devices ?? 1) ?>"
-+                        data-maxdev="<?= (int) ($g->max_devices ?? 100) ?>"
-+                        data-lockdev="<?= (int) ($g->lock_devices ?? 0) ?>"
++                        data-maxdev="<?= (int) ($g->max_devices ?? 1) ?>"
++                        data-devprice="<?= esc(number_format((float) ($g->device_price ?? 0), 2, '.', ''), 'attr') ?>"
++                        data-devfield="<?= (int) ($g->device_field ?? 1) ?>"
 +                        data-locked="<?= $keys > 0 ? '1' : '0' ?>">
 +                    <i class="bi bi-pencil-square"></i> Edit
 +                </button>
@@ -15878,35 +16254,40 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +            <hr class="em-hr">
 +            <p class="em-hint" style="margin-top:0">
 +                <b>Devices per key.</b> How many devices a seller may put on a
-+                key of this game. You are never bound by these — only sellers.
++                key of this game, and what each extra one costs. You are never
++                bound by the limit — only sellers.
 +            </p>
 +            <div class="row g-3">
 +                <div class="col-6">
 +                    <div class="em-field">
-+                        <label for="g_mindev">Min devices</label>
-+                        <input type="number" class="form-control" name="min_devices" id="g_mindev"
-+                               min="1" max="1000" value="1">
-+                        <p class="em-hint">The fewest a seller may pick. Also the fixed count when locked.</p>
++                        <label for="g_maxdev">Max devices (sellers)</label>
++                        <input type="number" class="form-control" name="max_devices" id="g_maxdev"
++                               min="0" max="1000" value="1">
++                        <p class="em-hint">The most a seller may pick. <b>0 = unlimited.</b></p>
 +                    </div>
 +                </div>
 +                <div class="col-6">
 +                    <div class="em-field">
-+                        <label for="g_maxdev">Max devices</label>
-+                        <input type="number" class="form-control" name="max_devices" id="g_maxdev"
-+                               min="1" max="1000" value="100">
-+                        <p class="em-hint">The most a seller may pick.</p>
++                        <label for="g_devprice">Price per extra device</label>
++                        <div class="em-money">
++                            <span>$</span>
++                            <input type="number" class="form-control" name="device_price" id="g_devprice"
++                                   min="0" step="0.01" value="0.00">
++                        </div>
++                        <p class="em-hint">Charged for each device beyond the first. 0 = free.</p>
 +                    </div>
 +                </div>
 +            </div>
 +            <div class="em-field">
 +                <label class="em-check">
-+                    <input type="checkbox" name="lock_devices" id="g_lockdev" value="1">
-+                    <span>Lock the device count — sellers cannot change it</span>
++                    <input type="checkbox" name="device_field" id="g_devfield" value="1" checked>
++                    <span>Offer a Max Devices field for this game</span>
 +                </label>
 +                <p class="em-hint">
-+                    When locked, every seller key for this game is fixed at the
-+                    <b>Min devices</b> above, so no seller can hand themselves
-+                    extra device slots. You can still set any count.
++                    Turn this off to hide the field entirely — for admins and
++                    sellers both — so every key of this game is a single
++                    device. Turn it on to let the count be chosen up to the
++                    limit above.
 +                </p>
 +            </div>
 +        </div>
@@ -16040,9 +16421,10 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +            document.getElementById('g_name').value   = d.name   || '';
 +            document.getElementById('g_status').value = d.status !== undefined ? d.status : '1';
 +            document.getElementById('g_sort').value   = d.sort   || 0;
-+            document.getElementById('g_mindev').value = d.mindev  || 1;
-+            document.getElementById('g_maxdev').value = d.maxdev  || 100;
-+            document.getElementById('g_lockdev').checked = d.lockdev === '1';
++            document.getElementById('g_maxdev').value = (d.maxdev !== undefined && d.maxdev !== '') ? d.maxdev : 1;
++            document.getElementById('g_devprice').value = d.devprice || '0.00';
++            // Default a NEW game to "field on"; for an existing one honour it.
++            document.getElementById('g_devfield').checked = (d.devfield === undefined) ? true : (d.devfield === '1');
 +            document.getElementById('g_title').textContent = d.id ? 'Edit game' : 'Add game';
 +
 +            // Once keys exist the code is baked into them, so it stops being
@@ -16066,7 +16448,7 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +                fillGame({
 +                    id: b.dataset.id, code: b.dataset.code, name: b.dataset.name,
 +                    status: b.dataset.status, sort: b.dataset.sort, locked: b.dataset.locked,
-+                    mindev: b.dataset.mindev, maxdev: b.dataset.maxdev, lockdev: b.dataset.lockdev
++                    maxdev: b.dataset.maxdev, devprice: b.dataset.devprice, devfield: b.dataset.devfield
 +                });
 +                open(gameModal);
 +            });
@@ -16459,6 +16841,193 @@ diff -ruN /tmp/orig_app/Views/Admin/referral.php app/Views/Admin/referral.php
 \ No newline at end of file
 +
 +<?= $this->endSection() ?>
+diff -ruN /tmp/orig_app/Views/Admin/security.php app/Views/Admin/security.php
+--- /tmp/orig_app/Views/Admin/security.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Admin/security.php	2026-08-28 09:53:18.678067119 +0000
+@@ -0,0 +1,183 @@
++<?= $this->extend('Layout/Starter') ?>
++
++<?= $this->section('content') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-shield-exclamation"></i> Admin</span>
++        <h1>Security log</h1>
++        <p>Failed and blocked attempts at sign-in, registration and key check.</p>
++    </div>
++    <div class="em-head-act">
++        <a class="em-btn" href="<?= site_url('admin/manage-users') ?>">
++            <i class="bi bi-people-fill"></i> Users
++        </a>
++        <button class="em-btn" id="ip-toggle" type="button"
++                title="Hide addresses from onlookers" aria-pressed="true">
++            <i class="bi bi-eye-slash"></i> <span class="em-blur-label">IP hidden</span>
++        </button>
++    </div>
++</header>
++
++<section class="em-panel em-rise em-rise-1">
++    <div class="em-panel-h">
++        <h2><i class="bi bi-funnel"></i> <span id="filter-title">All attempts</span></h2>
++    </div>
++    <div class="em-panel-b">
++        <div class="em-filters" id="ev-filters">
++            <?php
++            $tabs = [
++                ''              => ['All', (int) $counts['all']],
++                'login_fail'    => ['Login', (int) $counts['login']],
++                'register_fail' => ['Register', (int) $counts['register']],
++                'check_fail'    => ['Check', (int) $counts['check']],
++                'blocked'       => ['Blocked', (int) $counts['blocked']],
++            ];
++            foreach ($tabs as $ev => [$label, $n]) : ?>
++                <button type="button" class="em-btn em-ev<?= $ev === '' ? ' is-primary' : '' ?>"
++                        data-ev="<?= esc($ev, 'attr') ?>" data-label="<?= esc($label, 'attr') ?>">
++                    <?= esc($label) ?> <span class="em-pill"><?= $n ?></span>
++                </button>
++            <?php endforeach; ?>
++        </div>
++
++        <div class="table-responsive">
++            <table id="seclog" class="table table-hover align-middle" style="width:100%">
++                <thead>
++                    <tr>
++                        <th>When</th>
++                        <th>Event</th>
++                        <th>Tried</th>
++                        <th>IP</th>
++                        <th>Device</th>
++                        <th>Detail</th>
++                    </tr>
++                </thead>
++                <tbody>
++                    <?php for ($i = 0; $i < 6; $i++) : ?>
++                        <tr class="em-skel-row">
++                            <td><div class="em-skel is-mid"></div></td>
++                            <td><div class="em-skel is-narrow"></div></td>
++                            <td><div class="em-skel is-mid"></div></td>
++                            <td><div class="em-skel is-mid"></div></td>
++                            <td><div class="em-skel is-wide"></div></td>
++                            <td><div class="em-skel is-mid"></div></td>
++                        </tr>
++                    <?php endfor; ?>
++                </tbody>
++            </table>
++        </div>
++    </div>
++</section>
++
++<?= $this->endSection() ?>
++
++<?= $this->section('css') ?>
++<link rel="stylesheet" href="<?= asset_ver('assets/vendor/css/dataTables.bootstrap5.min.css') ?>">
++<style>
++    .em-ip.is-hidden { filter: blur(5px); user-select: none; }
++    .em-ip { font-family: var(--em-mono); font-size: .82rem; }
++    .em-ev-pill { font-size: .7rem; }
++    @media (max-width: 760px) {
++        #seclog th:nth-child(5), #seclog td:nth-child(5) { display: none; }
++    }
++    @media (max-width: 560px) {
++        #seclog th:nth-child(6), #seclog td:nth-child(6) { display: none; }
++        .em-panel #seclog td, .em-panel #seclog th { padding: .6rem .4rem !important; }
++    }
++</style>
++<?= $this->endSection() ?>
++
++<?= $this->section('js') ?>
++<script src="<?= asset_ver('assets/vendor/js/jquery.dataTables.min.js') ?>"></script>
++<script src="<?= asset_ver('assets/vendor/js/dataTables.bootstrap5.min.js') ?>"></script>
++<script>
++    function esc(v) {
++        return String(v === null || v === undefined ? '' : v)
++            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
++            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
++    }
++
++    $(document).ready(function () {
++        $.fn.dataTable.ext.errMode = 'none';
++
++        var API = <?= json_encode(rtrim(site_url('admin/security/api'), '/')) ?>;
++        var currentEv = '';
++        var ipHidden = true;
++
++        // Same event tone map the pills use.
++        var EV = {
++            login_fail:    ['is-warn', 'Login'],
++            register_fail: ['is-info', 'Register'],
++            check_fail:    ['is-warn', 'Check'],
++            blocked:       ['is-bad',  'Blocked']
++        };
++
++        var table = $('#seclog').DataTable({
++            processing: true,
++            serverSide: true,
++            deferRender: true,
++            searchDelay: 500,
++            order: [[0, 'desc']],
++            lengthMenu: [[25, 50, 100, 1000], [25, 50, 100, 1000]],
++            ajax: function (data, cb, settings) {
++                data.event = currentEv;   // travels to the whitelisted server filter
++                $.ajax({
++                    url: API, data: data, type: 'GET', dataType: 'json', timeout: 20000,
++                    success: cb,
++                    error: function () {
++                        $('#seclog-err').remove();
++                        $('#seclog').before('<div id="seclog-err" class="alert alert-warning">' +
++                            'Could not load the log. Check your connection.</div>');
++                    }
++                });
++            },
++            columns: [
++                { data: 'created_at', name: 'created_at' },
++                {
++                    data: 'event', name: 'event',
++                    render: function (v) {
++                        var m = EV[v] || ['', v];
++                        return '<span class="em-pill ' + m[0] + ' em-ev-pill">' + esc(m[1]) + '</span>';
++                    }
++                },
++                {
++                    data: 'username', name: 'username',
++                    render: function (v) { return v ? '<b>' + esc(v) + '</b>' : '<span class="text-muted">&mdash;</span>'; }
++                },
++                {
++                    data: 'ip_address', name: 'ip_address',
++                    render: function (v) {
++                        if (!v) return '<span class="text-muted">&mdash;</span>';
++                        return '<span class="em-ip ipCell' + (ipHidden ? ' is-hidden' : '') + '">' + esc(v) + '</span>';
++                    }
++                },
++                { data: 'device', name: 'device', render: function (v) { return esc(v || ''); } },
++                { data: 'detail', name: 'detail', render: function (v) { return esc(v || ''); } }
++            ]
++        });
++
++        function paintIp() {
++            $('.ipCell').toggleClass('is-hidden', ipHidden);
++            $('#ip-toggle')
++                .attr('aria-pressed', String(!ipHidden))
++                .html(ipHidden
++                    ? '<i class="bi bi-eye-slash"></i> <span class="em-blur-label">IP hidden</span>'
++                    : '<i class="bi bi-eye"></i> <span class="em-blur-label">IP shown</span>');
++        }
++        table.on('draw', paintIp);
++        $('#ip-toggle').on('click', function () { ipHidden = !ipHidden; paintIp(); });
++
++        $('#ev-filters').on('click', '.em-ev', function () {
++            currentEv = String($(this).data('ev') || '');
++            $('#ev-filters .em-ev').removeClass('is-primary');
++            $(this).addClass('is-primary');
++            $('#filter-title').text(($(this).data('label') || 'All') + ' attempts');
++            // Reload the same table in place — no page navigation.
++            table.ajax.reload();
++        });
++    });
++</script>
++<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
 --- /tmp/orig_app/Views/Admin/user_edit.php	2026-08-24 23:02:52.611222252 +0000
 +++ app/Views/Admin/user_edit.php	2026-08-27 01:23:40.159757647 +0000
@@ -16511,8 +17080,8 @@ diff -ruN /tmp/orig_app/Views/Admin/user_edit.php app/Views/Admin/user_edit.php
                      <div class="col-md-12 mt-2">
 diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 --- /tmp/orig_app/Views/Admin/users.php	2026-08-24 23:02:52.611664182 +0000
-+++ app/Views/Admin/users.php	2026-08-27 23:16:59.231352479 +0000
-@@ -1,100 +1,209 @@
++++ app/Views/Admin/users.php	2026-08-28 09:43:56.570959902 +0000
+@@ -1,100 +1,215 @@
  <?= $this->extend('Layout/Starter') ?>
  
  <?= $this->section('content') ?>
@@ -16561,7 +17130,8 @@ diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 +        <a class="em-btn" href="<?= site_url('admin/create-referral') ?>">
 +            <i class="bi bi-ticket-perforated"></i> Referral codes
 +        </a>
-+    </div>
+     </div>
+-</div>
 +</header>
 +
 +<section class="em-panel em-rise em-rise-1">
@@ -16594,8 +17164,7 @@ diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 +                <?php endfor; ?>
 +            </tbody>
 +        </table>
-     </div>
--</div>
++    </div>
 +</section>
  
  <?= $this->endSection() ?>
@@ -16632,6 +17201,7 @@ diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
  <script>
 +    var EDIT_BASE    = <?= json_encode(rtrim(site_url('admin/edit'), '/')) ?>;
 +    var ACCOUNT_BASE = <?= json_encode(rtrim(site_url('account'), '/')) ?>;
++    var KEYS_BASE    = <?= json_encode(rtrim(site_url('keys'), '/')) ?>;
 +
 +    // DataTables writes renderer output as HTML, so every value coming back
 +    // from the API is escaped here before it is concatenated in.
@@ -16766,7 +17336,12 @@ diff -ruN /tmp/orig_app/Views/Admin/users.php app/Views/Admin/users.php
 +                    className: 'text-end',
 +                    render: function(v, type, row) {
 +                        var id = encodeURIComponent(row.id);
++                        // Straight to this seller's keys, so an admin does not
++                        // have to go through the account page to edit them.
++                        var keysHref = KEYS_BASE + '?owner=' + encodeURIComponent(row.username || '');
 +                        return '<div class="em-actions">' +
++                               '<a class="em-iconbtn is-accent" title="This seller\'s keys" href="' +
++                               keysHref + '"><i class="bi bi-key"></i></a>' +
 +                               '<a class="em-iconbtn is-info" title="Sales and balance history" href="' +
 +                               ACCOUNT_BASE + '/' + id + '"><i class="bi bi-graph-up"></i></a>' +
 +                               '<a class="em-btn is-sm" href="' + EDIT_BASE + '/' + id + '">' +
@@ -16994,7 +17569,7 @@ diff -ruN /tmp/orig_app/Views/Keys/deleted.php app/Views/Keys/deleted.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 --- /tmp/orig_app/Views/Keys/generate.php	2026-08-24 23:02:52.614808324 +0000
-+++ app/Views/Keys/generate.php	2026-08-27 23:57:54.373449619 +0000
++++ app/Views/Keys/generate.php	2026-08-28 09:46:49.770374812 +0000
 @@ -3,6 +3,21 @@
  <?= $this->section('content') ?>
  <div class="row justify-content-center">
@@ -17051,7 +17626,8 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 +                            <small id="help-game" class="text-danger"><?= esc($validation->getError('game')) ?></small>
                          <?php endif; ?>
                      </div>
-                     <div class="form-group col-lg-6 mb-3">
+-                    <div class="form-group col-lg-6 mb-3">
++                    <div class="form-group col-lg-6 mb-3" id="max_devices_wrap">
                          <label for="max_devices" class="form-label">Max Devices</label>
 -                        <input type="number" name="max_devices" id="max_devices" class="form-control" placeholder="1" value="<?= old('max_devices') ?: 1 ?>">
 -                        <?php if ($validation->hasError('game')) : ?>
@@ -17098,7 +17674,7 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                      </button>
                  </div>
                  <?= form_close() ?>
-@@ -183,26 +199,106 @@
+@@ -183,26 +199,118 @@
  <?= $this->section('js') ?>
  <script>
      $(document).ready(function() {
@@ -17118,6 +17694,8 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 -            if (gprice != NaN) {
 -                var result = (device * gprice * quantity);
 -                $("#estimation").val(result);
+-            } else {
+-                $("#estimation").val('Estimation error');
 +        // The catalogue as a JS object literal:
 +        //   { "CODM": { "24": {label, price}, ... }, ... }
 +        // Not a string to JSON.parse - esc() used to HTML-encode the quotes,
@@ -17139,25 +17717,32 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 +        var $maxdev   = $('#max_devices');
 +
 +        // Apply the chosen game's device rules to the Max Devices field:
-+        // set its min/max, clamp the current value into range, and when the
-+        // game is locked make it read-only at the fixed minimum.
++        //   field off -> hide the whole field, the key is one device;
++        //   field on  -> cap the value at the game's max and, when the game
++        //                charges for extra devices, say so under the field.
 +        function applyDeviceRules() {
-+            var c = DEVCONF[$game.val()] || { min: 1, max: 1000, locked: false };
-+            $maxdev.attr('min', c.min).attr('max', c.max);
++            var c = DEVCONF[$game.val()] || { max: 1000, price: 0, field: true };
 +
-+            if (c.locked) {
-+                $maxdev.val(c.min).prop('readonly', true).addClass('is-locked');
-+                $('#dev-note').text('Fixed at ' + c.min + ' for this game.');
-             } else {
--                $("#estimation").val('Estimation error');
-+                $maxdev.prop('readonly', false).removeClass('is-locked');
-+                var v = parseInt($maxdev.val(), 10);
-+                if (!isFinite(v) || v < c.min) { $maxdev.val(c.min); }
-+                else if (v > c.max) { $maxdev.val(c.max); }
-+                $('#dev-note').text(c.min === c.max
-+                    ? (c.min + ' device' + (c.min === 1 ? '' : 's'))
-+                    : (c.min + ' to ' + c.max + ' devices'));
++            if (!c.field) {
++                // No device choice for this game: hide the field, force 1.
++                $('#max_devices_wrap').hide();
++                $maxdev.val(1);
++                $('#dev-note').text('');
++                estimate();
++                return;
 +            }
++
++            $('#max_devices_wrap').show();
++            $maxdev.attr('min', 1).attr('max', c.max).prop('readonly', false).removeClass('is-locked');
++            var v = parseInt($maxdev.val(), 10);
++            if (!isFinite(v) || v < 1) { $maxdev.val(1); }
++            else if (v > c.max) { $maxdev.val(c.max); }
++
++            var note = 'Up to ' + c.max + ' device' + (c.max === 1 ? '' : 's') + '.';
++            if (c.price > 0) {
++                note += ' Each device after the first costs $' + Number(c.price).toFixed(2) + '.';
++            }
++            $('#dev-note').text(note);
 +        }
 +
 +        // Rebuild the duration list for whichever game is selected. Tiers and
@@ -17178,7 +17763,7 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 +                var t = tiers[h];
 +                $duration.append($('<option>', {
 +                    value: h,
-+                    text: t.label + ' \u2014 $' + Number(t.price).toFixed(2) + '/device'
++                    text: t.label + ' \u2014 $' + Number(t.price).toFixed(2)
 +                }));
 +            });
 +
@@ -17199,7 +17784,8 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 +        function estimate() {
 +            var tiers    = CATALOGUE[$game.val()] || {};
 +            var tier     = tiers[$duration.val()];
-+            var device   = parseInt($('#max_devices').val(), 10);
++            var c        = DEVCONF[$game.val()] || { price: 0, field: true };
++            var device   = c.field ? parseInt($('#max_devices').val(), 10) : 1;
 +            var quantity = parseInt($('#quantity').val(), 10);
 +
 +            // `tier != NaN` was the old test, and NaN equals nothing at all -
@@ -17211,7 +17797,10 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 +                return;
              }
 +
-+            $('#estimation').val('$' + (device * Number(tier.price) * quantity).toFixed(2));
++            // Base price for a one-device key, plus the per-device charge for
++            // each device beyond the first. Mirrors the server exactly.
++            var perKey = Number(tier.price) + Math.max(0, device - 1) * Number(c.price || 0);
++            $('#estimation').val('$' + (perKey * quantity).toFixed(2));
          }
 +
 +        $game.on('change', function () { applyDeviceRules(); refreshDurations(); });
@@ -17222,7 +17811,7 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
      });
  
      // Replace the native <select> (grey OS menu) with a themed dropdown that
-@@ -229,19 +325,30 @@
+@@ -229,19 +337,30 @@
              menu.className = 'tsel-menu';
              wrap.appendChild(menu);
  
@@ -17435,8 +18024,8 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
          $("#devices").attr('rows', $(this).val());
 diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 --- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
-+++ app/Views/Keys/list.php	2026-08-27 23:50:08.904589825 +0000
-@@ -1,60 +1,219 @@
++++ app/Views/Keys/list.php	2026-08-28 09:43:19.149377506 +0000
+@@ -1,72 +1,247 @@
  <?= $this->extend('Layout/Starter') ?>
  
  <?= $this->section('content') ?>
@@ -17576,7 +18165,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +       This must sit BEFORE the media query: same specificity, so whichever
 +       comes last wins, and a media query does not change that. */
 +    .em-when { display: none; }
- 
++
 +    /* A tablet has room for most of it, but not all seven. The row number
 +       and the duration are the two that carry least. */
 +    @media (max-width: 900px) {
@@ -17584,7 +18173,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +        #datatable th:nth-child(5), #datatable td:nth-child(5) { display: none; }
 +        .em-panel #datatable td, .em-panel #datatable th { padding: .7rem .5rem !important; }
 +    }
-+
+ 
 +    @media (max-width: 700px) {
 +        .em-blur-label { display: none; }
 +
@@ -17698,11 +18287,23 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
          // ── تنها تنظیمِ صفحه‌بندی ──
          // این عدد = تعداد شماره‌صفحه‌ها (پیش‌فرض ۷). تعدادِ عددهای پشت‌سرهمِ اولِ لیست
          // برابرِ (این عدد − ۲) ئه. پس ۵ ⇒ «۱ ۲ ۳ … ۳۴۶»، ۶ ⇒ «۱ ۲ ۳ ۴ … ۳۴۶» و…
-@@ -63,10 +222,15 @@
+         // کمترش کنی ردیف کوتاه‌تر می‌شه، بیشترش کنی شماره‌های بیشتری میاد.
+         $.fn.dataTable.ext.pager.numbers_length = 5;
++        // Whether keys are masked. Held here, not read from the DOM, so a
++        // redraw (search, sort, paging rebuilds the tbody) does not silently
++        // reset it: the toggle used to un-mask the visible rows, then a search
++        // drew fresh rows in the default masked state and it looked like the
++        // eye had switched itself back on.
++        var keysHidden = true;
++
          var table = $('#datatable').DataTable({
              processing: true,
              serverSide: true,
 +            deferRender: true,
++            // 10..1000 rows per page; 1000 for the rare full-export view. The
++            // server caps the page size too, so a hand-typed larger value
++            // cannot pull the whole table at once.
++            lengthMenu: [[10, 25, 50, 100, 1000], [10, 25, 50, 100, 1000]],
 +            // On a slow connection, firing a request on every keystroke floods
 +            // a weak link and makes the box feel laggy. Wait until typing
 +            // pauses, so one request goes out instead of a dozen.
@@ -17715,7 +18316,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
              columns: [{
                      data: 'id',
                      name: 'id_keys'
-@@ -76,55 +240,143 @@
+@@ -76,55 +251,152 @@
                  },
                  {
                      data: 'user_key',
@@ -17730,7 +18331,8 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +                        // is the most that fits a phone without pushing the
 +                        // action buttons off the edge.
 +                        var when = row.expired ? esc(row.expired) : 'Not started';
-+                        return '<span class="em-key keyBlur key-sensi' + tone + '">' +
++                        var mask = keysHidden ? ' key-sensi' : '';
++                        return '<span class="em-key keyBlur' + mask + tone + '">' +
 +                               esc(row.user_key) + '</span>' +
 +                               '<span class="em-when">' + when + '</span>';
                      }
@@ -17820,14 +18422,22 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +            deleteKey($(this).data('id'), String($(this).data('key') || ''), table);
 +        });
 +
++        function paintBlur() {
++            $('.keyBlur').toggleClass('key-sensi', keysHidden);
++            $('#blur-out')
++                .attr('aria-pressed', String(!keysHidden))
++                .html(keysHidden
++                    ? '<i class="bi bi-eye-slash"></i> <span class="em-blur-label">Hidden</span>'
++                    : '<i class="bi bi-eye"></i> <span class="em-blur-label">Shown</span>');
++        }
++
++        // Every redraw brings new rows in the default masked state; put them
++        // back to whatever the eye currently says.
++        table.on('draw', paintBlur);
++
 +        $('#blur-out').on('click', function () {
-+            var hidden = $('.keyBlur').hasClass('key-sensi');
-+            $('.keyBlur').toggleClass('key-sensi', !hidden);
-+            $(this)
-+                .attr('aria-pressed', String(!hidden))
-+                .html(hidden
-+                    ? '<i class="bi bi-eye"></i> <span class="em-blur-label">Shown</span>'
-+                    : '<i class="bi bi-eye-slash"></i> <span class="em-blur-label">Hidden</span>');
++            keysHidden = !keysHidden;
++            paintBlur();
          });
      });
  
@@ -17883,7 +18493,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
      function resetUserKey(keys) {
          Swal.fire({
              title: 'Are you sure?',
-@@ -141,18 +393,25 @@
+@@ -141,18 +413,25 @@
                      title: 'Please wait...'
                  })
  
@@ -17919,7 +18529,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
                                          'Your device key has been reset.',
 diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
 --- /tmp/orig_app/Views/Layout/Header.php	2026-08-24 23:02:52.617286818 +0000
-+++ app/Views/Layout/Header.php	2026-08-27 01:00:54.968876302 +0000
++++ app/Views/Layout/Header.php	2026-08-28 09:53:47.576022524 +0000
 @@ -37,6 +37,11 @@
                                  <li>
                                      <hr class="dropdown-divider">
@@ -17932,7 +18542,7 @@ diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
                                  <?php if ($user->level == 1) : ?>
                                      <li class="dropdown-item text-muted">Admin</li>
                                      <li>
-@@ -50,6 +55,26 @@
+@@ -50,6 +55,31 @@
                                          </a>
                                      </li>
                                      <li>
@@ -17948,6 +18558,11 @@ diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
 +                                    <li>
 +                                        <a class="dropdown-item <?= url_is('admin/deleted-keys') ? 'active' : '' ?>" href="<?= site_url('admin/deleted-keys') ?>">
 +                                            <i class="bi bi-archive"></i> Deleted Keys
++                                        </a>
++                                    </li>
++                                    <li>
++                                        <a class="dropdown-item <?= url_is('admin/security') ? 'active' : '' ?>" href="<?= site_url('admin/security') ?>">
++                                            <i class="bi bi-shield-exclamation"></i> Security log
 +                                        </a>
 +                                    </li>
 +                                    <li>
@@ -18916,6 +19531,178 @@ diff -ruN /tmp/orig_app/Views/Layout/pager.php app/Views/Layout/pager.php
 +        </nav>
 +    <?php endif; ?>
 +</div>
+diff -ruN /tmp/orig_app/Views/User/_signins.php app/Views/User/_signins.php
+--- /tmp/orig_app/Views/User/_signins.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/User/_signins.php	2026-08-28 10:00:19.318070110 +0000
+@@ -0,0 +1,168 @@
++<?php
++/**
++ * One row of the sign-in list.
++ *
++ * $showUser adds the account name — the admin table needs it, your own list
++ * does not, and repeating your own username on forty rows is just noise.
++ */
++$signInRow = static function (object $r, bool $showUser, bool $isCurrent) {
++    $open  = $r->logout_at === null;
++    // "Open" only counts while the session could still be in use. A row left
++    // open by a browser that was simply closed is not someone signed in.
++    $stale = $open && strtotime((string) ($r->last_seen_at ?: $r->login_at)) < time() - 7200;
++    ?>
++    <tr<?= $isCurrent ? ' class="em-sess-current"' : '' ?>>
++        <?php if ($showUser) : ?>
++            <td>
++                <b><?= esc($r->username) ?></b>
++                <?php if ($isCurrent) : ?><span class="em-pill is-accent">you</span><?php endif; ?>
++            </td>
++        <?php endif; ?>
++        <td>
++            <b><?= esc($r->device ?: 'Unknown device') ?></b>
++            <?php if (! $showUser && $isCurrent) : ?>
++                <span class="em-pill is-accent">this device</span>
++            <?php endif; ?>
++            <small class="em-ua" title="<?= esc($r->user_agent ?? '') ?>"><?= esc($r->user_agent ?: '—') ?></small>
++        </td>
++        <td class="em-sess-ip">
++            <?php if (! empty($r->ip_address)) : ?>
++                <span class="em-ip sessIp is-hidden"><?= esc($r->ip_address) ?></span>
++            <?php else : ?>
++                <span class="text-muted">—</span>
++            <?php endif; ?>
++        </td>
++        <td class="em-sess-time">
++            <b><?= esc(date('H:i:s', strtotime((string) $r->login_at))) ?></b>
++            <small><?= esc(date('D j M', strtotime((string) $r->login_at))) ?></small>
++        </td>
++        <td class="em-sess-time em-sess-out">
++            <?php if ($open) : ?>
++                <span class="text-muted">—</span>
++                <small>last seen <?= esc(date('H:i:s', strtotime((string) ($r->last_seen_at ?: $r->login_at)))) ?></small>
++            <?php else : ?>
++                <b><?= esc(date('H:i:s', strtotime((string) $r->logout_at))) ?></b>
++                <small><?= esc(date('D j M', strtotime((string) $r->logout_at))) ?></small>
++            <?php endif; ?>
++        </td>
++        <td class="text-end">
++            <?php if ($open && ! $stale) : ?>
++                <span class="em-pill is-ok"><span class="em-dot"></span>Signed in</span>
++            <?php elseif ($open) : ?>
++                <span class="em-pill is-warn">Left open</span>
++            <?php elseif ($r->end_reason === 'fingerprint') : ?>
++                <!-- The session was destroyed because the cookie turned up in
++                     a different browser. Worth calling out by name: this is
++                     the one row on the page that means someone tried. -->
++                <span class="em-pill is-bad"><i class="bi bi-shield-exclamation"></i> Blocked</span>
++            <?php else : ?>
++                <span class="em-pill">Signed out</span>
++            <?php endif; ?>
++        </td>
++    </tr>
++    <?php
++};
++?>
++<div id="sign-ins-wrap">
++<div class="em-signin-bar">
++    <button class="em-btn is-sm" id="ip-toggle" type="button" aria-pressed="true"
++            title="Hide addresses from onlookers">
++        <i class="bi bi-eye-slash"></i> <span class="em-blur-label">IP hidden</span>
++    </button>
++</div>
++
++
++<section class="em-panel em-rise em-rise-3" id="your-sign-ins">
++    <div class="em-panel-h">
++        <h2><i class="bi bi-laptop"></i> Your sign-ins</h2>
++        <div class="em-panel-act">
++            <span class="em-pill"><?= $myPager ? number_format($myPager['total']) : 0 ?> total</span>
++        </div>
++    </div>
++
++    <?php if (empty($mySessions)) : ?>
++        <div class="em-empty">
++            <div class="em-empty-ic"><i class="bi bi-laptop"></i></div>
++            <h3>Nothing recorded yet</h3>
++            <p>Sign-ins are listed here from now on. Sign out and back in to see this one.</p>
++        </div>
++    <?php else : ?>
++        <div class="em-panel-b" style="padding-bottom:0">
++            <p class="em-note">
++                Every sign-in to your account, with the device it came from.
++                If you see one you do not recognise, change your password.
++            </p>
++        </div>
++        <div class="table-responsive">
++            <table class="table align-middle em-sess">
++                <thead>
++                    <tr>
++                        <th>Device</th>
++                        <th class="em-sess-ip">IP</th>
++                        <th>Signed in</th>
++                        <th class="em-sess-out">Signed out</th>
++                        <th class="text-end">State</th>
++                    </tr>
++                </thead>
++                <tbody>
++                    <?php foreach ($mySessions as $r) : ?>
++                        <?php $signInRow($r, false, $r->session_id === $thisSession); ?>
++                    <?php endforeach; ?>
++                </tbody>
++            </table>
++        </div>
++        <?php if ($myPager) : ?>
++            <?= view('Layout/pager', ['pager' => $myPager]) ?>
++        <?php endif; ?>
++    <?php endif; ?>
++</section>
++
++<?php if ((int) $user->level === 1) : ?>
++    <section class="em-panel em-rise em-rise-4" id="all-sign-ins">
++        <div class="em-panel-h">
++            <h2><i class="bi bi-people"></i> All sign-ins</h2>
++            <div class="em-panel-act">
++                <span class="em-pill is-accent">Admin</span>
++                <span class="em-pill"><?= $allPager ? number_format($allPager['total']) : 0 ?> total</span>
++            </div>
++        </div>
++
++        <?php if (empty($allSessions)) : ?>
++            <div class="em-empty">
++                <div class="em-empty-ic"><i class="bi bi-people"></i></div>
++                <h3>No sign-ins recorded</h3>
++                <p>Every account's sign-ins will be listed here.</p>
++            </div>
++        <?php else : ?>
++            <div class="em-panel-b" style="padding-bottom:0">
++                <p class="em-note">
++                    Who signed in, from what, and when they left. The full
++                    user agent is under each device name.
++                </p>
++            </div>
++            <div class="table-responsive">
++                <table class="table align-middle em-sess">
++                    <thead>
++                        <tr>
++                            <th>Account</th>
++                            <th>Device</th>
++                            <th class="em-sess-ip">IP</th>
++                            <th>Signed in</th>
++                            <th class="em-sess-out">Signed out</th>
++                            <th class="text-end">State</th>
++                        </tr>
++                    </thead>
++                    <tbody>
++                        <?php foreach ($allSessions as $r) : ?>
++                            <?php $signInRow($r, true, $r->session_id === $thisSession); ?>
++                        <?php endforeach; ?>
++                    </tbody>
++                </table>
++            </div>
++            <?php if ($allPager) : ?>
++                <?= view('Layout/pager', ['pager' => $allPager]) ?>
++            <?php endif; ?>
++        <?php endif; ?>
++    </section>
++<?php endif; ?>
++</div>
 diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 --- /tmp/orig_app/Views/User/account.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Views/User/account.php	2026-08-27 23:00:01.142890557 +0000
@@ -19587,7 +20374,7 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 --- /tmp/orig_app/Views/User/settings.php	2026-08-24 23:02:52.620264827 +0000
-+++ app/Views/User/settings.php	2026-08-27 01:23:40.161238010 +0000
++++ app/Views/User/settings.php	2026-08-28 10:01:02.345557261 +0000
 @@ -2,16 +2,28 @@
  
  <?= $this->section('content') ?>
@@ -19672,7 +20459,7 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
                  <?= form_open() ?>
  
                  <input type="hidden" name="fullname_form" value="1">
-@@ -58,17 +70,229 @@
+@@ -58,17 +70,148 @@
                      <label for="fullname">Full Name</label>
                      <input type="text" name="fullname" id="fullname" class="form-control mt-2" placeholder="Maru-kun" aria-describedby="help-fullname" value="<?= old('fullname') ?: ($user->fullname ?: '') ?>">
                      <?php if ($validation->hasError('fullname')) : ?>
@@ -19695,156 +20482,7 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 -<?= $this->endSection() ?>
 \ No newline at end of file
 +
-+<?php
-+/**
-+ * One row of the sign-in list.
-+ *
-+ * $showUser adds the account name — the admin table needs it, your own list
-+ * does not, and repeating your own username on forty rows is just noise.
-+ */
-+$signInRow = static function (object $r, bool $showUser, bool $isCurrent) {
-+    $open  = $r->logout_at === null;
-+    // "Open" only counts while the session could still be in use. A row left
-+    // open by a browser that was simply closed is not someone signed in.
-+    $stale = $open && strtotime((string) ($r->last_seen_at ?: $r->login_at)) < time() - 7200;
-+    ?>
-+    <tr<?= $isCurrent ? ' class="em-sess-current"' : '' ?>>
-+        <?php if ($showUser) : ?>
-+            <td>
-+                <b><?= esc($r->username) ?></b>
-+                <?php if ($isCurrent) : ?><span class="em-pill is-accent">you</span><?php endif; ?>
-+            </td>
-+        <?php endif; ?>
-+        <td>
-+            <b><?= esc($r->device ?: 'Unknown device') ?></b>
-+            <?php if (! $showUser && $isCurrent) : ?>
-+                <span class="em-pill is-accent">this device</span>
-+            <?php endif; ?>
-+            <small class="em-ua" title="<?= esc($r->user_agent ?? '') ?>"><?= esc($r->user_agent ?: '—') ?></small>
-+        </td>
-+        <td class="em-sess-time">
-+            <b><?= esc(date('H:i:s', strtotime((string) $r->login_at))) ?></b>
-+            <small><?= esc(date('D j M', strtotime((string) $r->login_at))) ?></small>
-+        </td>
-+        <td class="em-sess-time em-sess-out">
-+            <?php if ($open) : ?>
-+                <span class="text-muted">—</span>
-+                <small>last seen <?= esc(date('H:i:s', strtotime((string) ($r->last_seen_at ?: $r->login_at)))) ?></small>
-+            <?php else : ?>
-+                <b><?= esc(date('H:i:s', strtotime((string) $r->logout_at))) ?></b>
-+                <small><?= esc(date('D j M', strtotime((string) $r->logout_at))) ?></small>
-+            <?php endif; ?>
-+        </td>
-+        <td class="text-end">
-+            <?php if ($open && ! $stale) : ?>
-+                <span class="em-pill is-ok"><span class="em-dot"></span>Signed in</span>
-+            <?php elseif ($open) : ?>
-+                <span class="em-pill is-warn">Left open</span>
-+            <?php elseif ($r->end_reason === 'fingerprint') : ?>
-+                <!-- The session was destroyed because the cookie turned up in
-+                     a different browser. Worth calling out by name: this is
-+                     the one row on the page that means someone tried. -->
-+                <span class="em-pill is-bad"><i class="bi bi-shield-exclamation"></i> Blocked</span>
-+            <?php else : ?>
-+                <span class="em-pill">Signed out</span>
-+            <?php endif; ?>
-+        </td>
-+    </tr>
-+    <?php
-+};
-+?>
-+
-+<section class="em-panel em-rise em-rise-3" id="your-sign-ins">
-+    <div class="em-panel-h">
-+        <h2><i class="bi bi-laptop"></i> Your sign-ins</h2>
-+        <div class="em-panel-act">
-+            <span class="em-pill"><?= $myPager ? number_format($myPager['total']) : 0 ?> total</span>
-+        </div>
-+    </div>
-+
-+    <?php if (empty($mySessions)) : ?>
-+        <div class="em-empty">
-+            <div class="em-empty-ic"><i class="bi bi-laptop"></i></div>
-+            <h3>Nothing recorded yet</h3>
-+            <p>Sign-ins are listed here from now on. Sign out and back in to see this one.</p>
-+        </div>
-+    <?php else : ?>
-+        <div class="em-panel-b" style="padding-bottom:0">
-+            <p class="em-note">
-+                Every sign-in to your account, with the device it came from.
-+                If you see one you do not recognise, change your password.
-+            </p>
-+        </div>
-+        <div class="table-responsive">
-+            <table class="table align-middle em-sess">
-+                <thead>
-+                    <tr>
-+                        <th>Device</th>
-+                        <th>Signed in</th>
-+                        <th class="em-sess-out">Signed out</th>
-+                        <th class="text-end">State</th>
-+                    </tr>
-+                </thead>
-+                <tbody>
-+                    <?php foreach ($mySessions as $r) : ?>
-+                        <?php $signInRow($r, false, $r->session_id === $thisSession); ?>
-+                    <?php endforeach; ?>
-+                </tbody>
-+            </table>
-+        </div>
-+        <?php if ($myPager) : ?>
-+            <?= view('Layout/pager', ['pager' => $myPager]) ?>
-+        <?php endif; ?>
-+    <?php endif; ?>
-+</section>
-+
-+<?php if ((int) $user->level === 1) : ?>
-+    <section class="em-panel em-rise em-rise-4" id="all-sign-ins">
-+        <div class="em-panel-h">
-+            <h2><i class="bi bi-people"></i> All sign-ins</h2>
-+            <div class="em-panel-act">
-+                <span class="em-pill is-accent">Admin</span>
-+                <span class="em-pill"><?= $allPager ? number_format($allPager['total']) : 0 ?> total</span>
-+            </div>
-+        </div>
-+
-+        <?php if (empty($allSessions)) : ?>
-+            <div class="em-empty">
-+                <div class="em-empty-ic"><i class="bi bi-people"></i></div>
-+                <h3>No sign-ins recorded</h3>
-+                <p>Every account's sign-ins will be listed here.</p>
-+            </div>
-+        <?php else : ?>
-+            <div class="em-panel-b" style="padding-bottom:0">
-+                <p class="em-note">
-+                    Who signed in, from what, and when they left. The full
-+                    user agent is under each device name.
-+                </p>
-+            </div>
-+            <div class="table-responsive">
-+                <table class="table align-middle em-sess">
-+                    <thead>
-+                        <tr>
-+                            <th>Account</th>
-+                            <th>Device</th>
-+                            <th>Signed in</th>
-+                            <th class="em-sess-out">Signed out</th>
-+                            <th class="text-end">State</th>
-+                        </tr>
-+                    </thead>
-+                    <tbody>
-+                        <?php foreach ($allSessions as $r) : ?>
-+                            <?php $signInRow($r, true, $r->session_id === $thisSession); ?>
-+                        <?php endforeach; ?>
-+                    </tbody>
-+                </table>
-+            </div>
-+            <?php if ($allPager) : ?>
-+                <?= view('Layout/pager', ['pager' => $allPager]) ?>
-+            <?php endif; ?>
-+        <?php endif; ?>
-+    </section>
-+<?php endif; ?>
++<?= $this->include('User/_signins') ?>
 +
 +<?= $this->endSection() ?>
 +
@@ -19906,6 +20544,74 @@ diff -ruN /tmp/orig_app/Views/User/settings.php app/Views/User/settings.php
 +        .em-panel .table.em-sess thead th { letter-spacing: .05em; }
 +    }
 +</style>
++<?= $this->endSection() ?>
++
++<?= $this->section('css') ?>
++<style>
++    .em-signin-bar { display:flex; justify-content:flex-end; margin:0 0 .4rem; }
++    .em-sess-ip .em-ip { font-family:var(--em-mono); font-size:.8rem; }
++    .em-ip.is-hidden { filter:blur(5px); user-select:none; }
++    #sign-ins-wrap.is-loading { opacity:.5; transition:opacity .1s; }
++    @media (max-width:820px){ .em-sess-ip{ display:none } }
++</style>
++<?= $this->endSection() ?>
++
++<?= $this->section('js') ?>
++<script>
++    // Sign-ins: page and resize without a reload, and mask the IPs behind a
++    // toggle like the keys list. All delegated, because the whole block is
++    // swapped out when a pager link is followed.
++    (function () {
++        var wrap = function () { return document.getElementById('sign-ins-wrap'); };
++        var ipHidden = true;
++
++        function paintIp() {
++            document.querySelectorAll('#sign-ins-wrap .sessIp').forEach(function (el) {
++                el.classList.toggle('is-hidden', ipHidden);
++            });
++            var btn = document.getElementById('ip-toggle');
++            if (btn) {
++                btn.setAttribute('aria-pressed', String(!ipHidden));
++                btn.innerHTML = ipHidden
++                    ? '<i class="bi bi-eye-slash"></i> <span class="em-blur-label">IP hidden</span>'
++                    : '<i class="bi bi-eye"></i> <span class="em-blur-label">IP shown</span>';
++            }
++        }
++
++        function load(href) {
++            var w = wrap();
++            if (!w) return;
++            w.classList.add('is-loading');
++            var url = href.split('#')[0];
++            url += (url.indexOf('?') > -1 ? '&' : '?') + 'frag=1';
++            fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin' })
++                .then(function (r) { return r.text(); })
++                .then(function (html) {
++                    var tmp = document.createElement('div');
++                    tmp.innerHTML = html;
++                    var fresh = tmp.querySelector('#sign-ins-wrap');
++                    if (fresh) {
++                        w.replaceWith(fresh);
++                        try { history.replaceState(null, '', href); } catch (e) {}
++                        paintIp();
++                    } else { w.classList.remove('is-loading'); }
++                })
++                .catch(function () { w.classList.remove('is-loading'); });
++        }
++
++        // Delegated click handling on the document, filtered to the wrap.
++        document.addEventListener('click', function (e) {
++            var w = wrap();
++            if (!w) return;
++            var t = e.target.closest('#sign-ins-wrap #ip-toggle');
++            if (t) { ipHidden = !ipHidden; paintIp(); return; }
++            var a = e.target.closest('#sign-ins-wrap .em-pager a[href]');
++            if (a) { e.preventDefault(); load(a.getAttribute('href')); }
++        });
++
++        paintIp();
++    })();
++</script>
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/errors/html/error_404.php app/Views/errors/html/error_404.php
 --- /tmp/orig_app/Views/errors/html/error_404.php	2026-08-24 23:02:52.624646037 +0000

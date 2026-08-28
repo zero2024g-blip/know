@@ -1195,6 +1195,71 @@ touch context: the wrapper resolves to `overscroll-behavior-x: contain`,
 `-y: auto`, `touch-action: pan-x pan-y`, and the body no longer disables
 vertical overscroll.
 
+## This round's UI and reporting changes
+
+**Show / Hidden keys survives a search.** On the keys list, the eye toggle
+un-masked the visible rows, but the next search drew fresh rows in the default
+masked state, so the keys looked hidden again. The mask state is now held in a
+variable and re-applied on every redraw, so once you press the eye the keys
+stay shown through searching and paging.
+
+**Show 1000 entries.** The keys list length menu gains a 1000 option for the
+rare full-export view; the server-side length cap was raised to match.
+
+**A seller's keys are one click from Manage Users.** Each row gained a key icon
+that opens that seller's key list directly (`keys?owner=<name>`), so an admin
+no longer has to go through the account page to edit their keys.
+
+**Device controls rebuilt (per your note).** The Min field is gone. Per game,
+in Admin -> Games, you now set:
+  - **Max devices** a seller may choose (**0 = unlimited**); an admin is never
+    bound by it.
+  - **Price per extra device** — each device beyond the first adds this, shown
+    live in New license. A key's price is now `tier base + (devices - 1) x this`.
+  - **Offer a Max Devices field** — turn it off to hide the field entirely, for
+    admins and sellers both, so every key of that game is a single device.
+Measured: a seller on a cap-10 / $0.20 game was charged base + 4x0.20 for 5
+devices, refused at 11; a field-off game forced 1 device for everyone; an
+unlimited game charged base + (n-1)x its price. Enforced on the server, never
+trusting the posted number.
+
+**Balance history and sign-ins filter and page without a reload.** The
+balance-history reason filter and the sign-in pagers now fetch just their
+panel (a `frag=1` request to the same admin-only method) and swap it in place —
+no page navigation, so it is instant and does not lose your scroll. Confirmed
+with a window sentinel that no full reload happens, and that a seller still
+cannot reach the admin "all sign-ins" panel or the ledger through the fragment.
+
+**Sign-ins show the IP, behind a Hide/Show toggle.** Sign-in rows now carry the
+address they came from (a new `ip_address` column; the old hash still does the
+rate-limit matching). It is blurred by default and revealed with a toggle, like
+the keys.
+
+## A security log: who failed and who got blocked
+
+New admin screen, **Admin -> Security log**, listing refused and blocked
+attempts across the three front doors — sign-in, registration and key check.
+Each row shows the moment, the event, the username or key that was tried
+(attacker-chosen, only ever shown through esc()), the IP (behind the same
+Hide/Show toggle), the device, and why it was refused. Event tabs filter to
+Login / Register / Check / Blocked in place, and it pages without a reload.
+
+It is written fail-open from Auth and KeyCheck: a failure to log never breaks
+the login or check being logged. Rows older than 90 days are trimmed
+automatically. The list endpoint runs through the same DataTables hardening as
+the keys list — the column identifiers are whitelisted and the event filter is
+whitelisted against the known events, so neither can reach the query as SQL.
+Verified: an ORDER BY injection and an event-filter injection are both inert,
+and a seller gets 403 on the endpoint and a redirect on the page.
+
+## Cloudflare — see CLOUDFLARE.md
+
+A full settings guide for security and speed is in `CLOUDFLARE.md`: SSL Full
+(strict), proxied DNS with no stray records exposing the origin, Brotli and
+HTTP/3 on, Rocket Loader and Cache-Everything OFF (they break the tables and
+leak logged-in pages), Bot Fight Mode and a login rate-limit rule, and a WAF
+managed ruleset.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.
