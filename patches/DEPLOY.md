@@ -1260,6 +1260,32 @@ HTTP/3 on, Rocket Loader and Cache-Everything OFF (they break the tables and
 leak logged-in pages), Bot Fight Mode and a login rate-limit rule, and a WAF
 managed ruleset.
 
+## Device controls: a 3-way mode, and 0 = unlimited
+
+Two follow-ups to the device rework.
+
+**Who may set the count is now a three-way choice per game** (Admin -> Games,
+"Who can set the device count"), replacing the on/off field:
+  - **Everyone** — admin and seller both choose; the seller is capped.
+  - **Admins only** — the Max Devices field is hidden from sellers (their keys
+    are single-device) but stays open for you. This is the "lock it for sellers
+    but not for me" you asked for.
+  - **Off** — the field is hidden from everyone; every key is one device.
+Stored as `games.device_mode` (2/1/0). Enforced on the server: a seller on an
+admin-only game had a posted 99 forced to 1.
+
+**0 means unlimited, at the game level and at key creation.** A game's
+`max_devices` of 0 already meant "no seller cap"; now typing **0** in the Max
+Devices box when making a key makes a genuinely unlimited key — it accepts any
+number of devices. The connector treats a key's `max_devices <= 0` as
+unlimited and never refuses on the device count; a positive number is still a
+hard cap. Priced at the base tier only, since an unlimited key cannot be
+charged per device. A seller may type 0 only when the game itself is unlimited
+(a capped game rejects it); an admin may always. Verified end to end: an
+unlimited key bound six different devices while a capped-2 key still stopped at
+two, and the keys list shows the device meter as "n/\u221E" for an unlimited
+key.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.

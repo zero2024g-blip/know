@@ -275,3 +275,34 @@ Two things to get right:
    PHP side writes. A different tag length will not open.
 2. **`updateAAD("EG1")`** before `doFinal`, on both encrypt and decrypt. Miss
    it and every message fails the tag check.
+
+---
+
+## Optional: let a key have unlimited devices (max_devices = 0)
+
+The panel can now make a key with `max_devices = 0`, meaning **unlimited
+devices**. For your own `Connect.php` to honour that, the device-count check
+must skip the limit when max is 0. Find the line that refuses a new device —
+in the shipped connector it is inside `claimDeviceSlot()`:
+
+    if (count($list) >= $max) {        // old: refuses everything when $max = 0
+        return false;
+    }
+
+and add a `$max > 0` guard:
+
+    if ($max > 0 && count($list) >= $max) {   // 0 (or less) = unlimited
+        return false;
+    }
+
+If your connector uses the older helper shape instead, it is the same idea —
+the "is there room for another device?" test:
+
+    // old
+    if (count($lsDevice) < $max_dev) { ...add the device... }
+    // becomes
+    if ($max_dev <= 0 || count($lsDevice) < $max_dev) { ...add the device... }
+
+Without this one line, a `max_devices = 0` key would refuse **every** device
+(because any count is `>= 0`), which is the opposite of unlimited. A key with
+a positive `max_devices` is unaffected — it is still capped as before.

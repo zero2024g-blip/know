@@ -368,17 +368,21 @@ VALUES ('connector.maintenance', '0', NOW(), NOW());
 -- ---------------------------------------------------------------------
 
 -- 10a. Device controls per game, all set from Admin -> Games:
---        max_devices  the most devices a SELLER may put on a key (0 = no
---                     limit). An admin is never bound by it.
+--        max_devices  the most devices a SELLER may put on a key. 0 = no
+--                     limit (unlimited). An admin is never bound by it, and
+--                     a 0 typed in the Max Devices box at key creation makes
+--                     an unlimited key (accepts any number of devices).
 --        device_price the charge for each device beyond the first (0 = free).
---        device_field 1 = offer the Max Devices field; 0 = hide it for
---                     everyone and make every key of this game a single
---                     device.
+--                     An unlimited key is charged the base tier only.
+--        device_mode  who may set the count:
+--                       2 = everyone (admin + seller, seller capped)
+--                       1 = admins only (a seller's key is 1 device)
+--                       0 = off (every key is 1 device)
 --      Defaults keep new games to one device until you raise the limit.
 ALTER TABLE `games`
   ADD COLUMN `max_devices`  INT           NOT NULL DEFAULT 1    AFTER `name`,
   ADD COLUMN `device_price` DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER `max_devices`,
-  ADD COLUMN `device_field` TINYINT       NOT NULL DEFAULT 1    AFTER `device_price`;
+  ADD COLUMN `device_mode`  TINYINT       NOT NULL DEFAULT 2    AFTER `device_price`;
 
 -- 10b. Own a key by the seller's immutable id, not their username.
 --      A username can be deleted and registered again by someone else; the
