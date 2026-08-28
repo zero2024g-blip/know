@@ -1129,6 +1129,72 @@ Re-run end to end this round after the changes, against the running panel:
   a seller cannot reach or drive any admin action, edit another seller's key,
   delete a key, or widen their key list with `owner=`.
 
+## Keys now belong to a user id, not a re-usable username
+
+The bug: a key stored its owner as the `registrator` **username**, and MySQL
+matches that case-insensitively. So if you added a seller "AliAli", they made
+keys, you deleted them, and later anyone re-registered "AliAli", the new
+account saw every key the old one had made — the panel could not tell the two
+apart because it only had the name to go on.
+
+Keys now carry `registrator_id`, the owner's immutable id. A username can be
+deleted and taken again; an auto-increment id never is, so the new holder gets
+a new id and never inherits the old one's keys. Every place that scoped a
+seller to "their own" keys — the list, the dashboard counters, the per-game
+and per-day breakdowns, the key-edit ownership check, and the admin's
+per-seller view — now scopes by id. The `registrator` username is still stored
+(the connector and the display use it) but is never trusted for "whose key is
+this".
+
+The migration (section 10 of `MIGRATION.sql`) adds the column and backfills
+every existing key to the current holder of its username, so no seller loses
+sight of a key they own. Reproduced and fixed on the running panel: an
+"AliAli" (id 11) with two keys, deleted, then re-registered as a new account
+(id 12) — the new account's key list, API and dashboard all show **zero** of
+the old keys, while every other seller still sees exactly their own.
+
+For a name you have *already* re-used, there is an optional one-line statement
+(also in section 10) that detaches the previous holder's keys from the new
+account, identifying them as the keys created before that account existed.
+
+## Per-game device limits, set by the admin
+
+New in Admin → Games, per game:
+
+- **Min / Max devices** — the range a seller may choose on the Max Devices
+  field when generating a key for that game. Set Min to 10 and no seller can
+  make a 1-device key; set Max to 50 and none can make a 100-device one.
+- **Lock the device count** — when on, a seller's device count is fixed at
+  Min and the field is read-only for them, so nobody can hand themselves extra
+  device slots. You are never bound by either — an admin can still set any
+  count.
+
+Enforced on the server, never trusting the number the form sends: measured on
+the running panel, a seller on a 10–50 game was refused at 5 and at 100 and
+accepted at 20; on a locked-at-5 game a posted 999 was stored as 5; an admin
+was accepted at 3 and at 99 on those same games. The generate form reflects it
+live — picking a game sets the field's range, clamps the value, and shows
+"10 to 50 devices" or "Fixed at 5 for this game."
+
+Per-device pricing already existed and is unchanged: each duration tier's price
+is per device, so a $0.50 tier on a 10-device key is $5.00, and a $0.00 tier is
+free. Set it in the tier editor.
+
+## The key/users list no longer eats a vertical swipe
+
+A regression from last round's performance pass. `overscroll-behavior: contain`
+was put on the horizontally-scrolling table wrapper to stop a sideways flick
+from rubber-banding the page — but the wrapper has no vertical scroll of its
+own, so `contain` swallowed every downward swipe that started on the table, and
+the page would only scroll if you touched beside it.
+
+Now only the sideways overscroll is contained (`overscroll-behavior-x`), and
+`touch-action: pan-x pan-y` lets the browser route a horizontal drag to the
+table and a vertical drag to the page. iOS bounce is left on. Confirmed in a
+touch context: the wrapper resolves to `overscroll-behavior-x: contain`,
+`-y: auto`, `touch-action: pan-x pan-y`, and the body no longer disables
+vertical overscroll.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.

@@ -359,3 +359,51 @@ VALUES ('connector.maintenance', '0', NOW(), NOW());
 --       FROM login_sessions ORDER BY id_session DESC LIMIT 10;
 --     SELECT user_key, deleted_by, created_at FROM keys_deleted ORDER BY id_deleted DESC;
 --     SELECT name, value, updated_by, updated_at FROM settings;
+
+
+-- ---------------------------------------------------------------------
+-- 10. Per-game device limits, and per-key ownership by id
+--     Added 2026-08-28. Two independent changes; both are safe (they add
+--     columns and backfill, they never drop or overwrite a key).
+-- ---------------------------------------------------------------------
+
+-- 10a. Device limits per game. min/max are how many devices a SELLER may put
+--      on a key of that game; lock_devices=1 fixes the count at min_devices
+--      for sellers so they cannot hand themselves extra slots. An admin is
+--      never bound by these. Existing games get the old free 1..100 range.
+ALTER TABLE `games`
+  ADD COLUMN `min_devices`  INT     NOT NULL DEFAULT 1   AFTER `name`,
+  ADD COLUMN `max_devices`  INT     NOT NULL DEFAULT 100 AFTER `min_devices`,
+  ADD COLUMN `lock_devices` TINYINT NOT NULL DEFAULT 0   AFTER `max_devices`;
+
+-- 10b. Own a key by the seller's immutable id, not their username.
+--      A username can be deleted and registered again by someone else; the
+--      id never is. Without this, a re-registered "AliAli" inherits every key
+--      the previous "AliAli" made.
+ALTER TABLE `keys_code`
+  ADD COLUMN `registrator_id` INT NULL AFTER `registrator`;
+ALTER TABLE `keys_code`
+  ADD INDEX `idx_reg_id` (`registrator_id`);
+
+-- Backfill: give every existing key to the CURRENT holder of its username.
+-- Safe — no seller loses sight of a key they own.
+UPDATE `keys_code` k
+  JOIN `users` u ON u.username = k.registrator
+  SET k.registrator_id = u.id_users
+  WHERE k.registrator_id IS NULL;
+
+-- ONLY if you have deleted a seller and someone re-registered the same name:
+-- detach the old holder's keys from the new account. Replace 'aliali' with
+-- the reused username and run it once per reused name. It removes from the new
+-- account exactly the keys created before that account existed — the previous
+-- holder's keys — and leaves them owned by nobody (still visible to an admin
+-- in the full key list, where you can delete or reassign them).
+--
+--   UPDATE `keys_code` k
+--     JOIN `users` u ON u.username = k.registrator
+--     SET k.registrator_id = NULL
+--     WHERE k.registrator = 'aliali' AND k.created_at < u.created_at;
+--
+-- Check which keys ended up owned by nobody:
+--   SELECT registrator, COUNT(*) FROM keys_code WHERE registrator_id IS NULL
+--     GROUP BY registrator;

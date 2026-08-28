@@ -11086,8 +11086,8 @@ diff -ruN /tmp/orig_app/Config/WorkerMode.php app/Config/WorkerMode.php
 +}
 diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
 --- /tmp/orig_app/Controllers/Account.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Account.php	2026-08-26 20:25:24.834616851 +0000
-@@ -0,0 +1,124 @@
++++ app/Controllers/Account.php	2026-08-27 23:49:52.564921677 +0000
+@@ -0,0 +1,126 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -11140,8 +11140,10 @@ diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
 +        $username = $target->username;
 +
 +        $keyStats = $this->keys->stats($target);
-+        $byGame   = $this->keys->byGameFor($username);
-+        $daily    = $this->keys->dailyFor($username, 14);
++        // Scoped by the target's immutable id, so a re-used username never
++        // pulls a previous holder's keys into these figures.
++        $byGame   = $this->keys->byGameFor($uid);
++        $daily    = $this->keys->dailyFor($uid, 14);
 +
 +        // Fill the gaps so the sparkline has one column per day rather than
 +        // only the days something happened.
@@ -12286,8 +12288,8 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +# -------- Errors -----------
 diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 --- /tmp/orig_app/Controllers/Games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Games.php	2026-08-26 15:34:02.419475028 +0000
-@@ -0,0 +1,274 @@
++++ app/Controllers/Games.php	2026-08-27 23:55:24.116925208 +0000
+@@ -0,0 +1,286 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -12398,6 +12400,9 @@ diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 +            ],
 +            'status'     => ['label' => 'status', 'rules' => 'required|in_list[0,1]'],
 +            'sort_order' => ['label' => 'order',  'rules' => 'permit_empty|integer|greater_than_equal_to[0]|less_than_equal_to[9999]'],
++            'min_devices' => ['label' => 'min devices', 'rules' => 'permit_empty|integer|greater_than_equal_to[1]|less_than_equal_to[1000]'],
++            'max_devices' => ['label' => 'max devices', 'rules' => 'permit_empty|integer|greater_than_equal_to[1]|less_than_equal_to[1000]'],
++            'lock_devices'=> ['label' => 'lock',        'rules' => 'permit_empty|in_list[0,1]'],
 +        ];
 +
 +        // Validate the code we will actually store, not the posted one, or a
@@ -12416,11 +12421,20 @@ diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 +                    . implode(' ', $validation->getErrors()));
 +        }
 +
++        // Device rules for this game. min is at least 1; max is never allowed
++        // below min, so a mis-entered pair (max < min) cannot lock every
++        // seller out of the game.
++        $minDev = max(1, (int) ($this->request->getPost('min_devices') ?: 1));
++        $maxDev = max($minDev, (int) ($this->request->getPost('max_devices') ?: $minDev));
++
 +        $data = [
-+            'code'       => $code,
-+            'name'       => trim((string) $this->request->getPost('name')),
-+            'status'     => (int) $this->request->getPost('status'),
-+            'sort_order' => (int) ($this->request->getPost('sort_order') ?: 0),
++            'code'         => $code,
++            'name'         => trim((string) $this->request->getPost('name')),
++            'status'       => (int) $this->request->getPost('status'),
++            'sort_order'   => (int) ($this->request->getPost('sort_order') ?: 0),
++            'min_devices'  => $minDev,
++            'max_devices'  => $maxDev,
++            'lock_devices' => (string) $this->request->getPost('lock_devices') === '1' ? 1 : 0,
 +        ];
 +
 +        if ($id && $existing) {
@@ -12602,7 +12616,7 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-27 23:01:29.357930006 +0000
++++ app/Controllers/Keys.php	2026-08-28 00:02:30.776851308 +0000
 @@ -2,6 +2,9 @@
  
  namespace App\Controllers;
@@ -12678,7 +12692,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function index()
-@@ -64,59 +38,123 @@
+@@ -64,59 +38,129 @@
          $model = $this->model;
          $user = $this->user;
  
@@ -12687,8 +12701,9 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -        } else {
 -            $keys = $model->findAll();
 +        // An admin may narrow the list to one seller with ?owner=<username>,
-+        // reached from that seller\'s account page. Validated to a real user
-+        // here so the heading and the AJAX both carry a name that exists; a
++        // reached from that seller\'s account page. The username is resolved
++        // to the user\'s immutable id for scoping (so a re-used name cannot
++        // inherit old keys) while the name itself is kept for the heading. A
 +        // seller never gets this - the filter below pins them to their own.
 +        $owner = $this->ownerFilter();
 +
@@ -12696,9 +12711,9 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        // by the server-side DataTables endpoint. findAll() was loading
 +        // every row with every column and discarding it on each page load.
 +        if ((int) $user->level !== 1) {
-+            $model->where('registrator', $user->username);
++            $model->where('registrator_id', (int) $user->id_users);
 +        } elseif ($owner !== null) {
-+            $model->where('registrator', $owner);
++            $model->where('registrator_id', $owner['id']);
          }
 +        $keyCount = $model->countAllResults();
  
@@ -12707,7 +12722,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -            'user' => $user,
 -            'keylist' => $keys,
 -            'time' => $this->time,
-+            'title'   => $owner !== null ? 'Keys - ' . $owner : 'Keys',
++            'title'   => $owner !== null ? 'Keys - ' . $owner['name'] : 'Keys',
 +            'user'    => $user,
 +            'keylist' => $keyCount,
 +            'owner'   => $owner,
@@ -12717,14 +12732,18 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
 +    /**
-+     * The ?owner=<username> filter, or null.
++     * The ?owner=<username> filter, resolved to {id, name}, or null.
 +     *
 +     * Admin only, and only for a username that actually exists - an unknown
 +     * name returns null so the page shows the whole table rather than an
-+     * empty one that looks broken. A seller always gets null: they are pinned
-+     * to their own rows elsewhere and this must never widen that.
++     * empty one that looks broken. The id is what scopes the query, so a
++     * re-registered name cannot pull up a previous holder's keys; the name is
++     * only for the heading. A seller always gets null: they are pinned to
++     * their own rows elsewhere and this must never widen that.
++     *
++     * @return array{id:int,name:string}|null
 +     */
-+    private function ownerFilter(): ?string
++    private function ownerFilter(): ?array
 +    {
 +        if ((int) $this->user->level !== 1) {
 +            return null;
@@ -12736,10 +12755,10 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        }
 +
 +        // getUser(), not first(): UserModel returns arrays from first() but
-+        // objects from getUser(), and everything here reads ->username.
++        // objects from getUser().
 +        $found = (new \App\Models\UserModel())->getUser($owner, 'username');
 +
-+        return $found ? $found->username : null;
++        return $found ? ['id' => (int) $found->id_users, 'name' => $found->username] : null;
 +    }
 +
      public function api_get_keys()
@@ -12758,7 +12777,8 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +
          $model = $this->model;
 -        return $model->API_getKeys();
-+        return $model->API_getKeys($this->ownerFilter());
++        $owner = $this->ownerFilter();
++        return $model->API_getKeys($owner['id'] ?? null);
      }
  
      public function api_key_reset()
@@ -12791,7 +12811,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        // Scope the lookup to the caller unless they are an admin, so the
 +        // endpoint cannot be used to probe other sellers' keys.
          $db_key = $model->getKeys($keys);
-+        if ($db_key && (int) $user->level !== 1 && $db_key->registrator !== $user->username) {
++        if ($db_key && (int) $user->level !== 1 && (int) $db_key->registrator_id !== (int) $user->id_users) {
 +            $db_key = null;
 +        }
  
@@ -12818,16 +12838,16 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -        ];
 +        $total = $db_key->devices ? explode(',', $db_key->devices) : [];
 +        $rules = ['devices_total' => count($total), 'devices_max' => (int) $db_key->max_devices];
- 
--        $real_response = array_merge($data, $rules);
--        return $this->response->setJSON($real_response);
++
 +        if ($db_key->devices && $reset) {
 +            $model->set('devices', null)
 +                ->where('user_key', $keys)
 +                ->update();
 +            $rules = ['reset' => true, 'devices_total' => 0, 'devices_max' => (int) $db_key->max_devices];
 +        }
-+
+ 
+-        $real_response = array_merge($data, $rules);
+-        return $this->response->setJSON($real_response);
 +        return $this->response->setJSON(array_merge(
 +            ['registered' => true, 'keys' => $keys, 'csrf' => csrf_hash()],
 +            $rules
@@ -12835,7 +12855,14 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
      }
  
      public function edit_key($key = false)
-@@ -133,7 +171,6 @@
+@@ -127,13 +171,12 @@
+             $dKey = $this->model->getKeys($key, 'id_keys');
+             $user = $this->user;
+             if ($dKey) {
+-                if ($user->level == 1 or $dKey->registrator == $user->username) {
++                if ($user->level == 1 or (int) $dKey->registrator_id === (int) $user->id_users) {
+                     $validation = Services::validation();
+                     $data = [
                          'title' => 'Key',
                          'user' => $user,
                          'key' => $dKey,
@@ -12843,7 +12870,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                          'time' => $this->time,
                          'key_info' => getDevice($dKey->devices),
                          'messages' => setMessage('Please carefuly edit information'),
-@@ -148,12 +185,172 @@
+@@ -148,17 +191,177 @@
          return redirect()->to('keys')->with('msgDanger', $msgDanger);
      }
  
@@ -13017,16 +13044,34 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
  
          if (!$dKey) {
              $msgDanger = "The user key no longer exists~";
-@@ -273,14 +470,28 @@
+         } else {
+-            if ($user->level == 1 or $dKey->registrator == $user->username) {
++            if ($user->level == 1 or (int) $dKey->registrator_id === (int) $user->id_users) {
+                 $form_reseller = [
+                     'status' => [
+                         'label' => 'status',
+@@ -273,14 +476,41 @@
              $message = setMessage("Please top up to your beloved admin.", 'warning');
          }
  
 +        $isAdmin = (int) $user->level === 1;
 +
-+        // code => name, for the game dropdown.
-+        $games = [];
++        // code => name, for the game dropdown; and code => device rules, so
++        // the form can set and lock the Max Devices field per game. An admin
++        // is never locked or bounded on the client either — the flag below is
++        // only ever true for a seller.
++        $games   = [];
++        $devConf = [];
 +        foreach ($this->gameModel->sellable($isAdmin) as $g) {
-+            $games[$g->code] = $g->name;
++            $games[$g->code]   = $g->name;
++            $min = max(1, (int) $g->min_devices);
++            $max = max($min, (int) $g->max_devices);
++            // An admin is never bounded or locked on the client, so the field
++            // does not fight them if they set a count outside the seller
++            // range — the server lets an admin through anyway.
++            $devConf[$g->code] = $isAdmin
++                ? ['min' => 1, 'max' => 1000, 'locked' => false]
++                : ['min' => $min, 'max' => $max, 'locked' => (int) $g->lock_devices === 1];
 +        }
 +
 +        // code => hours => [label, price]. Admin-only tiers are dropped here
@@ -13049,11 +13094,12 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +            // produced a string the view then had to escape again, which is
 +            // what used to break the estimate.
 +            'catalogue'  => $catalogue,
++            'deviceConf' => $devConf,
 +            'messages'   => $message,
              'validation' => $validation,
          ];
          return view('Keys/generate', $data);
-@@ -293,9 +504,23 @@
+@@ -293,9 +523,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -13079,7 +13125,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
          $form_rules = [
              'game' => [
                  'label' => 'Games',
-@@ -306,15 +531,18 @@
+@@ -306,15 +550,20 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -13096,11 +13142,13 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'max_devices' => [
                  'label' => 'devices',
 -                'rules' => 'required|numeric|greater_than_equal_to[1]',
-+                'rules' => 'required|numeric|greater_than_equal_to[1]|less_than_equal_to[100]',
++                // 1000 is only the sane hard ceiling; the real per-game bounds
++                // are enforced below, after the game is known.
++                'rules' => 'required|numeric|greater_than_equal_to[1]|less_than_equal_to[1000]',
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +550,9 @@
+@@ -322,7 +571,9 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
@@ -13111,7 +13159,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +561,146 @@
+@@ -331,57 +582,170 @@
          ];
  
          $validation = Services::validation();
@@ -13153,11 +13201,32 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        if (! $this->validate($form_rules)) {
 +            return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the error');
 +        }
-+
+ 
+-                    // Add the generated key to the list
+-                    $generatedKeys[] = $data_response;
 +        // Re-read the posted values now that the rules have vetted them.
 +        $drtn = (int) $this->request->getPost('duration');
 +        $maxd = (int) $this->request->getPost('max_devices');
 +        $quantity = (int) $this->request->getPost('quantity');
++
++        // Per-game device rules. The admin sets, per game, how many devices a
++        // key may carry and whether a seller may choose at all. Enforced here
++        // on the server, never trusting the number the form sent:
++        //   - locked  -> a seller's count is FORCED to the game's minimum, so
++        //                nobody can hand themselves extra device slots;
++        //   - unlocked -> the seller's count must sit within [min, max].
++        // An admin is not bounded: they can set any count up to the hard cap,
++        // which is what "the admin can override it" means.
++        $devRules = $this->gameModel->deviceRules($game);
++        if (! $isAdmin) {
++            if ($devRules['locked']) {
++                $maxd = $devRules['min'];
++            } elseif ($maxd < $devRules['min'] || $maxd > $devRules['max']) {
++                return redirect()->back()->withInput()->with('msgDanger',
++                    'For this game you may set between ' . $devRules['min']
++                    . ' and ' . $devRules['max'] . ' devices.');
++            }
++        }
 +
 +        // One query decides the price and the permission at the same time:
 +        // the game must be active, the tier must belong to it, be active,
@@ -13197,9 +13266,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    return redirect()->back()->withInput()
 +                        ->with('msgWarning', 'Please top up to your beloved admin.');
 +                }
- 
--                    // Add the generated key to the list
--                    $generatedKeys[] = $data_response;
++
 +                // Read the balance back inside the transaction, so the ledger
 +                // records what this debit actually left rather than a figure
 +                // computed from a value read before the UPDATE.
@@ -13259,6 +13326,11 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    'duration' => $drtn,
 +                    'max_devices' => $maxd,
 +                    'registrator' => $user->username,
++                    // The owner's immutable id, baked in at creation. This is
++                    // what scopes the panel; the username above is kept for
++                    // display and for the connector, but is never trusted for
++                    // "whose key is this" because a name can be reused.
++                    'registrator_id' => (int) $user->id_users,
                  ];
  
 -                session()->setFlashdata(array_merge($data_response, $other_response));
@@ -14648,8 +14720,8 @@ diff -ruN /tmp/orig_app/Models/DurationModel.php app/Models/DurationModel.php
 +}
 diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 --- /tmp/orig_app/Models/GameModel.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Models/GameModel.php	2026-08-26 14:23:51.810880173 +0000
-@@ -0,0 +1,67 @@
++++ app/Models/GameModel.php	2026-08-27 23:55:06.097357307 +0000
+@@ -0,0 +1,88 @@
 +<?php
 +
 +namespace App\Models;
@@ -14661,7 +14733,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +    protected $table      = 'games';
 +    protected $primaryKey = 'id_game';
 +
-+    protected $allowedFields = ['code', 'name', 'status', 'sort_order'];
++    protected $allowedFields = ['code', 'name', 'status', 'sort_order', 'min_devices', 'max_devices', 'lock_devices'];
 +    protected $useTimestamps = true;
 +
 +    // Objects, not arrays. CI4 defaults to arrays and the rest of this panel
@@ -14677,7 +14749,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +    public function sellable(bool $isAdmin): array
 +    {
 +        $builder = $this->db->table('games g')
-+            ->select('g.id_game, g.code, g.name')
++            ->select('g.id_game, g.code, g.name, g.min_devices, g.max_devices, g.lock_devices')
 +            ->join('game_durations d', 'd.game_id = g.id_game', 'inner')
 +            ->where('g.status', 1)
 +            ->where('d.status', 1);
@@ -14687,7 +14759,7 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +        }
 +
 +        return $builder
-+            ->groupBy('g.id_game, g.code, g.name, g.sort_order')
++            ->groupBy('g.id_game, g.code, g.name, g.min_devices, g.max_devices, g.lock_devices, g.sort_order')
 +            ->orderBy('g.sort_order', 'ASC')
 +            ->orderBy('g.name', 'ASC')
 +            ->get()->getResultObject();
@@ -14704,6 +14776,27 @@ diff -ruN /tmp/orig_app/Models/GameModel.php app/Models/GameModel.php
 +    public function byCode(string $code): ?object
 +    {
 +        return $this->where('code', $code)->first();
++    }
++
++    /**
++     * The device rules for one game code: how many devices a key may carry,
++     * and whether a seller may choose at all.
++     *
++     * Returns sane defaults (1..100, unlocked) for an unknown code so a
++     * caller never has to special-case a missing row. min is clamped to at
++     * least 1 and max to at least min, so a mis-entered pair can never invert.
++     *
++     * @return array{min:int,max:int,locked:bool}
++     */
++    public function deviceRules(string $code): array
++    {
++        $g = $this->select('min_devices, max_devices, lock_devices')
++            ->where('code', $code)->first();
++
++        $min = max(1, (int) ($g->min_devices ?? 1));
++        $max = max($min, (int) ($g->max_devices ?? 100));
++
++        return ['min' => $min, 'max' => $max, 'locked' => (bool) ($g->lock_devices ?? 0)];
 +    }
 +
 +    /**
@@ -14744,8 +14837,17 @@ diff -ruN /tmp/orig_app/Models/HistoryModel.php app/Models/HistoryModel.php
              ->get()->getResultObject();
 diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
 --- /tmp/orig_app/Models/KeysModel.php	2026-08-24 23:02:52.607423272 +0000
-+++ app/Models/KeysModel.php	2026-08-27 22:58:30.832419309 +0000
-@@ -27,7 +27,84 @@
++++ app/Models/KeysModel.php	2026-08-27 23:48:53.717072867 +0000
+@@ -9,7 +9,7 @@
+ {
+     protected $table      = 'keys_code';
+     protected $primaryKey = 'id_keys';
+-    protected $allowedFields = ['game', 'user_key', 'duration', 'expired_date', 'max_devices', 'devices', 'status', 'registrator'];
++    protected $allowedFields = ['game', 'user_key', 'duration', 'expired_date', 'max_devices', 'devices', 'status', 'registrator', 'registrator_id'];
+ 
+     protected $useTimestamps = true;
+ 
+@@ -27,7 +27,88 @@
              ->getRowObject();
      }
  
@@ -14763,7 +14865,11 @@ diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
 +        $db      = db_connect();
 +        $scope   = static function ($builder) use ($user) {
 +            if ((int) $user->level !== 1) {
-+                $builder->where('registrator', $user->username);
++                // Scoped by the owner's immutable id, not their username. A
++                // username can be deleted and registered again by someone
++                // else; the id never is, so the new holder never inherits the
++                // old one's keys.
++                $builder->where('registrator_id', (int) $user->id_users);
 +            }
 +            return $builder;
 +        };
@@ -14793,25 +14899,25 @@ diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
 +     * game that was later removed still appear instead of vanishing from
 +     * someone's own totals.
 +     */
-+    public function byGameFor(string $username): array
++    public function byGameFor(int $ownerId): array
 +    {
 +        return $this->db->table($this->table . ' k')
 +            ->select('k.game, COUNT(*) AS total,'
 +                . ' SUM(CASE WHEN k.status = 1 THEN 1 ELSE 0 END) AS active,'
 +                . ' SUM(k.max_devices) AS devices,'
 +                . ' MAX(k.created_at) AS last_at', false)
-+            ->where('k.registrator', $username)
++            ->where('k.registrator_id', $ownerId)
 +            ->groupBy('k.game')
 +            ->orderBy('total', 'DESC')
 +            ->get()->getResultObject();
 +    }
 +
 +    /** Keys issued per day for the last $days days, for the sparkline. */
-+    public function dailyFor(string $username, int $days = 14): array
++    public function dailyFor(int $ownerId, int $days = 14): array
 +    {
 +        return $this->db->table($this->table)
 +            ->select('DATE(created_at) AS day, COUNT(*) AS n', false)
-+            ->where('registrator', $username)
++            ->where('registrator_id', $ownerId)
 +            ->where('created_at >=', date('Y-m-d 00:00:00', strtotime("-{$days} days")))
 +            ->groupBy('DATE(created_at)')
 +            ->orderBy('day', 'ASC')
@@ -14827,19 +14933,21 @@ diff -ruN /tmp/orig_app/Models/KeysModel.php app/Models/KeysModel.php
 +     *                            passed, so the parameter can never widen a
 +     *                            seller's view.
 +     */
-+    public function API_getKeys(?string $owner = null)
++    public function API_getKeys(?int $ownerId = null)
      {
          $connect = db_connect();
          $builder = $connect->table($this->table);
-@@ -35,7 +112,11 @@
+@@ -35,7 +116,12 @@
          $userModel = new UserModel();
          $user = $userModel->getUser();
          if ($user->level != 1) {
-+            // A seller: their own keys, full stop. $owner is not consulted.
-             $builder->where('registrator', $user->username);
-+        } elseif ($owner !== null && $owner !== '') {
+-            $builder->where('registrator', $user->username);
++            // A seller: their own keys, by immutable id. $ownerId is not
++            // consulted, so the parameter can never widen a seller's scope.
++            $builder->where('registrator_id', (int) $user->id_users);
++        } elseif ($ownerId !== null) {
 +            // An admin narrowing the list to one seller.
-+            $builder->where('registrator', $owner);
++            $builder->where('registrator_id', $ownerId);
          }
  
          $builder->select('CONCAT(keys_code.id_keys) as id, game, user_key, duration, CONCAT(keys_code.expired_date) as expired, max_devices, devices, status, registrator');
@@ -15551,8 +15659,8 @@ diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 --- /tmp/orig_app/Views/Admin/games.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Views/Admin/games.php	2026-08-27 17:48:58.020913162 +0000
-@@ -0,0 +1,443 @@
++++ app/Views/Admin/games.php	2026-08-27 23:56:44.993775667 +0000
+@@ -0,0 +1,485 @@
 +<?= $this->extend('Layout/Starter') ?>
 +
 +<?= $this->section('content') ?>
@@ -15612,6 +15720,9 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +                        data-name="<?= esc($g->name, 'attr') ?>"
 +                        data-status="<?= (int) $g->status ?>"
 +                        data-sort="<?= (int) $g->sort_order ?>"
++                        data-mindev="<?= (int) ($g->min_devices ?? 1) ?>"
++                        data-maxdev="<?= (int) ($g->max_devices ?? 100) ?>"
++                        data-lockdev="<?= (int) ($g->lock_devices ?? 0) ?>"
 +                        data-locked="<?= $keys > 0 ? '1' : '0' ?>">
 +                    <i class="bi bi-pencil-square"></i> Edit
 +                </button>
@@ -15763,6 +15874,41 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +                    </div>
 +                </div>
 +            </div>
++
++            <hr class="em-hr">
++            <p class="em-hint" style="margin-top:0">
++                <b>Devices per key.</b> How many devices a seller may put on a
++                key of this game. You are never bound by these — only sellers.
++            </p>
++            <div class="row g-3">
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="g_mindev">Min devices</label>
++                        <input type="number" class="form-control" name="min_devices" id="g_mindev"
++                               min="1" max="1000" value="1">
++                        <p class="em-hint">The fewest a seller may pick. Also the fixed count when locked.</p>
++                    </div>
++                </div>
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="g_maxdev">Max devices</label>
++                        <input type="number" class="form-control" name="max_devices" id="g_maxdev"
++                               min="1" max="1000" value="100">
++                        <p class="em-hint">The most a seller may pick.</p>
++                    </div>
++                </div>
++            </div>
++            <div class="em-field">
++                <label class="em-check">
++                    <input type="checkbox" name="lock_devices" id="g_lockdev" value="1">
++                    <span>Lock the device count — sellers cannot change it</span>
++                </label>
++                <p class="em-hint">
++                    When locked, every seller key for this game is fixed at the
++                    <b>Min devices</b> above, so no seller can hand themselves
++                    extra device slots. You can still set any count.
++                </p>
++            </div>
 +        </div>
 +
 +        <footer class="em-modal-f">
@@ -15894,6 +16040,9 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +            document.getElementById('g_name').value   = d.name   || '';
 +            document.getElementById('g_status').value = d.status !== undefined ? d.status : '1';
 +            document.getElementById('g_sort').value   = d.sort   || 0;
++            document.getElementById('g_mindev').value = d.mindev  || 1;
++            document.getElementById('g_maxdev').value = d.maxdev  || 100;
++            document.getElementById('g_lockdev').checked = d.lockdev === '1';
 +            document.getElementById('g_title').textContent = d.id ? 'Edit game' : 'Add game';
 +
 +            // Once keys exist the code is baked into them, so it stops being
@@ -15916,7 +16065,8 @@ diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 +            b.addEventListener('click', function () {
 +                fillGame({
 +                    id: b.dataset.id, code: b.dataset.code, name: b.dataset.name,
-+                    status: b.dataset.status, sort: b.dataset.sort, locked: b.dataset.locked
++                    status: b.dataset.status, sort: b.dataset.sort, locked: b.dataset.locked,
++                    mindev: b.dataset.mindev, maxdev: b.dataset.maxdev, lockdev: b.dataset.lockdev
 +                });
 +                open(gameModal);
 +            });
@@ -16844,7 +16994,7 @@ diff -ruN /tmp/orig_app/Views/Keys/deleted.php app/Views/Keys/deleted.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 --- /tmp/orig_app/Views/Keys/generate.php	2026-08-24 23:02:52.614808324 +0000
-+++ app/Views/Keys/generate.php	2026-08-27 01:23:40.160627224 +0000
++++ app/Views/Keys/generate.php	2026-08-27 23:57:54.373449619 +0000
 @@ -3,6 +3,21 @@
  <?= $this->section('content') ?>
  <div class="row justify-content-center">
@@ -16893,7 +17043,7 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                  <?= form_open() ?>
  
                  <div class="row">
-@@ -64,30 +74,35 @@
+@@ -64,30 +74,36 @@
                          <label for="game" class="form-label">Games</label>
                          <?= form_dropdown(['class' => 'form-select', 'name' => 'game', 'id' => 'game'], $game, old('game') ?: '') ?>
                          <?php if ($validation->hasError('game')) : ?>
@@ -16903,9 +17053,12 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                      </div>
                      <div class="form-group col-lg-6 mb-3">
                          <label for="max_devices" class="form-label">Max Devices</label>
-                         <input type="number" name="max_devices" id="max_devices" class="form-control" placeholder="1" value="<?= old('max_devices') ?: 1 ?>">
-                         <?php if ($validation->hasError('game')) : ?>
+-                        <input type="number" name="max_devices" id="max_devices" class="form-control" placeholder="1" value="<?= old('max_devices') ?: 1 ?>">
+-                        <?php if ($validation->hasError('game')) : ?>
 -                            <small id="help-max_devices" class="text-danger"><?= $validation->getError('max_devices') ?></small>
++                        <input type="number" name="max_devices" id="max_devices" class="form-control" placeholder="1" min="1" value="<?= old('max_devices') ?: 1 ?>">
++                        <small id="dev-note" class="form-text"></small>
++                        <?php if ($validation->hasError('max_devices')) : ?>
 +                            <small id="help-max_devices" class="text-danger"><?= esc($validation->getError('max_devices')) ?></small>
                          <?php endif; ?>
                      </div>
@@ -16934,7 +17087,7 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                          <?php endif; ?>
                      </div>
                  </div>
-@@ -96,8 +111,8 @@
+@@ -96,8 +112,8 @@
                      <input type="text" id="estimation" class="form-control" placeholder="Your order will total" readonly>
                  </div>
                  <div class="form-group">
@@ -16945,7 +17098,7 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                      </button>
                  </div>
                  <?= form_close() ?>
-@@ -183,26 +198,77 @@
+@@ -183,26 +199,106 @@
  <?= $this->section('js') ?>
  <script>
      $(document).ready(function() {
@@ -16965,8 +17118,6 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 -            if (gprice != NaN) {
 -                var result = (device * gprice * quantity);
 -                $("#estimation").val(result);
--            } else {
--                $("#estimation").val('Estimation error');
 +        // The catalogue as a JS object literal:
 +        //   { "CODM": { "24": {label, price}, ... }, ... }
 +        // Not a string to JSON.parse - esc() used to HTML-encode the quotes,
@@ -16977,8 +17128,37 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 +            $catalogue,
 +            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
 +        ) ?>;
++        // code => {min, max, locked}. The server enforces all of this again;
++        // this only makes the field behave so a seller is not surprised.
++        var DEVCONF = <?= json_encode(
++            $deviceConf,
++            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
++        ) ?>;
 +        var $game     = $('#game');
 +        var $duration = $('#duration');
++        var $maxdev   = $('#max_devices');
++
++        // Apply the chosen game's device rules to the Max Devices field:
++        // set its min/max, clamp the current value into range, and when the
++        // game is locked make it read-only at the fixed minimum.
++        function applyDeviceRules() {
++            var c = DEVCONF[$game.val()] || { min: 1, max: 1000, locked: false };
++            $maxdev.attr('min', c.min).attr('max', c.max);
++
++            if (c.locked) {
++                $maxdev.val(c.min).prop('readonly', true).addClass('is-locked');
++                $('#dev-note').text('Fixed at ' + c.min + ' for this game.');
+             } else {
+-                $("#estimation").val('Estimation error');
++                $maxdev.prop('readonly', false).removeClass('is-locked');
++                var v = parseInt($maxdev.val(), 10);
++                if (!isFinite(v) || v < c.min) { $maxdev.val(c.min); }
++                else if (v > c.max) { $maxdev.val(c.max); }
++                $('#dev-note').text(c.min === c.max
++                    ? (c.min + ' device' + (c.min === 1 ? '' : 's'))
++                    : (c.min + ' to ' + c.max + ' devices'));
++            }
++        }
 +
 +        // Rebuild the duration list for whichever game is selected. Tiers and
 +        // prices are per game now, so this cannot be a static list.
@@ -17005,7 +17185,7 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 +            // Keep the previous choice when the new game offers it too.
 +            if (previous && tiers[previous] !== undefined) {
 +                $duration.val(previous);
-             }
++            }
 +
 +            // The themed dropdown copies the options once when it is built, so
 +            // it has to be told they changed.
@@ -17029,19 +17209,20 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
 +                || device < 1 || quantity < 1) {
 +                $('#estimation').val('');
 +                return;
-+            }
+             }
 +
 +            $('#estimation').val('$' + (device * Number(tier.price) * quantity).toFixed(2));
          }
 +
-+        $game.on('change', refreshDurations);
++        $game.on('change', function () { applyDeviceRules(); refreshDurations(); });
 +        $('#max_devices, #duration, #quantity').on('change keyup', estimate);
 +
++        applyDeviceRules();
 +        refreshDurations();
      });
  
      // Replace the native <select> (grey OS menu) with a themed dropdown that
-@@ -229,19 +295,30 @@
+@@ -229,19 +325,30 @@
              menu.className = 'tsel-menu';
              wrap.appendChild(menu);
  
@@ -17254,7 +17435,7 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
          $("#devices").attr('rows', $(this).val());
 diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 --- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
-+++ app/Views/Keys/list.php	2026-08-27 23:16:59.218702256 +0000
++++ app/Views/Keys/list.php	2026-08-27 23:50:08.904589825 +0000
 @@ -1,60 +1,219 @@
  <?= $this->extend('Layout/Starter') ?>
  
@@ -17270,8 +17451,8 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 +    <div class="em-head-main">
 +        <span class="em-eyebrow"><i class="bi bi-card-list"></i> Keys</span>
 +        <?php if (! empty($owner)) : ?>
-+            <h1>Keys by <?= esc($owner) ?></h1>
-+            <p>Every key <b><?= esc($owner) ?></b> issued, with its device usage and expiry.</p>
++            <h1>Keys by <?= esc($owner['name']) ?></h1>
++            <p>Every key <b><?= esc($owner['name']) ?></b> issued, with its device usage and expiry.</p>
 +        <?php else : ?>
 +            <h1>Registered keys</h1>
 +            <p>Every key you have issued, with its device usage and expiry.</p>
@@ -17530,7 +17711,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
                  [0, "desc"]
              ],
 -            ajax: "<?= site_url('keys/api') ?>",
-+            ajax: dtAjax("<?= site_url('keys/api') ?><?= ! empty($owner) ? '?owner=' . rawurlencode($owner) : '' ?>"),
++            ajax: dtAjax("<?= site_url('keys/api') ?><?= ! empty($owner) ? '?owner=' . rawurlencode($owner['name']) : '' ?>"),
              columns: [{
                      data: 'id',
                      name: 'id_keys'
