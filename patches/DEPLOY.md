@@ -1295,9 +1295,9 @@ separate:
     hidden in the cap.
   - **Allow unlimited keys** is a new per-game switch, **off by default**. Only
     when it is on does a 0 in the Max Devices box make an unlimited key. When
-    it is off, a 0 is refused **for everyone, admin included** — on both the
-    New license page **and the Edit key page**, so neither form lets you slip a
-    0 past the cap.
+    it is off, a 0 is refused **for everyone, admin included**, so nobody can
+    slip a 0 past the cap. (Devices are only ever set on the New license page —
+    see the note below on why the Edit key page no longer carries the field.)
 
 The refusal message is deliberately neutral — **"Devices must be at least 1."**
 It does **not** say unlimited is turned off, because that would tell a seller
@@ -1309,19 +1309,32 @@ So a plain seller never sees a hint of the feature in the page or its source;
 only games where you deliberately turned it on show it.
 
 Stored as `games.allow_unlimited`. Verified end to end: with the switch off, a
-seller's 0 and an admin's 0 were both refused on New license and on Edit key,
-and an over-cap number was refused; with it on, both could make an unlimited
-key, priced at the base tier. Also confirmed by rendering the New license page
-as a seller and as an admin with every game's switch off — the page HTML
-contained the word "unlimited" zero times — and with a game switched on, only
-that game showed the affordance. The connector still needs the one-line
-`max > 0` guard (CONNECTOR-PROTOCOL.md) for an unlimited key to actually
-accept devices.
+seller's 0 and an admin's 0 were both refused on New license, and an over-cap
+number was refused; with it on, a 0 makes an unlimited key, priced at the base
+tier. Also confirmed by rendering the New license page as a seller and as an
+admin with every game's switch off — the page HTML contained the word
+"unlimited" zero times — and with a game switched on, only that game showed the
+affordance. The connector still needs the one-line `max > 0` guard
+(CONNECTOR-PROTOCOL.md) for an unlimited key to actually accept devices.
 
-On the **Edit key** page an unlimited key (max devices 0) now shows the
-device badge as **`used/∞`** instead of `used/0`, and the badge switches to
-`∞` live if you type 0 in the Max Devices box — so an unlimited key reads as
-unlimited, not as zero.
+## Max Devices is set once, at creation — and can't be edited
+
+Following your note, **the Edit key page no longer lets anyone change a key's
+Max Devices.** Devices are priced and charged when the key is made, so letting
+them be raised afterwards would hand out paid device slots for free. On the
+Edit key page the value is now shown **read-only** (with **`∞`** for an
+unlimited key), and the form does not carry the field at all — the server keeps
+whatever the key was created with and never overwrites it.
+
+This also closes the bug you saw: setting Max Devices to 0 in Edit key used to
+save as `0/1` even on a game with unlimited off. There is nothing to set now,
+so it can't happen. And an **already-unlimited key stays unlimited**: because
+its `max_devices` (0) is never touched on edit, a key created while unlimited
+was on keeps working even if you later turn the game's switch off — exactly the
+grandfather case you asked for. The device badge shows it as **`used/∞`**.
+Verified live: posting an injected `max_devices=0` or `max_devices=999` to the
+edit endpoint left a capped key unchanged, an unlimited key stayed 0, and the
+device list was still trimmed to the key's fixed cap.
 
 ## Per-game quantity limits, and where the real limits live
 
@@ -1340,6 +1353,16 @@ several keys at once, now under a firm ceiling. Add the two columns from
 `MIGRATION.sql` (section 10a-2); skip them if you don't want quantity limits
 yet — the code treats a missing value as the sane default.
 
+**Two different zeros, so there is no way to ask for "infinite keys".** A `0`
+in the admin **Max quantity** box means "no seller cap" (up to the ceiling of
+100). A `0` typed into the **Quantity** box at key creation is simply invalid —
+it is refused with **"Quantity must be at least 1."**, the same as devices, and
+the key-creation loop is bounded by the hard ceiling regardless, so a request
+can never make an unbounded number of keys. The most any single Generate can
+produce is 100. (If you ever want that ceiling higher, it is a one-line change
+— tell me and we'll pick a number; I kept it at 100 because generating far more
+than that in one request would strain the database and makes a typo expensive.)
+
 **These are real limits, not page dressing — this was the point of the
 round.** Every restriction is enforced in PHP on submit, reading the rules
 from the database and never trusting what the form sent, so editing the HTML
@@ -1351,8 +1374,13 @@ posted tampered values directly:
   - Seller forced quantity 10 on an *admins-only* game → server made 1 key.
   - Admin quantity 20 (over a seller cap of 5) → allowed (admin bypass);
     admin quantity 200 (over the 100 ceiling) → refused.
+  - Quantity 0 on a game with **Max quantity 0** (the "unlimited" setting) →
+    refused with "Quantity must be at least 1.", 0 keys — no infinite loop;
+    quantity 100 there made 100, quantity 1000 was refused.
   - Seller forced 50 devices over a cap of 10, and 0 on an unlimited-off game
     → both refused.
+  - Injected `max_devices` in the Edit key POST (0, and 999) → ignored; the
+    key kept its creation-time cap.
   - **Estimation is display only.** A seller edited the estimate box to
     `$0.00` on a $12 key and submitted; the server ignored it and charged the
     real $12. The price is computed server-side from the tier and device rules

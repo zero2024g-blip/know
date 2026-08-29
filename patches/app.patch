@@ -12725,7 +12725,7 @@ diff -ruN /tmp/orig_app/Controllers/KeyCheck.php app/Controllers/KeyCheck.php
  }
 diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 --- /tmp/orig_app/Controllers/Keys.php	2026-08-24 23:02:52.530806327 +0000
-+++ app/Controllers/Keys.php	2026-08-29 00:46:01.396477859 +0000
++++ app/Controllers/Keys.php	2026-08-29 01:38:55.956405250 +0000
 @@ -2,6 +2,9 @@
  
  namespace App\Controllers;
@@ -12947,16 +12947,16 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 -        ];
 +        $total = $db_key->devices ? explode(',', $db_key->devices) : [];
 +        $rules = ['devices_total' => count($total), 'devices_max' => (int) $db_key->max_devices];
-+
+ 
+-        $real_response = array_merge($data, $rules);
+-        return $this->response->setJSON($real_response);
 +        if ($db_key->devices && $reset) {
 +            $model->set('devices', null)
 +                ->where('user_key', $keys)
 +                ->update();
 +            $rules = ['reset' => true, 'devices_total' => 0, 'devices_max' => (int) $db_key->max_devices];
 +        }
- 
--        $real_response = array_merge($data, $rules);
--        return $this->response->setJSON($real_response);
++
 +        return $this->response->setJSON(array_merge(
 +            ['registered' => true, 'keys' => $keys, 'csrf' => csrf_hash()],
 +            $rules
@@ -13159,35 +13159,53 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  $form_reseller = [
                      'status' => [
                          'label' => 'status',
-@@ -201,7 +404,8 @@
+@@ -199,14 +402,9 @@
+                             'numeric' => 'Invalid hours {field}.'
+                         ]
                      ],
-                     'max_devices' => [
-                         'label' => 'devices',
+-                    'max_devices' => [
+-                        'label' => 'devices',
 -                        'rules' => 'required|numeric|greater_than_equal_to[1]',
-+                        // 0 = unlimited (the key accepts any number of devices).
-+                        'rules' => 'required|numeric|greater_than_equal_to[0]|less_than_equal_to[1000]',
-                         'errors' => [
-                             'greater_than_equal_to' => 'Minimum {field} is invalid.',
-                             'numeric' => 'Invalid max of {field}.'
-@@ -228,7 +432,16 @@
+-                        'errors' => [
+-                            'greater_than_equal_to' => 'Minimum {field} is invalid.',
+-                            'numeric' => 'Invalid max of {field}.'
+-                        ]
+-                    ],
++                    // No max_devices rule: the device cap is fixed at creation
++                    // (that is when it is priced and paid for) and is not
++                    // editable here, so the form never carries it.
+                     'registrator' => [
+                         'label' => 'registrator',
+                         'rules' => 'permit_empty|alpha_numeric_space|min_length[4]'
+@@ -228,17 +426,24 @@
                      // Admin full rules.
                      $form_rules = array_merge($form_reseller, $form_admin);
                      $devices = $this->request->getPost('devices');
 -                    $max_devices = $this->request->getPost('max_devices');
-+                    $max_devices = (int) $this->request->getPost('max_devices');
 +
-+                    // 0 = unlimited is gated by the game's switch on this page
-+                    // too, so the edit form cannot be used to slip past it.
-+                    // Neutral message: it must not reveal the option exists.
-+                    $editGame = (string) $this->request->getPost('game');
-+                    if ($max_devices === 0 && ! $this->gameModel->deviceRules($editGame)['unlimited']) {
-+                        return redirect()->back()->withInput()
-+                            ->with('msgDanger', 'Devices must be at least 1.');
-+                    }
++                    // The device cap is set once, at creation, where it is
++                    // priced and charged. It is deliberately NOT editable here:
++                    // the form does not send it, and we keep whatever the key
++                    // was created with. This both preserves an unlimited key
++                    // (max_devices 0, made when the game allowed it) and stops
++                    // anyone widening a key's device count for free after the
++                    // fact. The device LIST is still trimmed to that fixed cap.
++                    $fixedMax = (int) $dKey->max_devices;
  
                      $data_saves = [
                          'game' => $this->request->getPost('game'),
-@@ -273,14 +486,78 @@
+                         'user_key' => $this->request->getPost('user_key'),
+                         'duration' => $this->request->getPost('duration'),
+-                        'max_devices' => $max_devices,
+                         'status' => $this->request->getPost('status'),
+                         'registrator' => $this->request->getPost('registrator'),
+                         'expired_date' => $this->request->getPost('expired_date') ?: NULL,
+-                        'devices' => setDevice($devices, $max_devices),
++                        'devices' => setDevice($devices, $fixedMax),
+                     ];
+                 } else {
+                     // Reseller just status rules, you can set manually later.
+@@ -273,14 +478,78 @@
              $message = setMessage("Please top up to your beloved admin.", 'warning');
          }
  
@@ -13273,7 +13291,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
              'validation' => $validation,
          ];
          return view('Keys/generate', $data);
-@@ -293,9 +570,23 @@
+@@ -293,9 +562,23 @@
          $maxd = $this->request->getPost('max_devices');
          $drtn = $this->request->getPost('duration');
          $quantity = (int) $this->request->getPost('quantity');
@@ -13299,7 +13317,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
          $form_rules = [
              'game' => [
                  'label' => 'Games',
-@@ -306,15 +597,21 @@
+@@ -306,15 +589,21 @@
              ],
              'duration' => [
                  'label' => 'duration',
@@ -13323,20 +13341,21 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid max of {field}.'
-@@ -322,7 +619,11 @@
+@@ -322,7 +611,12 @@
              ],
              'quantity' => [
                  'label' => 'Quantity',
 -                'rules' => 'required|numeric|greater_than_equal_to[1]',
-+                // Bounded by the hard ceiling here; the real per-game and
-+                // per-role cap is enforced below, once the game is known. The
-+                // loop runs once per unit, so an unbounded quantity is a way to
-+                // hang the request -- it never gets past this rule.
-+                'rules' => 'required|numeric|greater_than_equal_to[1]|less_than_equal_to[' . \App\Models\GameModel::QTY_HARD_CAP . ']',
++                // 0 is allowed through the rule and rejected with a clear
++                // message below, the same way devices are handled; the hard
++                // ceiling bounds it so the loop can never run unbounded. The
++                // real per-game and per-role cap is enforced below, once the
++                // game is known.
++                'rules' => 'required|numeric|greater_than_equal_to[0]|less_than_equal_to[' . \App\Models\GameModel::QTY_HARD_CAP . ']',
                  'errors' => [
                      'greater_than_equal_to' => 'Minimum {field} is invalid.',
                      'numeric' => 'Invalid quantity value.',
-@@ -331,57 +632,222 @@
+@@ -331,57 +625,233 @@
          ];
  
          $validation = Services::validation();
@@ -13416,14 +13435,7 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    . ($devRules['unlimited'] ? ' devices, or 0 for unlimited.' : ' devices.'));
 +            }
 +        }
- 
--                    // insert the key, then log ITS OWN history row (one per quantity)
--                    $idKeys = $this->model->insert($data_response);
--                    $history->insert([
--                        'keys_id' => $idKeys,
--                        'user_do' => $user->username,
--                        'info' => "$game|" . substr($license, 0, 5) . "|$drtn|$maxd",
--                    ]);
++
 +        // Per-game quantity rules, enforced on the server exactly like the
 +        // device rules above and never trusting the number the form sent:
 +        //   mode OFF   -> nobody chooses; every request makes exactly one key.
@@ -13433,6 +13445,24 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +        // ever be turned into an unbounded loop.
 +        $qtyRules = $this->gameModel->qtyRules($game);
 +        $QHARD    = \App\Models\GameModel::QTY_HARD_CAP;
++
++        // 0 is never a valid quantity to type at creation -- an "unlimited"
++        // quantity is an admin setting (max_qty 0), not something a 0 in this
++        // box turns on. So a 0 here is refused for everyone with a clear
++        // message, exactly like the devices field, and there is no path where
++        // a 0 could make the key-creation loop run without a bound.
++        if ($quantity === 0) {
++            return redirect()->back()->withInput()->with('msgDanger',
++                'Quantity must be at least 1.');
++        }
+ 
+-                    // insert the key, then log ITS OWN history row (one per quantity)
+-                    $idKeys = $this->model->insert($data_response);
+-                    $history->insert([
+-                        'keys_id' => $idKeys,
+-                        'user_do' => $user->username,
+-                        'info' => "$game|" . substr($license, 0, 5) . "|$drtn|$maxd",
+-                    ]);
 +        if ($qtyRules['mode'] === \App\Models\GameModel::MODE_OFF) {
 +            $quantity = 1;
 +        } elseif ($isAdmin) {
@@ -13448,7 +13478,9 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    'For this game you may make 1 to ' . $qtyRules['cap'] . ' keys at a time.');
 +            }
 +        }
-+
+ 
+-                    // Add the generated key to the list
+-                    $generatedKeys[] = $data_response;
 +        // One query decides the price and the permission at the same time:
 +        // the game must be active, the tier must belong to it, be active,
 +        // and be one this role may buy. Anything else comes back null.
@@ -13491,10 +13523,16 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    $validation->setError('duration', 'Insufficient balance');
 +                    return redirect()->back()->withInput()
 +                        ->with('msgWarning', 'Please top up to your beloved admin.');
-+                }
+                 }
  
--                    // Add the generated key to the list
--                    $generatedKeys[] = $data_response;
+-                // * reduce saldo once for the whole batch (price * quantity)
+-                $this->userModel->update(session('userid'), ['saldo' => $reduceCheck]);
+-                $totalfees = $getPrice * $quantity;
+-
+-                $other_response = [
+-                    'fees' => $totalfees,
+-                    'quantity' => $quantity,
+-                    'generatedKeys' => $generatedKeys,
 +                // Read the balance back inside the transaction, so the ledger
 +                // records what this debit actually left rather than a figure
 +                // computed from a value read before the UPDATE.
@@ -13530,20 +13568,12 @@ diff -ruN /tmp/orig_app/Controllers/Keys.php app/Controllers/Keys.php
 +                    $db->transRollback();
 +                    return redirect()->back()->withInput()
 +                        ->with('msgDanger', 'Your account is not active.');
-                 }
++                }
 +            }
 +
 +            $generatedKeys = [];
 +            $history = new HistoryModel();
- 
--                // * reduce saldo once for the whole batch (price * quantity)
--                $this->userModel->update(session('userid'), ['saldo' => $reduceCheck]);
--                $totalfees = $getPrice * $quantity;
--
--                $other_response = [
--                    'fees' => $totalfees,
--                    'quantity' => $quantity,
--                    'generatedKeys' => $generatedKeys,
++
 +            for ($i = 0; $i < $quantity; $i++) {
 +                $license = random_string('alnum', 12);
 +                $custom_license = $game . "_" . $license;
@@ -18148,8 +18178,8 @@ diff -ruN /tmp/orig_app/Views/Keys/generate.php app/Views/Keys/generate.php
                  var sel = select.options[select.selectedIndex];
 diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
 --- /tmp/orig_app/Views/Keys/key_edit.php	2026-08-24 23:02:52.615642502 +0000
-+++ app/Views/Keys/key_edit.php	2026-08-29 00:44:27.492480007 +0000
-@@ -12,54 +12,74 @@
++++ app/Views/Keys/key_edit.php	2026-08-29 01:39:30.084404469 +0000
+@@ -12,55 +12,73 @@
  // }
  ?>
  
@@ -18237,16 +18267,18 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
                              <?php endif; ?>
                          </div>
                          <div class="col-lg-6 mb-3">
-                             <label for="max_devices" class="form-label">Max Devices</label>
+-                            <label for="max_devices" class="form-label">Max Devices</label>
 -                            <input type="number" name="max_devices" id="max_devices" class="form-control" placeholder="3" aria-describedby="help-max_devices" value="<?= old('max_devices') ?: $key->max_devices ?>">
-+                            <input type="number" name="max_devices" id="max_devices" class="form-control" placeholder="3" aria-describedby="help-max_devices" value="<?= old('max_devices') ?: esc($key->max_devices, 'attr') ?>">
-                             <?php if ($validation->hasError('max_devices')) : ?>
+-                            <?php if ($validation->hasError('max_devices')) : ?>
 -                                <small id="help-max_devices" class="text-danger"><?= $validation->getError('max_devices') ?></small>
-+                                <small id="help-max_devices" class="text-danger"><?= esc($validation->getError('max_devices')) ?></small>
-                             <?php endif; ?>
+-                            <?php endif; ?>
++                            <label class="form-label">Max Devices</label>
++                            <input type="text" class="form-control" value="<?= ((int) $key->max_devices <= 0) ? '∞ (unlimited)' : (int) $key->max_devices ?>" readonly disabled aria-describedby="help-max_devices">
++                            <small id="help-max_devices" class="text-muted">Set when the key was made, where it is priced. Not editable here.</small>
                          </div>
                      <?php endif; ?>
-@@ -68,40 +88,40 @@
+                     <div class="col-md-6 mb-2" id="col-status">
+@@ -68,40 +86,40 @@
                          <?php $sel_status = ['' => '&mdash; Select Status &mdash;', '0' => 'Banned/Block', '1' => 'Active',]; ?>
                          <?= form_dropdown(['class' => 'form-select', 'name' => 'status', 'id' => 'status'], $sel_status, $key->status) ?>
                          <?php if ($validation->hasError('status')) : ?>
@@ -18274,8 +18306,9 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
                      </div>
                      <div class="col-lg-12 mb-3">
 -                        <label for="devices" class="form-label">Devices <span class="bg-dark text-white px-1 rounded maxDev"><?= $key_info->total ?>/<?= $key->max_devices ?></span> <small class="text-muted">(Separately with enter)</small></label>
+-                        <textarea class="form-control" name="devices" id="devices" rows="<?= ($key_info->total > $key->max_devices) ? 3 : $key_info->total ?>"><?= old('devices') ?: ($key_info->total ? $key_info->devices : '') ?></textarea>
 +                        <label for="devices" class="form-label">Devices <span class="em-pill is-info maxDev"><?= (int) $key_info->total ?>/<?= ((int) $key->max_devices <= 0) ? '&infin;' : (int) $key->max_devices ?></span> <small class="text-muted">(Separately with enter)</small></label>
-                         <textarea class="form-control" name="devices" id="devices" rows="<?= ($key_info->total > $key->max_devices) ? 3 : $key_info->total ?>"><?= old('devices') ?: ($key_info->total ? $key_info->devices : '') ?></textarea>
++                        <textarea class="form-control" name="devices" id="devices" rows="<?= max(1, ((int) $key->max_devices <= 0 || $key_info->total > $key->max_devices) ? 3 : (int) $key_info->total) ?>"><?= old('devices') ?: ($key_info->total ? $key_info->devices : '') ?></textarea>
                          <?php if ($validation->hasError('devices')) : ?>
 -                            <small id="help-devices" class="text-danger"><?= $validation->getError('devices') ?></small>
 +                            <small id="help-devices" class="text-danger"><?= esc($validation->getError('devices')) ?></small>
@@ -18298,7 +18331,7 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
      </div>
  </div>
  
-@@ -153,16 +173,20 @@
+@@ -153,17 +171,15 @@
  <?= $this->section('js') ?>
  <script>
      $(document).ready(function() {
@@ -18313,17 +18346,13 @@ diff -ruN /tmp/orig_app/Views/Keys/key_edit.php app/Views/Keys/key_edit.php
 -    $("#max_devices").change(function() {
 -        $(".maxDev").html(total + '/' + $(this).val());
 -        $("#devices").attr('rows', $(this).val());
-+    var total = "<?= (int) $key_info->total ?>";
-+    $("#max_devices").on('change keyup', function() {
-+        // 0 (or blank/negative) means unlimited -- show the infinity glyph, not
-+        // a literal 0, so the badge matches what the key actually enforces.
-+        var v = parseInt($(this).val(), 10);
-+        var cap = (!isFinite(v) || v <= 0) ? '∞' : v;
-+        $(".maxDev").html(total + '/' + cap);
-+        $("#devices").attr('rows', (cap === '∞' ? Math.max(total, 3) : v));
-     });
+-    });
++    // Max Devices is fixed at creation and shown read-only, so the badge is
++    // rendered once on the server (with the infinity glyph for an unlimited
++    // key) and never changes on this page.
  
      // Replace the native <select> (grey OS menu) with a themed dropdown that
+     // still drives the underlying <select>, so validation + submit are unchanged.
 diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
 --- /tmp/orig_app/Views/Keys/list.php	2026-08-24 23:02:52.615642826 +0000
 +++ app/Views/Keys/list.php	2026-08-28 22:51:57.162912421 +0000
