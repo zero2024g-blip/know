@@ -405,6 +405,23 @@ ALTER TABLE `games`
   ADD COLUMN `max_qty`  INT     NOT NULL DEFAULT 0 AFTER `device_mode`,
   ADD COLUMN `qty_mode` TINYINT NOT NULL DEFAULT 2 AFTER `max_qty`;
 
+-- 10a-3. A per-key "may be unlimited" right.
+--        Max Devices is editable on the Edit key page (admin only). Setting it
+--        to 0 (unlimited) is normally gated by the game's allow_unlimited
+--        switch. This column records that a specific key is allowed to be
+--        unlimited regardless of the game's current switch, so a key that was
+--        made unlimited can be dialled down to a finite cap and back to
+--        unlimited again later, even after you turn the game's switch off. It
+--        is set to 1 when a key is created unlimited (or later set unlimited
+--        while the switch was on) and is never cleared. A key that was never
+--        unlimited keeps 0 and still cannot be set to 0 on a switched-off game.
+ALTER TABLE `keys_code`
+  ADD COLUMN `unlimited_ok` TINYINT NOT NULL DEFAULT 0 AFTER `max_devices`;
+
+-- Backfill: every key that is currently unlimited keeps the right to be
+-- unlimited. Safe -- it only grants the round-trip to keys that already are 0.
+UPDATE `keys_code` SET `unlimited_ok` = 1 WHERE `max_devices` <= 0;
+
 -- 10b. Own a key by the seller's immutable id, not their username.
 --      A username can be deleted and registered again by someone else; the
 --      id never is. Without this, a re-registered "AliAli" inherits every key

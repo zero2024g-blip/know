@@ -1296,8 +1296,8 @@ separate:
   - **Allow unlimited keys** is a new per-game switch, **off by default**. Only
     when it is on does a 0 in the Max Devices box make an unlimited key. When
     it is off, a 0 is refused **for everyone, admin included**, so nobody can
-    slip a 0 past the cap. (Devices are only ever set on the New license page —
-    see the note below on why the Edit key page no longer carries the field.)
+    slip a 0 past the cap. (On the Edit key page a 0 is also allowed when the
+    key already holds the right to be unlimited — see the round-trip note below.)
 
 The refusal message is deliberately neutral — **"Devices must be at least 1."**
 It does **not** say unlimited is turned off, because that would tell a seller
@@ -1317,24 +1317,36 @@ admin with every game's switch off — the page HTML contained the word
 affordance. The connector still needs the one-line `max > 0` guard
 (CONNECTOR-PROTOCOL.md) for an unlimited key to actually accept devices.
 
-## Max Devices is set once, at creation — and can't be edited
+## Editing Max Devices, and the unlimited round-trip
 
-Following your note, **the Edit key page no longer lets anyone change a key's
-Max Devices.** Devices are priced and charged when the key is made, so letting
-them be raised afterwards would hand out paid device slots for free. On the
-Edit key page the value is now shown **read-only** (with **`∞`** for an
-unlimited key), and the form does not carry the field at all — the server keeps
-whatever the key was created with and never overwrites it.
+Max Devices **is** editable on the Edit key page (admin only, as before), so
+you can dial an unlimited key down to a finite cap — 100, 10, whatever — and
+back again. What changed is the rule for setting it to **0 (unlimited)**, which
+now closes the bug you saw and honours the grandfather case:
 
-This also closes the bug you saw: setting Max Devices to 0 in Edit key used to
-save as `0/1` even on a game with unlimited off. There is nothing to set now,
-so it can't happen. And an **already-unlimited key stays unlimited**: because
-its `max_devices` (0) is never touched on edit, a key created while unlimited
-was on keeps working even if you later turn the game's switch off — exactly the
-grandfather case you asked for. The device badge shows it as **`used/∞`**.
-Verified live: posting an injected `max_devices=0` or `max_devices=999` to the
-edit endpoint left a capped key unchanged, an unlimited key stayed 0, and the
-device list was still trimmed to the key's fixed cap.
+  - Setting a key to 0 is allowed when **either** the game's `allow_unlimited`
+    switch is currently on, **or** the key already carries the right to be
+    unlimited (`keys_code.unlimited_ok`). A key gains that right by being
+    **created unlimited**, or by being set unlimited later while the switch was
+    on, and **never loses it**.
+  - So a key that was made unlimited can go **0 → 10 → 0** freely, even after
+    you turn the game's switch off. The right belongs to the key, not to the
+    game's current setting.
+  - A key that was **never** unlimited still cannot be set to 0 on a
+    switched-off game — it is refused with the neutral **"Devices must be at
+    least 1."** (same message, so it never reveals the option to someone whose
+    key doesn't have the right).
+
+This closes the earlier bug where a 0 in Edit key saved as `0/1` on an
+unlimited-off game: now that only happens for a key that is genuinely allowed to
+be unlimited, and the badge shows it as **`used/∞`** (live, as you type 0). The
+column is set at creation and backfilled for existing unlimited keys — see
+`MIGRATION.sql` section 10a-3.
+
+Verified live end to end: a born-unlimited key on a switched-off game went
+0 → 10 → 0 and every step saved; a never-unlimited key on the same game was
+refused when set to 0 and kept its cap, but was freely set to any finite
+number; and a newly created key got `unlimited_ok = 1` only when made with 0.
 
 ## Per-game quantity limits, and where the real limits live
 
@@ -1379,8 +1391,9 @@ posted tampered values directly:
     quantity 100 there made 100, quantity 1000 was refused.
   - Seller forced 50 devices over a cap of 10, and 0 on an unlimited-off game
     → both refused.
-  - Injected `max_devices` in the Edit key POST (0, and 999) → ignored; the
-    key kept its creation-time cap.
+  - On Edit key: a born-unlimited key set 0 → 10 → 0 on a switched-off game,
+    all saved; a never-unlimited key set to 0 there was refused but set to any
+    finite number freely.
   - **Estimation is display only.** A seller edited the estimate box to
     `$0.00` on a $12 key and submitted; the server ignored it and charged the
     real $12. The price is computed server-side from the tier and device rules
