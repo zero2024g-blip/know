@@ -1,0 +1,717 @@
+<?php
+
+namespace App\Controllers;
+
+use App\Models\KeysModel;
+use CodeIgniter\I18n\Time;
+
+/**
+ * ============================================================================
+ *  BEFORE YOU USE THIS FILE  (app/Controllers/Connect.php)
+ * ============================================================================
+ *  This is the connector endpoint — the one route the game app talks to. It
+ *  is exempt from auth and CSRF, so it is the most exposed route in the panel.
+ *  It is already hardened: AES-256-GCM transport with a per-message nonce, a
+ *  replay window, timing-safe key checks, an atomic per-device slot claim, and
+ *  per-IP rate limiting. It is fully compatible with the current database
+ *  (it needs only user_key / game / status / duration / expired_date /
+ *  max_devices / devices — none of the new panel-only columns).
+ *
+ *  Fill in FIVE things with YOUR real values, then rename to Connect.php:
+ *
+ *   1) .env   ->  connect.aesKey = <the 64-hex key your app is built with>
+ *                 (the key lives in .env, never in this file, so it can be
+ *                  rotated and never ships in a backup or a zip)
+ *   2) $this->staticWords   — your token salt word (must match the app)
+ *   3) $this->Public_Key    — the public key the app sends
+ *   4) $this->setAccess     — the access token the app checks
+ *   5) the per-game version strings ($codm_version, ... ) — the exact build
+ *      strings your app reports; a game with the wrong string here gets
+ *      "Please Update Your App".
+ *
+ *  UNLIMITED KEYS: handled here already. A key with max_devices <= 0 accepts
+ *  any number of devices (see claimDeviceSlot()); any positive number is the
+ *  cap. Nothing to change for that.
+ * ============================================================================
+ */
+class Connect extends BaseController
+{
+    protected $model, $game, $aVer, $uKey, $sDev, $PublicKey;
+    protected $staticWords, $Public_Key, $setAccess;
+    protected $aes_key;
+
+    // Declared, not created on the fly. PHP 8.2 deprecated dynamic properties
+    // and 8.5 prints a notice for each one on every single request.
+    protected $maintenance;
+    /** The client's nonce for this request, echoed back in the reply. */
+    private $reply_nonce = null;
+    protected $codm_version, $pubgm_version, $ffm_version, $dfm_version, $mlbb_version, $spof_version;
+
+    /** Failed attempts allowed from one IP before it is shut out, and for how long. */
+    private const RL_TABLE  = 'connect_ratelimit';
+    private const RL_LIMIT  = 20;    // failures...
+    private const RL_WINDOW = 300;   // ...within 5 minutes
+    private const RL_BLOCK  = 900;   // then blocked for 15
+    
+    public function __construct()
+    {
+        // The key comes from .env, never from this file. A key committed to
+        // source travels with every copy of the code, shows up in every
+        // backup, and cannot be rotated without a release.
+        //   connect.aesKey = <64 hex characters>
+        $hexKey = (string) (env('connect.aesKey') ?: '');
+        if (strlen($hexKey) !== 64 || ! ctype_xdigit($hexKey)) {
+            // Fail closed. Answering with a working key that is not the one
+            // you configured is worse than not answering.
+            log_message('critical', 'connect.aesKey missing or malformed in .env — the connector is disabled.');
+            $this->aes_key = null;
+            return;
+        }
+        $this->aes_key = hex2bin($hexKey);
+        // No fixed IV any more: GCM generates a fresh nonce per message.
+
+        // panel
+        $this->model = new KeysModel();
+        // Driven from Admin -> Maintenance, not from this line. Fails open:
+        // if the settings table cannot be read the apps keep working, because
+        // a database hiccup must not look like a deliberate shutdown.
+        $this->maintenance = \App\Models\SettingModel::maintenance();
+        
+        // keys
+        $this->staticWords = "YOUR_STATIC_WORDS";
+        $this->Public_Key = "YOUR_PUBLIC_KEY";
+        $this->setAccess = "YOUR_ACCESS_TOKEN";
+        
+        // versions
+        $this->codm_version = "X.Y.Z:YOURBUILDID"; //Codm - jp2c7H6Y1
+        $this->pubgm_version = "X.Y.Z:YOURBUILDID"; //Pubgm - k7w5FyyMa
+        $this->ffm_version = "X.Y.Z:YOURBUILDID"; //FF - U6TpewCDQr
+        $this->dfm_version = "X.Y.Z:YOURBUILDID"; //DFM - bZP9GT6dCu
+        
+        $this->mlbb_version = "0.0.1:YOURBUILDID";
+
+        $this->spof_version = "X.Y.Z:YOURBUILDID"; // k3QzINOfH_sp
+    }
+
+    public function index()
+    {
+        if ($this->request->getPost()) {
+            $u_a = $_SERVER['HTTP_USER_AGENT'] ?? 'None';
+            if ($u_a !== 'EagleA/1.2') {
+                // return $this->response->setJSON(['status' => -1, 'reason' => 'Unauthorized Access.']);
+                return redirect()->to('/');
+            } else {
+                return $this->index_post();
+            }
+        }
+        else {
+            /*$info = [
+                "information" => [
+                    "client" => BASE_NAME,
+                    "version" => "1.0",
+                ],
+                "developer" => [
+                    "author" => "Z E R O",
+                    "id" => "@Kingdarkspro",
+                ],
+            ];
+
+            return $this->response->setJSON($info);*/
+            // return $this->aes_encrypt($info); //test 
+            return redirect()->to('/');
+        }
+    }
+
+    public function index_post()
+    {
+        // This route is exempt from CSRF and from auth, so nothing else stands
+        // between the internet and a key lookup. Without a limit an attacker
+        // can try keys as fast as the server answers.
+        //
+        // clientIp() is BaseController's: it honours CF-Connecting-IP only when
+        // the connection genuinely came from a Cloudflare range, so the counter
+        // cannot be dodged with a forged header.
+        $ipHash = md5('connect_' . $this->clientIp());
+
+        $blocked = $this->rlRemaining($ipHash);
+        if ($blocked > 0) {
+            // Deliberately the same shape as any other refusal: telling a
+            // scanner it has been rate limited tells it to change address.
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
+        }
+
+        if ($this->aes_key === null) {
+            // Nothing can be sealed without a key, so answer in the clear
+            // with no detail at all.
+            return $this->response->setStatusCode(503)->setBody('');
+        }
+
+        $raw_data = $this->request->getPost('data');
+        if (!$raw_data) {
+            return $this->response->setJSON(['status' => -1, 'error' => 'No data received.']);
+        }
+
+        $aes_params = $this->aes_decrypt($raw_data);
+        if (!$aes_params) {
+            return $this->aes_encrypt(["status" => -1, "reason" => "Decryption failed."]);
+        }
+
+        // get post
+        $this->request->setGlobal('post', $aes_params);
+        $game = $aes_params['game'] ?? null;
+        $aVer = $aes_params['app_ver'] ?? null;
+        $uKey = $aes_params['user_key'] ?? null;
+        $sDev = $aes_params['serial'] ?? null;
+        $PublicKey = $aes_params['public'] ?? null;
+
+        // maintenance
+        $isMT = $this->maintenance;
+        $data = [];
+
+        $validation = \Config\Services::validation();
+        $rules = [
+            'game'     => 'required|min_length[2]',
+            'app_ver'  => 'required',
+            'user_key' => 'required',
+            'serial'   => 'required',
+            'public'   => 'required'
+        ];
+        $validation->setRules($rules);
+
+        if (!$validation->run($aes_params)) {
+            // $errors_validation = $validation->getErrors();
+
+            $data = [
+                'status' => -1,
+                'reason' => "Invalid Parameter.", #E-1
+                // 'reason' => "Missing/Invalid: " . implode(', ', array_keys($errors_validation)),
+            ];
+            // return $this->response->setJSON($data);
+            $this->rlFail($ipHash);
+            return $this->aes_encrypt($data);
+        }
+
+        // A device serial is stored inside a comma-separated list, so a serial
+        // that itself contains a comma would split into several entries: one
+        // device counted as many, never matched again, and able to eat a whole
+        // key's slots. Real device serials never contain a comma. Refuse it
+        // with the same generic answer so it never becomes an oracle, and count
+        // it against the rate limit like any other bad request.
+        if (strpos((string) $sDev, ',') !== false) {
+            $this->rlFail($ipHash);
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
+        }
+
+        if ($isMT) { // Server is under Maintenance
+            $data = [
+                'status' => -1,
+                'reason' => \App\Models\SettingModel::maintenanceMessage(), #E-2
+            ];
+            // return $this->response->setJSON($data);
+            return $this->aes_encrypt($data);
+        }
+
+        // hash_equals, not != : a plain comparison returns as soon as two bytes
+        // differ, and that timing difference is measurable over enough requests.
+        if (! is_string($PublicKey) || ! hash_equals($this->Public_Key, $PublicKey)) { // check public key
+            $data = [
+                'status' => -1,
+                'reason' => "Invalid Public Key." #E-5
+            ];
+            // return $this->response->setJSON($data);
+            return $this->aes_encrypt($data);
+        }
+
+        if (!$game or !$aVer or !$uKey or !$sDev or !$PublicKey) { //check is entered
+            $data = [
+                'status' => -1,
+                'reason' => "Invalid Input." #E-3
+            ];
+        }
+        else {
+            $time = new \CodeIgniter\I18n\Time;
+            $model = $this->model;
+            $findKey = $model->getKeysGame(['user_key' => $uKey, 'game' => $game]);
+
+            if ($findKey) { // key right
+                if ($findKey->status != 1) {
+                    $data = [
+                        'status' => -1,
+                        'reason' => "License/Key is Blocked." #E-6
+                    ];
+                }
+                else {
+                    $id_keys = $findKey->id_keys;
+                    $duration = $findKey->duration;
+                    $expired = $findKey->expired_date;
+                    $max_dev = $findKey->max_devices;
+                    $devices = $findKey->devices;
+    
+                    $checkUP = $this->isUpdate($aVer, $game);
+                    if (!$checkUP) { // check update
+                        if (empty($expired)) {
+                            // addHours() takes an int. duration is nullable in the
+                            // schema, and null throws a TypeError on PHP 8.1+ —
+                            // a 500 instead of an answer.
+                            $hours = (int) $duration;
+                            if ($hours < 1) {
+                                return $this->aes_encrypt([
+                                    'status' => -1,
+                                    'reason' => 'License/Key is Not Registered.',
+                                ]);
+                            }
+                            $setExpired = $time::now()->addHours($hours);
+                            // subHours(1)->
+                            $model->update($id_keys, ['expired_date' => $setExpired->toDateTimeString()]);
+                            $data['expired_check'] = false; //first time
+                        }
+                        else {
+                            if ($time::now()->isAfter($expired)) {
+                                $data['expired_check'] = true; //key is ended
+                            }
+                            else {
+                                $data['expired_check'] = false; //key is active
+                            }
+                        }
+
+                        if (!$data['expired_check']) {
+                            // Claim the slot against the row as it is RIGHT NOW,
+                            // not against the copy read at the top of the request.
+                            // Three devices activating together all used to read
+                            // the same empty list, all pass the count check, and
+                            // all get a token — a 2-device key serving 3.
+                            $devicesAdd = $this->claimDeviceSlot($id_keys, $sDev, $max_dev);
+
+                            if ($devicesAdd) {
+
+                                $salt = bin2hex(random_bytes(8)); // session
+                                $real = "$sDev-$game-$uKey-$this->staticWords-$salt";
+                                $gameINFO = [];
+
+                               //--   game   --\\
+                                    if ($game == 'CODM') {
+                                        $gameINFO = [
+                                            't_time' => 110
+                                        ];
+                                    }
+                                    else if ($game == 'PUBGM') {
+                                        $gameINFO = [
+                                            't_time' => 120
+                                        ];
+                                    }
+                                    else if ($game == 'FF') {
+                                        $gameINFO = [
+                                            't_time' => 130
+                                        ];
+                                    }
+                                    else if ($game == 'DFM') {
+                                        $gameINFO = [
+                                            't_time' => 140
+                                        ];
+                                    }
+                               //--   game   --\\
+
+                               //--  send data   --\\
+                                    $data = [
+                                        'status' => 1,
+                                        'data' => [
+                                            // 'real' => $real,
+                                            'id_key' => $findKey->id_keys,
+                                            'token' => hash('sha256', $real),
+                                            'salt'   => $salt,
+                                            'rng' => $time->getTimestamp(),
+                                            'expired' => empty($expired) ? $setExpired->toDateTimeString() : $expired,
+                                            'access' => $this->setAccess, // check from the app
+                                            // 'debug_mode' => false,
+                                        ],
+                                        'game' => $gameINFO
+                                    ];
+                               //--  send data   --\\
+
+                            }
+                            else { // max device
+                                $data = [
+                                    'status' => -1,
+                                    'reason' => "Max Devices Reached." #E-7
+                                ];
+                            }
+                        }
+                        else { // expired
+                            $data = [
+                                'status' => -1,
+                                'reason' => "License/Key is Expired." #E-8
+                            ];
+                        }
+                    }
+                    else { // update app
+                        $data = [
+                            'status' => -1,
+                            'reason' => "Please Update Your App." #E-9
+                        ];
+                    }
+                }
+            }
+            else { // no key
+                $data = [
+                    'status' => -1,
+                    'reason' => "License/Key is Not Registered." #E-10
+                ];
+            } // end - find key
+        }
+        
+        // A failure is anything that did not hand out a token. Counting only
+        // "key not found" would let someone probe blocked or expired keys for
+        // free, which is the same enumeration by another name.
+        if (($data['status'] ?? -1) === 1) {
+            $this->rlClear($ipHash);
+        } else {
+            $this->rlFail($ipHash);
+        }
+
+        return $this->aes_encrypt($data);
+    }
+
+    // -----------------------------------------------------------------
+    //  Rate limit — same shape as the one in Auth, against its own table
+    // -----------------------------------------------------------------
+
+    /** Seconds still blocked for this IP, 0 if it may proceed. */
+    private function rlRemaining(string $ipHash): int
+    {
+        try {
+            $db  = db_connect();
+            $now = time();
+
+            // Roughly 1 request in 20 clears rows that are fully stale, so the
+            // table cannot grow without bound.
+            if (random_int(1, 20) === 1) {
+                $db->table(self::RL_TABLE)
+                   ->where('blocked_until <', $now)->where('window_end <', $now)->delete();
+            }
+
+            $row = $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->get()->getRowArray();
+            if ($row && (int) $row['blocked_until'] > $now) {
+                return (int) $row['blocked_until'] - $now;
+            }
+        } catch (\Throwable $e) {
+            // Never take the endpoint down over a counter, but never let the
+            // failure pass unseen either: with the table missing this returns 0
+            // every time and the limit silently does not exist.
+            log_message('critical', 'Connect rate limiter unavailable (' . self::RL_TABLE
+                . '): {msg}. Key enumeration protection is NOT active.', ['msg' => $e->getMessage()]);
+        }
+        return 0;
+    }
+
+    /** Count one failed attempt. */
+    private function rlFail(string $ipHash): void
+    {
+        try {
+            $db  = db_connect();
+            $now = time();
+            $row = $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->get()->getRowArray();
+
+            $fails     = $row ? (int) $row['fails'] : 0;
+            $windowEnd = $row ? (int) $row['window_end'] : 0;
+
+            if ($windowEnd < $now) {          // window elapsed, start a new one
+                $fails     = 0;
+                $windowEnd = $now + self::RL_WINDOW;
+            }
+            $fails++;
+
+            $blockedUntil = 0;
+            if ($fails >= self::RL_LIMIT) {
+                $blockedUntil = $now + self::RL_BLOCK;
+                $fails        = 0;
+            }
+
+            $payload = ['fails' => $fails, 'window_end' => $windowEnd, 'blocked_until' => $blockedUntil];
+            if ($row) {
+                $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->update($payload);
+            } else {
+                $payload['ip_hash'] = $ipHash;
+                $db->table(self::RL_TABLE)->insert($payload);
+            }
+        } catch (\Throwable $e) {
+            log_message('critical', 'Connect rate limiter write failed: {msg}', ['msg' => $e->getMessage()]);
+        }
+    }
+
+    /** A genuine activation clears the counter. */
+    private function rlClear(string $ipHash): void
+    {
+        try {
+            db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete();
+        } catch (\Throwable $e) {
+        }
+    }
+
+    /**
+     * Take one device slot on this key, or refuse.
+     *
+     * The row is locked for the length of the transaction, so a second request
+     * arriving at the same moment waits and then sees the list this one wrote.
+     * Returns true if the device may proceed.
+     */
+    private function claimDeviceSlot(int $idKeys, string $serial, $maxDev): bool
+    {
+        $db = \Config\Database::connect();
+        $db->transBegin();
+
+        try {
+            $row = $db->query(
+                'SELECT devices, max_devices FROM keys_code WHERE id_keys = ? FOR UPDATE',
+                [$idKeys]
+            )->getRowObject();
+
+            if (! $row) {
+                $db->transRollback();
+                return false;
+            }
+
+            $max  = (int) ($row->max_devices ?? $maxDev);
+            $list = ($row->devices === null || $row->devices === '')
+                ? []
+                : explode(',', $row->devices);
+
+            // Already known: nothing to write, and it does not consume a slot.
+            if (in_array($serial, $list, true)) {
+                $db->transCommit();
+                return true;
+            }
+
+            // max_devices of 0 (or less) means the key is unlimited: never
+            // refuse a new device on a count. Any positive number is the cap.
+            if ($max > 0 && count($list) >= $max) {
+                $db->transRollback();
+                return false;
+            }
+
+            $list[] = $serial;
+            $db->table('keys_code')
+               ->where('id_keys', $idKeys)
+               ->update(['devices' => implode(',', $list)]);
+
+            if ($db->transStatus() === false) {
+                throw new \RuntimeException('device slot update failed');
+            }
+            $db->transCommit();
+            return true;
+        } catch (\Throwable $e) {
+            $db->transRollback();
+            log_message('error', 'claimDeviceSlot failed: {msg}', ['msg' => $e->getMessage()]);
+            return false;
+        }
+    }
+
+    /** @deprecated superseded by claimDeviceSlot(); kept so nothing else breaks. */
+    private function checkDevicesAdd($serial, $devices, $max_dev) {
+        if (empty($devices)) {
+            return ['devices' => $serial];
+        }
+
+        $lsDevice = explode(",", $devices);
+        if (in_array($serial, $lsDevice)) {
+            return true;
+        }
+
+        if (count($lsDevice) < $max_dev) {
+            $lsDevice[] = $serial;
+            return ['devices' => implode(",", $lsDevice)];
+        }
+        return false;
+    }
+
+    protected function isUpdate($my_version, $my_game)
+    {
+        // Every game code that exists in keys_code needs an entry here. A code
+        // that is missing falls through to the `return true` below, which the
+        // caller reads as "update your app" — so those keys can never connect,
+        // no matter what version the app sends. MLBB and FFM had live keys and
+        // were both missing.
+        $gameVersions = [
+            'CODM'    => $this->codm_version,
+            'PUBGM'   => $this->pubgm_version,
+            'FF'      => $this->ffm_version,
+            'FFM'     => $this->ffm_version,   // same client as FF
+            'MLBB'    => $this->mlbb_version,
+            'DFM'     => $this->dfm_version,
+            'SPOOFER' => $this->spof_version,
+        ];
+
+        if (isset($gameVersions[$my_game])) {
+            return (! hash_equals(md5($gameVersions['SPOOFER']), (string) $my_version)
+                 && ! hash_equals(md5($gameVersions[$my_game]),  (string) $my_version));
+        }
+
+        // Unknown game code: still refuse, but say so in the log, because in
+        // practice this means someone sold keys for a game nobody added here.
+        log_message('warning', 'Connect: no version configured for game "{g}" — its keys cannot connect.', ['g' => $my_game]);
+        return true;
+    }
+
+    // -----------------------------------------------------------------
+    //  Transport crypto
+    // -----------------------------------------------------------------
+    //  AES-256-GCM. GCM is an AEAD mode: it encrypts and authenticates in
+    //  one pass, so a tampered message fails to open instead of decrypting
+    //  into something the attacker chose.
+    //
+    //  What the previous scheme got wrong, and why each part of this exists:
+    //
+    //  * CBC with a FIXED IV made encryption deterministic — the same request
+    //    always produced the same bytes, so anyone watching the wire could
+    //    tell repeated requests apart without any key. Here a fresh 12-byte
+    //    nonce is generated per message and travels with it.
+    //
+    //  * CBC has no integrity check at all. Flipping bits in the ciphertext
+    //    flips the matching plaintext bits, and the server happily parsed the
+    //    result. GCM's 16-byte tag makes that a hard failure.
+    //
+    //  * The version string is bound as additional authenticated data, so a
+    //    message cannot be replayed against a future format that means
+    //    something different.
+    //
+    //  Wire format, one line of ASCII:
+    //
+    //      EG1.<base64url nonce>.<base64url ciphertext||tag>
+    //
+    //  The version prefix is what lets you roll a new scheme later without
+    //  guessing what an old client sent.
+    //
+    //  HONEST LIMIT: the key ships inside the Android app. Anyone who
+    //  unpacks the APK has it and can then read and forge anything here.
+    //  This stops interception and tampering on the wire; it does not stop
+    //  someone who owns the client. Only signing responses with a private
+    //  key the app never holds would do that.
+
+    private const CRYPTO_VERSION = 'EG1';
+    private const CRYPTO_CIPHER  = 'aes-256-gcm';
+    private const NONCE_BYTES    = 12;   // GCM's native size
+    private const TAG_BYTES      = 16;
+    private const MAX_SKEW       = 300;  // a request older than 5 min is refused
+
+    private function b64u_encode(string $bin): string
+    {
+        return rtrim(strtr(base64_encode($bin), '+/', '-_'), '=');
+    }
+
+    private function b64u_decode(string $txt): string|false
+    {
+        return base64_decode(strtr($txt, '-_', '+/'), true);
+    }
+
+    /**
+     * Open a sealed request. Returns null for anything that is not exactly
+     * right — wrong version, bad base64, wrong length, failed tag, bad JSON,
+     * stale timestamp. Every one of those gets the same answer from the
+     * caller, so this never becomes an oracle that tells an attacker which
+     * part they got wrong.
+     */
+    private function aes_decrypt($envelope)
+    {
+        if (! is_string($envelope)) {
+            return null;
+        }
+
+        $parts = explode('.', trim($envelope));
+        if (count($parts) !== 3 || $parts[0] !== self::CRYPTO_VERSION) {
+            return null;
+        }
+
+        $nonce = $this->b64u_decode($parts[1]);
+        $blob  = $this->b64u_decode($parts[2]);
+
+        if ($nonce === false || $blob === false
+            || strlen($nonce) !== self::NONCE_BYTES
+            || strlen($blob) <= self::TAG_BYTES) {
+            return null;
+        }
+
+        // The tag is carried on the end of the ciphertext.
+        $tag        = substr($blob, -self::TAG_BYTES);
+        $ciphertext = substr($blob, 0, -self::TAG_BYTES);
+
+        $plain = openssl_decrypt(
+            $ciphertext,
+            self::CRYPTO_CIPHER,
+            $this->aes_key,
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag,
+            self::CRYPTO_VERSION          // AAD
+        );
+
+        if ($plain === false) {
+            return null;                  // tag mismatch: tampered or wrong key
+        }
+
+        $params = json_decode($plain, true);
+        if (json_last_error() !== JSON_ERROR_NONE || ! is_array($params)) {
+            return null;
+        }
+
+        // Replay window. A captured request stops working once it is stale,
+        // which limits how long a recording is worth anything.
+        $ts = (int) ($params['ts'] ?? 0);
+        if ($ts <= 0 || abs(time() - $ts) > self::MAX_SKEW) {
+            return null;
+        }
+
+        // The client's nonce is echoed back in the response so the app can
+        // check the answer belongs to the question it just asked, rather
+        // than being a replayed recording of an older "valid" response.
+        $this->reply_nonce = $params['cnonce'] ?? null;
+
+        return $params;
+    }
+
+    /**
+     * Seal a response. A fresh nonce every time, and the client's own nonce
+     * echoed inside so a captured response cannot be replayed at it later.
+     */
+    private function aes_encrypt($data)
+    {
+        if (! empty($this->reply_nonce)) {
+            $data['cnonce'] = $this->reply_nonce;
+        }
+        $data['ts'] = time();
+
+        $nonce = random_bytes(self::NONCE_BYTES);
+        $tag   = '';
+
+        $ciphertext = openssl_encrypt(
+            json_encode($data),
+            self::CRYPTO_CIPHER,
+            $this->aes_key,
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag,
+            self::CRYPTO_VERSION,         // AAD
+            self::TAG_BYTES
+        );
+
+        $envelope = self::CRYPTO_VERSION
+            . '.' . $this->b64u_encode($nonce)
+            . '.' . $this->b64u_encode($ciphertext . $tag);
+
+        return $this->response
+            ->setHeader('Content-Type', 'text/plain')
+            ->setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
+            ->setHeader('Pragma', 'no-cache')
+            ->setBody($envelope);
+    }
+}
+
+# -------- Errors -----------
+# 'reason' => "invalid Parameter" #E-1
+# 'reason' => "Server is under Maintenance" #E-2
+# 'reason' => "invalid Input" #E-3
+# 'reason' => "Invalid Public Key" #E-5
+# 'reason' => "License/Key is Blocked" #E-6
+# 'reason' => "Max Devices Reached" #E-7
+# 'reason' => "License/Key is Expired" #E-8
+# 'reason' => "Please Update Your App" #E-9
+#'reason' => "License/Key is Not Registered" #E-10
+# -------- Errors -----------

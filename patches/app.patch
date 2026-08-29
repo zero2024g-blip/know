@@ -11700,8 +11700,8 @@ diff -ruN /tmp/orig_app/Controllers/BaseController.php app/Controllers/BaseContr
  }
 diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 --- /tmp/orig_app/Controllers/Connect.php	2026-08-24 23:02:52.529923272 +0000
-+++ app/Controllers/Connect.php	2026-08-28 22:50:03.796039560 +0000
-@@ -1 +1,676 @@
++++ app/Controllers/Connect.php	2026-08-29 13:33:09.899394290 +0000
+@@ -1 +1,717 @@
 -# Private 🥲❤️
 \ No newline at end of file
 +<?php
@@ -11711,6 +11711,35 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +use App\Models\KeysModel;
 +use CodeIgniter\I18n\Time;
 +
++/**
++ * ============================================================================
++ *  BEFORE YOU USE THIS FILE  (app/Controllers/Connect.php)
++ * ============================================================================
++ *  This is the connector endpoint — the one route the game app talks to. It
++ *  is exempt from auth and CSRF, so it is the most exposed route in the panel.
++ *  It is already hardened: AES-256-GCM transport with a per-message nonce, a
++ *  replay window, timing-safe key checks, an atomic per-device slot claim, and
++ *  per-IP rate limiting. It is fully compatible with the current database
++ *  (it needs only user_key / game / status / duration / expired_date /
++ *  max_devices / devices — none of the new panel-only columns).
++ *
++ *  Fill in FIVE things with YOUR real values, then rename to Connect.php:
++ *
++ *   1) .env   ->  connect.aesKey = <the 64-hex key your app is built with>
++ *                 (the key lives in .env, never in this file, so it can be
++ *                  rotated and never ships in a backup or a zip)
++ *   2) $this->staticWords   — your token salt word (must match the app)
++ *   3) $this->Public_Key    — the public key the app sends
++ *   4) $this->setAccess     — the access token the app checks
++ *   5) the per-game version strings ($codm_version, ... ) — the exact build
++ *      strings your app reports; a game with the wrong string here gets
++ *      "Please Update Your App".
++ *
++ *  UNLIMITED KEYS: handled here already. A key with max_devices <= 0 accepts
++ *  any number of devices (see claimDeviceSlot()); any positive number is the
++ *  cap. Nothing to change for that.
++ * ============================================================================
++ */
 +class Connect extends BaseController
 +{
 +    protected $model, $game, $aVer, $uKey, $sDev, $PublicKey;
@@ -11856,7 +11885,7 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +        $validation->setRules($rules);
 +
 +        if (!$validation->run($aes_params)) {
-+            // $errors_validation = $validation->getErrors(); 
++            // $errors_validation = $validation->getErrors();
 +
 +            $data = [
 +                'status' => -1,
@@ -11864,7 +11893,19 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +                // 'reason' => "Missing/Invalid: " . implode(', ', array_keys($errors_validation)),
 +            ];
 +            // return $this->response->setJSON($data);
++            $this->rlFail($ipHash);
 +            return $this->aes_encrypt($data);
++        }
++
++        // A device serial is stored inside a comma-separated list, so a serial
++        // that itself contains a comma would split into several entries: one
++        // device counted as many, never matched again, and able to eat a whole
++        // key's slots. Real device serials never contain a comma. Refuse it
++        // with the same generic answer so it never becomes an oracle, and count
++        // it against the rate limit like any other bad request.
++        if (strpos((string) $sDev, ',') !== false) {
++            $this->rlFail($ipHash);
++            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
 +        }
 +
 +        if ($isMT) { // Server is under Maintenance
