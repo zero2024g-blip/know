@@ -12440,8 +12440,8 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +# -------- Errors -----------
 diff -ruN /tmp/orig_app/Controllers/Download.php app/Controllers/Download.php
 --- /tmp/orig_app/Controllers/Download.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Controllers/Download.php	2026-08-29 21:28:01.313215009 +0000
-@@ -0,0 +1,334 @@
++++ app/Controllers/Download.php	2026-08-29 21:50:18.471537891 +0000
+@@ -0,0 +1,350 @@
 +<?php
 +
 +namespace App\Controllers;
@@ -12649,57 +12649,73 @@ diff -ruN /tmp/orig_app/Controllers/Download.php app/Controllers/Download.php
 +        return true;
 +    }
 +
-+    /** Send the file, honouring its at-rest protection. */
++    /**
++     * Send the file, honouring its at-rest protection. Everything streams in
++     * chunks and nothing is held whole in memory, so a 1 GB file is fine. For
++     * an encrypted file the integrity tag is checked BEFORE any header or byte
++     * goes out, so a tampered file yields a clean error, never a partial body.
++     */
 +    private function stream(object $file)
 +    {
 +        $prot = (int) $file->protection;
 +        $safe = $this->safeName((string) $file->orig_name);
-+
-+        // Kill any buffering so a large body is not held whole in PHP's output
-+        // buffer on top of whatever we already read.
-+        while (ob_get_level() > 0) {
-+            ob_end_clean();
-+        }
-+
-+        header('X-Content-Type-Options: nosniff');
-+        header('Cache-Control: private, no-store');
-+
-+        if ($prot === DownloadFileModel::PROT_ZIP) {
-+            // Served opaque: the visitor needs the password you gave them.
-+            $path = FileVault::path($file->stored_name);
-+            if (! is_file($path)) {
-+                return $this->response->setStatusCode(404)->setBody('File missing on server.');
-+            }
-+            $zipName = pathinfo($safe, PATHINFO_FILENAME) . '.zip';
-+            header('Content-Type: application/zip');
-+            header('Content-Disposition: attachment; filename="' . $zipName . '"');
-+            header('Content-Length: ' . filesize($path));
-+            readfile($path);
-+            return $this->response->setBody('');
-+        }
++        $mime = $file->mime ?: 'application/octet-stream';
 +
 +        if ($prot === DownloadFileModel::PROT_AES) {
-+            $plain = FileVault::decrypt((string) $file->stored_name);
-+            if ($plain === null) {
++            // Verify first — while we can still return a normal error.
++            $meta = FileVault::aesVerify((string) $file->stored_name);
++            if ($meta === null) {
 +                return $this->response->setStatusCode(500)->setBody('File could not be read.');
 +            }
-+            header('Content-Type: ' . ($file->mime ?: 'application/octet-stream'));
-+            header('Content-Disposition: attachment; filename="' . $safe . '"');
-+            header('Content-Length: ' . strlen($plain));
-+            echo $plain;
-+            return $this->response->setBody('');
++            $this->flushHeaders($mime, $safe, (int) $file->size);
++            FileVault::aesOutput((string) $file->stored_name, $meta['iv'], (int) $meta['ctlen']);
++            exit;
 +        }
 +
-+        // PROT_NONE — stream straight from disk.
-+        $path = FileVault::path($file->stored_name);
++        $path = FileVault::path((string) $file->stored_name);
 +        if (! is_file($path)) {
 +            return $this->response->setStatusCode(404)->setBody('File missing on server.');
 +        }
-+        header('Content-Type: ' . ($file->mime ?: 'application/octet-stream'));
-+        header('Content-Disposition: attachment; filename="' . $safe . '"');
-+        header('Content-Length: ' . filesize($path));
-+        readfile($path);
-+        return $this->response->setBody('');
++
++        if ($prot === DownloadFileModel::PROT_ZIP) {
++            // Served opaque: the visitor needs the password you gave them.
++            $zipName = pathinfo($safe, PATHINFO_FILENAME) . '.zip';
++            $this->flushHeaders('application/zip', $zipName, filesize($path));
++        } else {
++            $this->flushHeaders($mime, $safe, filesize($path));
++        }
++        $this->passthru($path);
++        exit;
++    }
++
++    /** Clear buffering and emit the download headers exactly once. */
++    private function flushHeaders(string $ctype, string $name, int $len): void
++    {
++        while (ob_get_level() > 0) {
++            ob_end_clean();
++        }
++        header('Content-Type: ' . $ctype);
++        header('Content-Disposition: attachment; filename="' . $name . '"');
++        if ($len >= 0) {
++            header('Content-Length: ' . $len);
++        }
++        header('X-Content-Type-Options: nosniff');
++        header('Cache-Control: private, no-store');
++        header('Accept-Ranges: none');
++    }
++
++    /** Copy a file to the client in chunks, never holding it whole in memory. */
++    private function passthru(string $path): void
++    {
++        $fp = @fopen($path, 'rb');
++        if (! $fp) {
++            return;
++        }
++        while (! feof($fp)) {
++            echo fread($fp, 1048576);
++            flush();
++        }
++        fclose($fp);
 +    }
 +
 +    /** A filename that is safe in a Content-Disposition header. */
@@ -15375,8 +15391,8 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +}
 diff -ruN /tmp/orig_app/Libraries/FileVault.php app/Libraries/FileVault.php
 --- /tmp/orig_app/Libraries/FileVault.php	1970-01-01 00:00:00.000000000 +0000
-+++ app/Libraries/FileVault.php	2026-08-29 21:26:23.349209185 +0000
-@@ -0,0 +1,152 @@
++++ app/Libraries/FileVault.php	2026-08-29 21:49:55.243536510 +0000
+@@ -0,0 +1,305 @@
 +<?php
 +
 +namespace App\Libraries;
@@ -15452,46 +15468,199 @@ diff -ruN /tmp/orig_app/Libraries/FileVault.php app/Libraries/FileVault.php
 +        return hash('sha256', 'zero-download-vault|' . $app, true);
 +    }
 +
-+    // ---- AES-256-GCM at rest -------------------------------------------
++    // ---- AES-256-CTR + HMAC-SHA256 at rest, STREAMED -------------------
++    //
++    //  Encrypt-then-MAC: AES-256-CTR for confidentiality, an HMAC-SHA256 tag
++    //  over the whole file for integrity. Both the encrypt and the decrypt run
++    //  in 1 MB chunks and never hold the whole file in memory, so a 1 GB plugin
++    //  costs a few MB of RAM, not a gigabyte. GCM was correct but one-shot in
++    //  PHP, which meant loading the entire file — fine for a small file, a
++    //  memory bomb for a large one.
++    //
++    //  File layout:  "ZV1\0"(4) . iv(16) . ciphertext(...) . hmac(32)
++    //  The HMAC covers magic + iv + ciphertext (everything before the tag).
 +
-+    /** Encrypt $srcPath into the vault as $storedName. Returns bytes written or null. */
-+    public static function encryptTo(string $srcPath, string $storedName): ?int
++    private const MAGIC = "ZV1\0";
++    private const CHUNK = 1048576;   // 1 MiB, a multiple of the 16-byte block
++
++    /** Separate 32-byte encrypt and MAC keys, derived from the app key. */
++    private static function keys(): ?array
 +    {
-+        $key = self::key();
-+        if ($key === null) {
++        $k = self::key();
++        if ($k === null) {
 +            return null;
 +        }
-+        $plain = @file_get_contents($srcPath);
-+        if ($plain === false) {
-+            return null;
-+        }
-+        $nonce = random_bytes(12);
-+        $tag   = '';
-+        $ct    = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $nonce, $tag);
-+        if ($ct === false) {
-+            return null;
-+        }
-+        // Layout: nonce(12) . tag(16) . ciphertext
-+        $blob = $nonce . $tag . $ct;
-+        return @file_put_contents(self::path($storedName), $blob) === false ? null : strlen($blob);
++        return [
++            'enc' => hash_hkdf('sha256', $k, 32, 'zero-vault-aes-enc'),
++            'mac' => hash_hkdf('sha256', $k, 32, 'zero-vault-aes-mac'),
++        ];
 +    }
 +
-+    /** Decrypt a stored AES file fully into memory. Returns the plaintext or null. */
-+    public static function decrypt(string $storedName): ?string
++    /** Add an integer block-count to a 128-bit big-endian CTR IV. */
++    private static function ctrAdd(string $iv, int $blocks): string
 +    {
-+        $key = self::key();
-+        if ($key === null) {
++        $b     = array_values(unpack('C16', $iv));
++        $carry = $blocks;
++        for ($i = 15; $i >= 0 && $carry > 0; $i--) {
++            $carry  += $b[$i];
++            $b[$i]   = $carry & 0xff;
++            $carry >>= 8;
++        }
++        return pack('C16', ...$b);
++    }
++
++    /** Stream-encrypt $srcPath into the vault as $storedName. Returns bytes written or null. */
++    public static function encryptTo(string $srcPath, string $storedName): ?int
++    {
++        $keys = self::keys();
++        if ($keys === null) {
 +            return null;
 +        }
-+        $blob = @file_get_contents(self::path($storedName));
-+        if ($blob === false || strlen($blob) < 29) {
++        $in = @fopen($srcPath, 'rb');
++        if (! $in) {
 +            return null;
 +        }
-+        $nonce = substr($blob, 0, 12);
-+        $tag   = substr($blob, 12, 16);
-+        $ct    = substr($blob, 28);
-+        $plain = openssl_decrypt($ct, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $nonce, $tag);
-+        return $plain === false ? null : $plain;
++        $dest = self::path($storedName);
++        $out  = @fopen($dest, 'wb');
++        if (! $out) {
++            fclose($in);
++            return null;
++        }
++
++        $iv   = random_bytes(16);
++        $hmac = hash_init('sha256', HASH_HMAC, $keys['mac']);
++        fwrite($out, self::MAGIC); hash_update($hmac, self::MAGIC);
++        fwrite($out, $iv);         hash_update($hmac, $iv);
++
++        $written        = 4 + 16;
++        $blocksPerChunk = self::CHUNK >> 4;
++        $idx            = 0;
++        $ok             = true;
++
++        while (! feof($in)) {
++            $buf = fread($in, self::CHUNK);
++            if ($buf === '' || $buf === false) {
++                break;
++            }
++            $civ = self::ctrAdd($iv, $idx * $blocksPerChunk);
++            $ct  = openssl_encrypt($buf, 'aes-256-ctr', $keys['enc'], OPENSSL_RAW_DATA, $civ);
++            if ($ct === false) {
++                $ok = false;
++                break;
++            }
++            fwrite($out, $ct);
++            hash_update($hmac, $ct);
++            $written += strlen($ct);
++            $idx++;
++        }
++
++        if ($ok) {
++            $tag = hash_final($hmac, true);   // 32 bytes
++            fwrite($out, $tag);
++            $written += 32;
++        }
++        fclose($in);
++        fclose($out);
++
++        if (! $ok) {
++            @unlink($dest);
++            return null;
++        }
++        return $written;
++    }
++
++    /**
++     * Pass one: recompute the HMAC over the stored file and compare it, in
++     * constant time, to the tag on the end. Returns [iv, ciphertextLength] when
++     * the file is intact and untampered, or null otherwise. Nothing is decrypted
++     * or emitted here, so a bad file is caught before a single byte is sent.
++     */
++    public static function aesVerify(string $storedName): ?array
++    {
++        $keys = self::keys();
++        if ($keys === null) {
++            return null;
++        }
++        $path = self::path($storedName);
++        $size = @filesize($path);
++        if ($size === false || $size < 4 + 16 + 32) {
++            return null;
++        }
++        $in = @fopen($path, 'rb');
++        if (! $in) {
++            return null;
++        }
++
++        $magic = fread($in, 4);
++        $iv    = fread($in, 16);
++        if ($magic !== self::MAGIC || strlen($iv) !== 16) {
++            fclose($in);
++            return null;
++        }
++        $hmac = hash_init('sha256', HASH_HMAC, $keys['mac']);
++        hash_update($hmac, $magic);
++        hash_update($hmac, $iv);
++
++        $macDataLen = $size - 32;   // everything except the trailing tag
++        $read       = 20;
++        while ($read < $macDataLen) {
++            $buf = fread($in, min(self::CHUNK, $macDataLen - $read));
++            if ($buf === '' || $buf === false) {
++                break;
++            }
++            hash_update($hmac, $buf);
++            $read += strlen($buf);
++        }
++        $calc = hash_final($hmac, true);
++
++        fseek($in, $macDataLen);
++        $tag = fread($in, 32);
++        fclose($in);
++
++        if (! is_string($tag) || strlen($tag) !== 32 || ! hash_equals($calc, $tag)) {
++            return null;   // tampered, truncated, or wrong key
++        }
++        return ['iv' => $iv, 'ctlen' => $macDataLen - 20];
++    }
++
++    /**
++     * Pass two: decrypt the ciphertext straight to php://output in chunks. Only
++     * call this AFTER aesVerify() has passed for the same file, so a forged file
++     * can never be streamed to a visitor. Returns false if it could not start.
++     */
++    public static function aesOutput(string $storedName, string $iv, int $ctLen): bool
++    {
++        $keys = self::keys();
++        if ($keys === null) {
++            return false;
++        }
++        $in = @fopen(self::path($storedName), 'rb');
++        if (! $in) {
++            return false;
++        }
++        fseek($in, 20);   // past magic + iv
++
++        $blocksPerChunk = self::CHUNK >> 4;
++        $idx  = 0;
++        $read = 0;
++        while ($read < $ctLen) {
++            $buf = fread($in, min(self::CHUNK, $ctLen - $read));
++            if ($buf === '' || $buf === false) {
++                break;
++            }
++            $civ = self::ctrAdd($iv, $idx * $blocksPerChunk);
++            $pt  = openssl_decrypt($buf, 'aes-256-ctr', $keys['enc'], OPENSSL_RAW_DATA, $civ);
++            if ($pt === false) {
++                fclose($in);
++                return false;
++            }
++            echo $pt;
++            flush();
++            $read += strlen($buf);
++            $idx++;
++        }
++        fclose($in);
++        return true;
 +    }
 +
 +    // ---- password ZIP ---------------------------------------------------
