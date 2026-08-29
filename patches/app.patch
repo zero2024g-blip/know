@@ -6972,8 +6972,8 @@ diff -ruN /tmp/orig_app/Config/Feature.php app/Config/Feature.php
 +}
 diff -ruN /tmp/orig_app/Config/Filters.php app/Config/Filters.php
 --- /tmp/orig_app/Config/Filters.php	2026-08-24 23:02:52.518699150 +0000
-+++ app/Config/Filters.php	2026-08-27 01:13:54.637921244 +0000
-@@ -2,73 +2,121 @@
++++ app/Config/Filters.php	2026-08-29 21:29:45.285221189 +0000
+@@ -2,73 +2,125 @@
  
  namespace Config;
  
@@ -7119,11 +7119,15 @@ diff -ruN /tmp/orig_app/Config/Filters.php app/Config/Filters.php
 +            // the one exception: it is called by apps, not by browsers, and
 +            // it authenticates with its own sealed envelope instead.
 +            'csrf' => [
-+                'except' => ['data/zezr_connector'],
++                // The connector and the download API are called by apps, not
++                // browsers, so they carry no CSRF token; each authenticates on
++                // its own terms (a sealed envelope; a licence key + rate limit).
++                'except' => ['data/zezr_connector', 'download', 'download/*'],
 +            ],
-+            // Everything needs a session except the public pages.
++            // Everything needs a session except the public pages. The download
++            // endpoints are public by design (a key, not a login, gates them).
 +            'auth' => [
-+                'except' => ['/', 'login', 'register', 'check', 'data/zezr_connector'],
++                'except' => ['/', 'login', 'register', 'check', 'data/zezr_connector', 'download', 'download/*'],
 +            ],
 +            'honeypot',
 +        ],
@@ -9536,8 +9540,8 @@ diff -ruN /tmp/orig_app/Config/Publisher.php app/Config/Publisher.php
 +}
 diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 --- /tmp/orig_app/Config/Routes.php	2026-08-24 23:02:52.524373647 +0000
-+++ app/Config/Routes.php	2026-08-28 09:51:52.334536338 +0000
-@@ -1,82 +1,72 @@
++++ app/Config/Routes.php	2026-08-29 21:29:59.581222039 +0000
+@@ -1,82 +1,86 @@
  <?php
  
 -namespace Config;
@@ -9640,6 +9644,11 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 +    // Security log: failed and blocked attempts at login, register and check.
 +    $routes->get('security', 'Security::index');
 +    $routes->match(['get', 'post'], 'security/api', 'Security::api');
++
++    // Download manager. POST only for the writes (CSRF does not cover GET).
++    $routes->get('downloads', 'Files::index');
++    $routes->post('downloads/save', 'Files::save');
++    $routes->post('downloads/delete', 'Files::delete');
 +    $routes->match(['get', 'post'], 'manage-users', 'User::manage_users');
 +    $routes->match(['get', 'post'], 'edit/(:num)', 'User::user_edit/$1');
 +
@@ -9655,7 +9664,7 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
      $routes->match(['get', 'post'], 'zezr_connector', 'Connect::index');
  });
 -//$routes->match(['get', 'post'], 'connect', 'Connect::index');
--
+ 
 -/*
 - * --------------------------------------------------------------------
 - * Additional Routing
@@ -9672,6 +9681,14 @@ diff -ruN /tmp/orig_app/Config/Routes.php app/Config/Routes.php
 -if (file_exists(APPPATH . 'Config/' . ENVIRONMENT . '/Routes.php')) {
 -	require APPPATH . 'Config/' . ENVIRONMENT . '/Routes.php';
 -}
++// Public file distribution. A key (or nothing, for a free file) gates it, not
++// a login — so these sit outside the auth filter (see Config/Filters).
++//   GET  /download                a human page: free files + a key box
++//   POST /download                the API: returns JSON with a one-time link
++//   GET  /download/file/<token>   streams the bytes for a valid token
++$routes->get('download', 'Download::index');
++$routes->post('download', 'Download::request');
++$routes->get('download/file/(:segment)', 'Download::file/$1');
 diff -ruN /tmp/orig_app/Config/Routing.php app/Config/Routing.php
 --- /tmp/orig_app/Config/Routing.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Config/Routing.php	2026-08-27 01:07:38.543266536 +0000
@@ -12421,6 +12438,559 @@ diff -ruN /tmp/orig_app/Controllers/Connect.php app/Controllers/Connect.php
 +# 'reason' => "Please Update Your App" #E-9
 +#'reason' => "License/Key is Not Registered" #E-10
 +# -------- Errors -----------
+diff -ruN /tmp/orig_app/Controllers/Download.php app/Controllers/Download.php
+--- /tmp/orig_app/Controllers/Download.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Controllers/Download.php	2026-08-29 21:28:01.313215009 +0000
+@@ -0,0 +1,334 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Models\DownloadFileModel;
++use App\Models\DownloadTokenModel;
++use App\Models\KeysModel;
++use App\Libraries\FileVault;
++
++/**
++ * Public file distribution.
++ *
++ *   GET  /download                 human page: free files + a key box
++ *   POST /download                 API: {game?, key?, file} -> JSON {status, link, ...}
++ *   GET  /download/file/<token>    streams the file for a valid one-time token
++ *
++ * This route is reachable without a panel login, so it defends itself the same
++ * way the connector does: a per-IP rate limit, generic answers that never say
++ * which part was wrong (so it is not an oracle for guessing keys), and a
++ * signed 256-bit token that is the only path to the bytes.
++ */
++class Download extends BaseController
++{
++    private const RL_TABLE  = 'download_ratelimit';
++    private const RL_LIMIT  = 20;    // failed/unauthorised attempts...
++    private const RL_WINDOW = 300;   // ...within 5 minutes
++    private const RL_BLOCK  = 900;   // then blocked for 15
++
++    // ------------------------------------------------------------------
++    //  GET /download — a small human page
++    // ------------------------------------------------------------------
++    public function index()
++    {
++        $files = (new DownloadFileModel())
++            ->where('status', 1)
++            ->orderBy('id_file', 'DESC')
++            ->findAll();
++
++        // Only what a stranger may see: title, slug, game, whether a key is
++        // needed. Never the stored name, the zip password, or the disk path.
++        $free = [];
++        $gated = [];
++        foreach ($files as $f) {
++            $row = [
++                'title' => $f->title,
++                'slug'  => $f->slug,
++                'game'  => $f->game,
++                'size'  => (int) $f->size,
++            ];
++            if ((int) $f->access === DownloadFileModel::ACCESS_FREE) {
++                $free[] = $row;
++            } else {
++                $gated[] = $row;
++            }
++        }
++
++        return view('Download/page', ['free' => $free, 'gated' => $gated]);
++    }
++
++    // ------------------------------------------------------------------
++    //  POST /download — the API
++    // ------------------------------------------------------------------
++    public function request()
++    {
++        $ipHash = md5('download_' . $this->clientIp());
++
++        if ($this->rlRemaining($ipHash) > 0) {
++            return $this->reply(['status' => 'error', 'message' => 'Too many requests. Please slow down.'], 429);
++        }
++
++        $in   = $this->input();
++        $slug = strtolower(trim((string) ($in['file'] ?? '')));
++        $key  = trim((string) ($in['key'] ?? ''));
++        $game = strtoupper(trim((string) ($in['game'] ?? '')));
++
++        if ($slug === '' || ! preg_match('/^[a-z0-9\-_]{1,64}$/', $slug)) {
++            $this->rlFail($ipHash);
++            return $this->reply(['status' => 'error', 'message' => 'File not found.'], 404);
++        }
++
++        $file = (new DownloadFileModel())->bySlug($slug);
++        if (! $file || (int) $file->status !== 1) {
++            $this->rlFail($ipHash);
++            return $this->reply(['status' => 'error', 'message' => 'File not found.'], 404);
++        }
++
++        // A gated file needs a key that is valid for it. A free file needs
++        // nothing. The refusal message is the same either way.
++        if ((int) $file->access === DownloadFileModel::ACCESS_KEY) {
++            if (! $this->keyAuthorises($key, $file, $game)) {
++                $this->rlFail($ipHash);
++                return $this->reply(['status' => 'error', 'message' => 'This key cannot download this file.'], 403);
++            }
++        }
++
++        $ttl   = (int) $file->token_ttl > 0 ? (int) $file->token_ttl : 60;
++        $token = (new DownloadTokenModel())->issue(
++            (int) $file->id_file,
++            $key !== '' ? $key : null,
++            $ipHash,
++            $ttl
++        );
++
++        // A genuine authorised request clears the counter.
++        $this->rlClear($ipHash);
++
++        return $this->reply([
++            'status'     => 'ok',
++            'message'    => 'Authorized.',
++            'file'       => $file->slug,
++            'name'       => $file->orig_name,
++            'link'       => base_url('download/file/' . $token),
++            'expires'    => time() + $ttl * 60,
++            'expires_in' => $ttl * 60,
++            'single_use' => (int) $file->single_use === 1,
++            'zip'        => (int) $file->protection === DownloadFileModel::PROT_ZIP,
++        ]);
++    }
++
++    // ------------------------------------------------------------------
++    //  GET /download/file/<token> — hand over the bytes
++    // ------------------------------------------------------------------
++    public function file($token = '')
++    {
++        $tokens = new DownloadTokenModel();
++        $tok    = $tokens->valid((string) $token);
++        if (! $tok) {
++            return $this->response->setStatusCode(410)->setBody('This link has expired or is invalid.');
++        }
++
++        $files = new DownloadFileModel();
++        $file  = $files->find((int) $tok->file_id);
++        if (! $file || (int) $file->status !== 1) {
++            return $this->response->setStatusCode(404)->setBody('File not found.');
++        }
++
++        // Single-use: claim the token now, atomically. If it was already
++        // claimed by a parallel request, refuse rather than serve twice.
++        if ((int) $file->single_use === 1) {
++            if (! $tokens->burn((int) $tok->id_token)) {
++                return $this->response->setStatusCode(410)->setBody('This link has already been used.');
++            }
++        }
++
++        $files->set('downloads', 'downloads + 1', false)
++              ->where('id_file', $file->id_file)
++              ->update();
++
++        return $this->stream($file);
++    }
++
++    // ------------------------------------------------------------------
++    //  Helpers
++    // ------------------------------------------------------------------
++
++    /** Read the request body whether it arrived as a form or as JSON. */
++    private function input(): array
++    {
++        $post = $this->request->getPost();
++        if (! empty($post)) {
++            return $post;
++        }
++        $json = $this->request->getJSON(true);
++        return is_array($json) ? $json : [];
++    }
++
++    /** A key is good for a file when it is a real, active, non-expired key and
++     *  the file is either for that key's game or open to any game (ALL). */
++    private function keyAuthorises(string $key, object $file, string $game): bool
++    {
++        if ($key === '' || strlen($key) > 96) {
++            return false;
++        }
++
++        $model = new KeysModel();
++        $row   = $model->getKeys($key, 'user_key');
++        if (! $row || (int) $row->status !== 1) {
++            return false;
++        }
++
++        // Expired key -> no.
++        if (! empty($row->expired_date)) {
++            try {
++                if (\CodeIgniter\I18n\Time::now()->isAfter(\CodeIgniter\I18n\Time::parse($row->expired_date))) {
++                    return false;
++                }
++            } catch (\Throwable $e) {
++                return false;
++            }
++        }
++
++        // Game gate. A file marked ALL accepts any game; otherwise the key's
++        // game must match the file's. If the caller sent a game, it must agree
++        // with the key too, so a CODM key cannot be presented for a PUBGM slot.
++        $fileGame = strtoupper((string) $file->game);
++        $keyGame  = strtoupper((string) $row->game);
++
++        if ($fileGame !== 'ALL' && $keyGame !== $fileGame) {
++            return false;
++        }
++        if ($game !== '' && $game !== $keyGame && $fileGame !== 'ALL') {
++            return false;
++        }
++
++        return true;
++    }
++
++    /** Send the file, honouring its at-rest protection. */
++    private function stream(object $file)
++    {
++        $prot = (int) $file->protection;
++        $safe = $this->safeName((string) $file->orig_name);
++
++        // Kill any buffering so a large body is not held whole in PHP's output
++        // buffer on top of whatever we already read.
++        while (ob_get_level() > 0) {
++            ob_end_clean();
++        }
++
++        header('X-Content-Type-Options: nosniff');
++        header('Cache-Control: private, no-store');
++
++        if ($prot === DownloadFileModel::PROT_ZIP) {
++            // Served opaque: the visitor needs the password you gave them.
++            $path = FileVault::path($file->stored_name);
++            if (! is_file($path)) {
++                return $this->response->setStatusCode(404)->setBody('File missing on server.');
++            }
++            $zipName = pathinfo($safe, PATHINFO_FILENAME) . '.zip';
++            header('Content-Type: application/zip');
++            header('Content-Disposition: attachment; filename="' . $zipName . '"');
++            header('Content-Length: ' . filesize($path));
++            readfile($path);
++            return $this->response->setBody('');
++        }
++
++        if ($prot === DownloadFileModel::PROT_AES) {
++            $plain = FileVault::decrypt((string) $file->stored_name);
++            if ($plain === null) {
++                return $this->response->setStatusCode(500)->setBody('File could not be read.');
++            }
++            header('Content-Type: ' . ($file->mime ?: 'application/octet-stream'));
++            header('Content-Disposition: attachment; filename="' . $safe . '"');
++            header('Content-Length: ' . strlen($plain));
++            echo $plain;
++            return $this->response->setBody('');
++        }
++
++        // PROT_NONE — stream straight from disk.
++        $path = FileVault::path($file->stored_name);
++        if (! is_file($path)) {
++            return $this->response->setStatusCode(404)->setBody('File missing on server.');
++        }
++        header('Content-Type: ' . ($file->mime ?: 'application/octet-stream'));
++        header('Content-Disposition: attachment; filename="' . $safe . '"');
++        header('Content-Length: ' . filesize($path));
++        readfile($path);
++        return $this->response->setBody('');
++    }
++
++    /** A filename that is safe in a Content-Disposition header. */
++    private function safeName(string $name): string
++    {
++        $name = basename($name);
++        $name = preg_replace('/[^A-Za-z0-9._\- ]+/', '_', $name);
++        $name = trim($name);
++        return $name !== '' ? substr($name, 0, 160) : 'download';
++    }
++
++    private function reply(array $data, int $code = 200)
++    {
++        return $this->response->setStatusCode($code)->setJSON($data);
++    }
++
++    // ---- rate limit (same shape as the connector) ----------------------
++
++    private function rlRemaining(string $ipHash): int
++    {
++        try {
++            $db  = db_connect();
++            $now = time();
++            if (random_int(1, 20) === 1) {
++                $db->table(self::RL_TABLE)
++                   ->where('blocked_until <', $now)->where('window_end <', $now)->delete();
++            }
++            $row = $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->get()->getRowArray();
++            if ($row && (int) $row['blocked_until'] > $now) {
++                return (int) $row['blocked_until'] - $now;
++            }
++        } catch (\Throwable $e) {
++            log_message('critical', 'Download rate limiter unavailable: {m}', ['m' => $e->getMessage()]);
++        }
++        return 0;
++    }
++
++    private function rlFail(string $ipHash): void
++    {
++        try {
++            $db  = db_connect();
++            $now = time();
++            $row = $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->get()->getRowArray();
++
++            $fails     = $row ? (int) $row['fails'] : 0;
++            $windowEnd = $row ? (int) $row['window_end'] : 0;
++            if ($windowEnd < $now) {
++                $fails     = 0;
++                $windowEnd = $now + self::RL_WINDOW;
++            }
++            $fails++;
++            $blockedUntil = 0;
++            if ($fails >= self::RL_LIMIT) {
++                $blockedUntil = $now + self::RL_BLOCK;
++                $fails        = 0;
++            }
++            $payload = ['fails' => $fails, 'window_end' => $windowEnd, 'blocked_until' => $blockedUntil];
++            if ($row) {
++                $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->update($payload);
++            } else {
++                $payload['ip_hash'] = $ipHash;
++                $db->table(self::RL_TABLE)->insert($payload);
++            }
++        } catch (\Throwable $e) {
++            log_message('critical', 'Download rate limiter write failed: {m}', ['m' => $e->getMessage()]);
++        }
++    }
++
++    private function rlClear(string $ipHash): void
++    {
++        try {
++            db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete();
++        } catch (\Throwable $e) {
++        }
++    }
++}
+diff -ruN /tmp/orig_app/Controllers/Files.php app/Controllers/Files.php
+--- /tmp/orig_app/Controllers/Files.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Controllers/Files.php	2026-08-29 21:34:32.545238265 +0000
+@@ -0,0 +1,211 @@
++<?php
++
++namespace App\Controllers;
++
++use App\Models\DownloadFileModel;
++use App\Models\GameModel;
++use App\Models\UserModel;
++use App\Libraries\FileVault;
++use Config\Services;
++
++/**
++ * Admin — the download-file manager. Reached under the `admin` filter group,
++ * and every action re-checks the level itself so a filter slip cannot open it.
++ */
++class Files extends BaseController
++{
++    protected $user;
++
++    public function __construct()
++    {
++        $this->user = (new UserModel())->getUser();
++    }
++
++    private function denyNonAdmin()
++    {
++        if ((int) ($this->user->level ?? 2) !== 1) {
++            return redirect()->to('/')->with('msgDanger', 'Admins only.');
++        }
++        return null;
++    }
++
++    public function index()
++    {
++        if ($r = $this->denyNonAdmin()) {
++            return $r;
++        }
++
++        $files = (new DownloadFileModel())->allOrdered();
++        $games = (new GameModel())->allOrdered();
++
++        return view('Admin/files', [
++            'title'  => 'Downloads',
++            'user'   => $this->user,
++            'files'  => $files,
++            'games'  => $games,
++            'vaultKeyReady' => FileVault::key() !== null,
++        ]);
++    }
++
++    public function save()
++    {
++        if ($r = $this->denyNonAdmin()) {
++            return $r;
++        }
++
++        $model = new DownloadFileModel();
++        $id    = (int) $this->request->getPost('id_file');
++        $existing = $id ? $model->find($id) : null;
++
++        // Game codes that actually exist, plus the ALL pseudo-code.
++        $codes = array_map(static fn ($g) => $g->code, (new GameModel())->allOrdered());
++        $codes[] = 'ALL';
++        $gameList = implode(',', array_unique($codes));
++
++        $rules = [
++            'title'      => ['label' => 'title', 'rules' => 'required|max_length[120]'],
++            'game'       => ['label' => 'game',  'rules' => "required|in_list[$gameList]"],
++            'access'     => ['label' => 'access','rules' => 'required|in_list[0,1]'],
++            'protection' => ['label' => 'protection', 'rules' => 'required|in_list[0,1,2]'],
++            'token_ttl'  => ['label' => 'link life', 'rules' => 'permit_empty|integer|greater_than_equal_to[1]|less_than_equal_to[10080]'],
++            'single_use' => ['label' => 'single use', 'rules' => 'required|in_list[0,1]'],
++            'status'     => ['label' => 'status', 'rules' => 'required|in_list[0,1]'],
++        ];
++        // A brand-new record must carry a file; an edit may keep the old one.
++        if (! $existing) {
++            $rules['file'] = ['label' => 'file', 'rules' => 'uploaded[file]|max_size[file,204800]'];
++        } else {
++            $rules['file'] = ['label' => 'file', 'rules' => 'permit_empty|max_size[file,204800]'];
++        }
++
++        if (! $this->validate($rules)) {
++            return redirect()->to('admin/downloads')->withInput()
++                ->with('msgDanger', 'Could not save: ' . implode(' ', Services::validation()->getErrors()));
++        }
++
++        $protection = (int) $this->request->getPost('protection');
++        $zipPass    = (string) $this->request->getPost('zip_password');
++
++        if ($protection === DownloadFileModel::PROT_ZIP && $existing === null && $zipPass === '') {
++            return redirect()->to('admin/downloads')->withInput()
++                ->with('msgDanger', 'A password ZIP needs a password.');
++        }
++        if ($protection === DownloadFileModel::PROT_AES && ! FileVault::key()) {
++            return redirect()->to('admin/downloads')->withInput()
++                ->with('msgDanger', 'Encryption needs a valid app key in .env (encryption.key). Set it first.');
++        }
++
++        $upload = $this->request->getFile('file');
++        $hasNewFile = $upload && $upload->isValid() && ! $upload->hasMoved();
++
++        // Changing protection without a new file is refused: the stored blob is
++        // already wrapped, and re-wrapping it would need the plaintext we no
++        // longer hold. Re-upload the file to change how it is protected.
++        if ($existing && ! $hasNewFile && (int) $existing->protection !== $protection) {
++            return redirect()->to('admin/downloads')->withInput()
++                ->with('msgDanger', 'To change protection, upload the file again.');
++        }
++
++        $data = [
++            'title'      => trim((string) $this->request->getPost('title')),
++            'game'       => strtoupper((string) $this->request->getPost('game')),
++            'access'     => (int) $this->request->getPost('access'),
++            'protection' => $protection,
++            'token_ttl'  => (int) ($this->request->getPost('token_ttl') ?: 60),
++            'single_use' => (int) $this->request->getPost('single_use'),
++            'status'     => (int) $this->request->getPost('status'),
++        ];
++
++        // Slug: from the field if given, else from the title. Kept unique.
++        $wantSlug = (string) ($this->request->getPost('slug') ?: $data['title']);
++        $data['slug'] = $model->uniqueSlug($wantSlug, $existing ? $id : null);
++
++        // The admin's ZIP password is stored so you can look it up to re-share
++        // it; it is only ever shown to an admin and never leaves the panel.
++        if ($protection === DownloadFileModel::PROT_ZIP) {
++            if ($zipPass !== '') {
++                $data['zip_password'] = $zipPass;
++            }
++        } else {
++            $data['zip_password'] = null;
++        }
++
++        // Process a newly uploaded file into the vault.
++        if ($hasNewFile) {
++            $orig = $upload->getClientName();
++            $ext  = $upload->getClientExtension() ?: $upload->getExtension();
++            $tmp  = $upload->getTempName();
++            $mime = $upload->getClientMimeType() ?: 'application/octet-stream';
++
++            $stored = FileVault::newStoredName($protection === DownloadFileModel::PROT_ZIP ? 'zip' : $ext);
++            $ok = false;
++
++            if ($protection === DownloadFileModel::PROT_AES) {
++                $ok = FileVault::encryptTo($tmp, $stored) !== null;
++                $size = $upload->getSize();                 // what the user receives
++            } elseif ($protection === DownloadFileModel::PROT_ZIP) {
++                $pass = $zipPass !== '' ? $zipPass : (string) ($existing->zip_password ?? '');
++                $ok   = $pass !== '' && FileVault::zipWithPassword($tmp, $orig, $stored, $pass);
++                $size = is_file(FileVault::path($stored)) ? filesize(FileVault::path($stored)) : 0;
++            } else {
++                try {
++                    $upload->move(FileVault::dir(), $stored, true);
++                } catch (\Throwable $e) {
++                    log_message('error', 'Download upload move failed: {m}', ['m' => $e->getMessage()]);
++                }
++                $ok   = is_file(FileVault::path($stored));
++                $size = $ok ? filesize(FileVault::path($stored)) : 0;
++            }
++
++            if (! $ok) {
++                FileVault::remove($stored);
++                return redirect()->to('admin/downloads')->withInput()
++                    ->with('msgDanger', 'The file could not be stored. Check writable/ permissions and the size limit.');
++            }
++
++            // Drop the previous blob now that the new one is in place.
++            if ($existing && ! empty($existing->stored_name)) {
++                FileVault::remove($existing->stored_name);
++            }
++
++            $data['stored_name'] = $stored;
++            $data['orig_name']   = substr($orig, 0, 160);
++            $data['mime']        = substr($mime, 0, 120);
++            $data['size']        = (int) $size;
++        }
++
++        if ($existing) {
++            $model->update($id, $data);
++            $msg = 'File updated.';
++        } else {
++            $data['created_by'] = $this->user->username ?? 'admin';
++            $data['downloads']  = 0;
++            $model->insert($data);
++            $msg = 'File added.';
++        }
++
++        return redirect()->to('admin/downloads')->with('msgSuccess', $msg);
++    }
++
++    public function delete()
++    {
++        if ($r = $this->denyNonAdmin()) {
++            return $r;
++        }
++
++        $model = new DownloadFileModel();
++        $id    = (int) $this->request->getPost('id_file');
++        $file  = $id ? $model->find($id) : null;
++
++        if (! $file) {
++            return redirect()->to('admin/downloads')->with('msgDanger', 'File not found.');
++        }
++
++        FileVault::remove($file->stored_name);
++        // Any outstanding tokens for it die with it.
++        db_connect()->table('download_tokens')->where('file_id', $id)->delete();
++        $model->delete($id);
++
++        return redirect()->to('admin/downloads')->with('msgSuccess', 'File deleted.');
++    }
++}
 diff -ruN /tmp/orig_app/Controllers/Games.php app/Controllers/Games.php
 --- /tmp/orig_app/Controllers/Games.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Controllers/Games.php	2026-08-29 00:47:10.408476281 +0000
@@ -14803,6 +15373,162 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +
 +    return base_url($path) . ($stamp ? '?v=' . $stamp : '');
 +}
+diff -ruN /tmp/orig_app/Libraries/FileVault.php app/Libraries/FileVault.php
+--- /tmp/orig_app/Libraries/FileVault.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Libraries/FileVault.php	2026-08-29 21:26:23.349209185 +0000
+@@ -0,0 +1,152 @@
++<?php
++
++namespace App\Libraries;
++
++/**
++ * FileVault — where uploaded download-files live and how they are protected.
++ *
++ * Files are stored under writable/uploads/downloads, which is OUTSIDE anything
++ * the web serves: the root .htaccess refuses writable/ outright, and a download
++ * only ever reaches a visitor through a signed one-time token handled by the
++ * Download controller. So the raw file has no public URL at all.
++ *
++ * On top of that, a file may be:
++ *   PROT_NONE - stored as uploaded.
++ *   PROT_AES  - stored AES-256-GCM encrypted with a key derived from the app
++ *               key in .env; decrypted only in memory when it is sent. Protects
++ *               the bytes if someone walks off with just the files.
++ *   PROT_ZIP  - wrapped in a ZIP encrypted (AES-256) with a password you set
++ *               and hand to buyers yourself; served as-is, so the panel never
++ *               holds the plaintext and cannot hand it out by mistake.
++ */
++class FileVault
++{
++    /** The storage directory, created (with a deny-all .htaccess) on first use. */
++    public static function dir(): string
++    {
++        $dir = rtrim(WRITEPATH, '/\\') . DIRECTORY_SEPARATOR . 'uploads'
++             . DIRECTORY_SEPARATOR . 'downloads';
++        if (! is_dir($dir)) {
++            @mkdir($dir, 0755, true);
++        }
++        // Belt and braces: even though writable/ is already blocked, drop a
++        // deny file so a misconfigured vhost still cannot list or serve these.
++        $guard = $dir . DIRECTORY_SEPARATOR . '.htaccess';
++        if (! is_file($guard)) {
++            @file_put_contents($guard, "Require all denied\nOptions -Indexes\n");
++        }
++        return $dir;
++    }
++
++    /** Absolute path for a stored file name. */
++    public static function path(string $storedName): string
++    {
++        return self::dir() . DIRECTORY_SEPARATOR . basename($storedName);
++    }
++
++    /** A random on-disk name, unrelated to the original filename. */
++    public static function newStoredName(string $ext = ''): string
++    {
++        $ext  = preg_replace('/[^a-z0-9]+/i', '', $ext);
++        $name = bin2hex(random_bytes(16));
++        return $ext !== '' ? "$name.$ext" : $name;
++    }
++
++    /**
++     * The 32-byte AES key for at-rest encryption, derived from the app key so
++     * there is no second secret to configure. Domain-separated so it is never
++     * the same bytes the framework uses for anything else. Returns null when
++     * the app key is missing — the caller must then refuse AES storage rather
++     * than "encrypt" with an empty key.
++     */
++    public static function key(): ?string
++    {
++        $app = (string) (env('encryption.key') ?: '');
++        if (str_starts_with($app, 'hex2bin:')) {
++            $app = @hex2bin(substr($app, 8)) ?: '';
++        } elseif (str_starts_with($app, 'base64:')) {
++            $app = base64_decode(substr($app, 7), true) ?: '';
++        }
++        if ($app === '') {
++            return null;
++        }
++        return hash('sha256', 'zero-download-vault|' . $app, true);
++    }
++
++    // ---- AES-256-GCM at rest -------------------------------------------
++
++    /** Encrypt $srcPath into the vault as $storedName. Returns bytes written or null. */
++    public static function encryptTo(string $srcPath, string $storedName): ?int
++    {
++        $key = self::key();
++        if ($key === null) {
++            return null;
++        }
++        $plain = @file_get_contents($srcPath);
++        if ($plain === false) {
++            return null;
++        }
++        $nonce = random_bytes(12);
++        $tag   = '';
++        $ct    = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $nonce, $tag);
++        if ($ct === false) {
++            return null;
++        }
++        // Layout: nonce(12) . tag(16) . ciphertext
++        $blob = $nonce . $tag . $ct;
++        return @file_put_contents(self::path($storedName), $blob) === false ? null : strlen($blob);
++    }
++
++    /** Decrypt a stored AES file fully into memory. Returns the plaintext or null. */
++    public static function decrypt(string $storedName): ?string
++    {
++        $key = self::key();
++        if ($key === null) {
++            return null;
++        }
++        $blob = @file_get_contents(self::path($storedName));
++        if ($blob === false || strlen($blob) < 29) {
++            return null;
++        }
++        $nonce = substr($blob, 0, 12);
++        $tag   = substr($blob, 12, 16);
++        $ct    = substr($blob, 28);
++        $plain = openssl_decrypt($ct, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $nonce, $tag);
++        return $plain === false ? null : $plain;
++    }
++
++    // ---- password ZIP ---------------------------------------------------
++
++    /**
++     * Wrap $srcPath in an AES-256 password ZIP stored as $storedName, with the
++     * original file named $insideName inside it. Returns true on success.
++     */
++    public static function zipWithPassword(string $srcPath, string $insideName, string $storedName, string $password): bool
++    {
++        if (! class_exists(\ZipArchive::class) || ! defined('ZipArchive::EM_AES_256')) {
++            return false;
++        }
++        $dest = self::path($storedName);
++        @unlink($dest);
++        $zip = new \ZipArchive();
++        if ($zip->open($dest, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
++            return false;
++        }
++        $insideName = basename($insideName) !== '' ? basename($insideName) : 'file';
++        if (! $zip->addFile($srcPath, $insideName)) {
++            $zip->close();
++            @unlink($dest);
++            return false;
++        }
++        $zip->setEncryptionName($insideName, \ZipArchive::EM_AES_256, $password);
++        return $zip->close();
++    }
++
++    /** Delete a stored file, ignoring a name that is already gone. */
++    public static function remove(?string $storedName): void
++    {
++        if ($storedName) {
++            @unlink(self::path($storedName));
++        }
++    }
++}
 diff -ruN /tmp/orig_app/Models/BalanceModel.php app/Models/BalanceModel.php
 --- /tmp/orig_app/Models/BalanceModel.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Models/BalanceModel.php	2026-08-26 19:53:55.233208010 +0000
@@ -15064,6 +15790,157 @@ diff -ruN /tmp/orig_app/Models/DeletedKeyModel.php app/Models/DeletedKeyModel.ph
 +    public function recent(int $limit = 100): array
 +    {
 +        return $this->orderBy('id_deleted', 'DESC')->findAll($limit);
++    }
++}
+diff -ruN /tmp/orig_app/Models/DownloadFileModel.php app/Models/DownloadFileModel.php
+--- /tmp/orig_app/Models/DownloadFileModel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Models/DownloadFileModel.php	2026-08-29 21:25:20.385205443 +0000
+@@ -0,0 +1,66 @@
++<?php
++
++namespace App\Models;
++
++use CodeIgniter\Model;
++
++class DownloadFileModel extends Model
++{
++    protected $table      = 'download_files';
++    protected $primaryKey = 'id_file';
++    protected $returnType = 'object';
++    protected $useTimestamps = true;
++
++    protected $allowedFields = [
++        'title', 'slug', 'stored_name', 'orig_name', 'size', 'mime',
++        'game', 'access', 'protection', 'zip_password', 'token_ttl',
++        'single_use', 'status', 'downloads', 'created_by',
++    ];
++
++    /** Who may download the file. */
++    public const ACCESS_FREE = 0;   // anyone, no key
++    public const ACCESS_KEY  = 1;   // a valid active key is required
++
++    /** How the bytes are protected at rest / on the wire. */
++    public const PROT_NONE = 0;     // stored as-is (still outside web root + token-gated)
++    public const PROT_AES  = 1;     // stored AES-256-GCM encrypted, decrypted on send
++    public const PROT_ZIP  = 2;     // stored as a password ZIP, served as-is (opaque)
++
++    /** All files for the admin screen, newest first. */
++    public function allOrdered(): array
++    {
++        return $this->orderBy('id_file', 'DESC')->findAll();
++    }
++
++    public function bySlug(string $slug): ?object
++    {
++        return $this->where('slug', $slug)->first();
++    }
++
++    /**
++     * A slug that is safe in a URL and unique. Lowercased, only a-z0-9-_ , and
++     * a short suffix if the base is already taken.
++     */
++    public function uniqueSlug(string $base, ?int $ignoreId = null): string
++    {
++        $base = strtolower(preg_replace('/[^a-zA-Z0-9\-_]+/', '-', trim($base)));
++        $base = trim($base, '-_');
++        if ($base === '') {
++            $base = 'file';
++        }
++        $base = substr($base, 0, 48);
++
++        $slug = $base;
++        $n    = 1;
++        while (true) {
++            $row = $this->where('slug', $slug);
++            if ($ignoreId !== null) {
++                $row = $row->where('id_file !=', $ignoreId);
++            }
++            if (! $row->first()) {
++                return $slug;
++            }
++            $slug = $base . '-' . (++$n);
++        }
++    }
++}
+diff -ruN /tmp/orig_app/Models/DownloadTokenModel.php app/Models/DownloadTokenModel.php
+--- /tmp/orig_app/Models/DownloadTokenModel.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Models/DownloadTokenModel.php	2026-08-29 21:25:34.413206277 +0000
+@@ -0,0 +1,77 @@
++<?php
++
++namespace App\Models;
++
++use CodeIgniter\Model;
++
++class DownloadTokenModel extends Model
++{
++    protected $table      = 'download_tokens';
++    protected $primaryKey = 'id_token';
++    protected $returnType = 'object';
++    protected $useTimestamps = false;
++
++    protected $allowedFields = [
++        'token', 'file_id', 'key_used', 'ip_hash', 'expires', 'used', 'created_at',
++    ];
++
++    /**
++     * Mint a one-download link for a file. The token is 32 random bytes as hex
++     * (256 bits) — not guessable, and unique. Returns the token string.
++     */
++    public function issue(int $fileId, ?string $keyUsed, string $ipHash, int $ttlMinutes): string
++    {
++        // A rare housekeeping sweep so expired tokens do not pile up.
++        try {
++            if (random_int(1, 25) === 1) {
++                $this->where('expires <', time() - 86400)->delete();
++            }
++        } catch (\Throwable $e) {
++        }
++
++        $ttl   = max(1, min($ttlMinutes, 7 * 24 * 60)); // 1 min .. 7 days
++        $token = bin2hex(random_bytes(32));
++
++        $this->insert([
++            'token'      => $token,
++            'file_id'    => $fileId,
++            'key_used'   => $keyUsed !== null ? substr($keyUsed, 0, 96) : null,
++            'ip_hash'    => $ipHash,
++            'expires'    => time() + $ttl * 60,
++            'used'       => 0,
++            'created_at' => date('Y-m-d H:i:s'),
++        ]);
++
++        return $token;
++    }
++
++    /**
++     * Look up a token that is still good: exists, not expired, not already
++     * used. Format-check first so a malformed value never touches the table.
++     */
++    public function valid(string $token): ?object
++    {
++        if (! preg_match('/^[a-f0-9]{64}$/', $token)) {
++            return null;
++        }
++        return $this->where('token', $token)
++            ->where('used', 0)
++            ->where('expires >', time())
++            ->first();
++    }
++
++    /**
++     * Burn a single-use token, atomically. Returns true only for the one call
++     * that flipped it from unused to used, so two parallel requests with the
++     * same token cannot both download.
++     */
++    public function burn(int $idToken): bool
++    {
++        $db = \Config\Database::connect();
++        $db->table($this->table)
++           ->where('id_token', $idToken)
++           ->where('used', 0)
++           ->update(['used' => 1]);
++        return $db->affectedRows() === 1;
 +    }
 +}
 diff -ruN /tmp/orig_app/Models/DurationModel.php app/Models/DurationModel.php
@@ -16350,6 +17227,292 @@ diff -ruN /tmp/orig_app/Views/Admin/balance_history.php app/Views/Admin/balance_
 +        bind();
 +    })();
 +</script>
++<?= $this->endSection() ?>
+diff -ruN /tmp/orig_app/Views/Admin/files.php app/Views/Admin/files.php
+--- /tmp/orig_app/Views/Admin/files.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Admin/files.php	2026-08-29 21:31:20.453226846 +0000
+@@ -0,0 +1,282 @@
++<?= $this->extend('Layout/Starter') ?>
++
++<?= $this->section('content') ?>
++
++<?= $this->include('Layout/msgStatus') ?>
++
++<?php
++$fmtSize = static function ($b) {
++    $b = (int) $b;
++    if ($b < 1024) return $b . ' B';
++    $u = ['KB', 'MB', 'GB'];
++    $i = -1;
++    do { $b /= 1024; $i++; } while ($b >= 1024 && $i < 2);
++    return round($b, 1) . ' ' . $u[$i];
++};
++$accessLabel = ['0' => 'Free', '1' => 'Key required'];
++$protLabel   = ['0' => 'Plain', '1' => 'Encrypted', '2' => 'Password ZIP'];
++$apiBase = rtrim(base_url('download'), '/');
++?>
++
++<header class="em-head em-rise">
++    <div class="em-head-main">
++        <span class="em-eyebrow"><i class="bi bi-cloud-arrow-down"></i> Admin</span>
++        <h1>Downloads</h1>
++        <p>
++            Files your users can download &mdash; free, or gated behind a valid
++            game key. Each download is handed out through a one-time link, so
++            nothing here has a public URL that can be shared.
++        </p>
++    </div>
++    <div class="em-head-act">
++        <button type="button" class="em-btn is-primary" data-file-new>
++            <i class="bi bi-plus-lg"></i> Add file
++        </button>
++    </div>
++</header>
++
++<?php if (empty($vaultKeyReady)) : ?>
++    <div class="em-note is-warn" style="margin-bottom:1rem">
++        <i class="bi bi-exclamation-triangle"></i>
++        The app key in <code>.env</code> is not set, so <b>Encrypted</b> storage is
++        unavailable. Plain and Password-ZIP still work.
++    </div>
++<?php endif; ?>
++
++<section class="em-card em-rise">
++    <div class="em-panel-b is-flush">
++        <?php if (empty($files)) : ?>
++            <div class="em-empty">
++                <div class="em-empty-ic"><i class="bi bi-inbox"></i></div>
++                <h3>No files yet</h3>
++                <p>Add a file and choose who may download it.</p>
++            </div>
++        <?php else : ?>
++            <div class="dl-list">
++                <?php foreach ($files as $f) : ?>
++                    <div class="dl-row">
++                        <div class="dl-ic"><i class="bi bi-file-earmark-zip"></i></div>
++                        <div class="dl-body">
++                            <div class="dl-title">
++                                <?= esc($f->title) ?>
++                                <?php if ((int) $f->status !== 1) : ?><span class="em-pill">hidden</span><?php endif; ?>
++                            </div>
++                            <div class="dl-sub">
++                                <code><?= esc($f->slug) ?></code> &middot;
++                                <span class="em-pill <?= $f->game === 'ALL' ? 'is-info' : 'is-accent' ?>"><?= esc($f->game) ?></span> &middot;
++                                <?= esc($accessLabel[(string) $f->access] ?? '?') ?> &middot;
++                                <?= esc($protLabel[(string) $f->protection] ?? '?') ?> &middot;
++                                <?= $fmtSize($f->size) ?> &middot;
++                                <?= (int) $f->single_use === 1 ? 'one-time' : 'reusable' ?>,
++                                <?= (int) $f->token_ttl ?>m &middot;
++                                <?= (int) $f->downloads ?> downloads
++                            </div>
++                        </div>
++                        <div class="dl-act">
++                            <button type="button" class="em-btn is-sm"
++                                data-file-edit
++                                data-id="<?= (int) $f->id_file ?>"
++                                data-title="<?= esc($f->title, 'attr') ?>"
++                                data-slug="<?= esc($f->slug, 'attr') ?>"
++                                data-game="<?= esc($f->game, 'attr') ?>"
++                                data-access="<?= (int) $f->access ?>"
++                                data-protection="<?= (int) $f->protection ?>"
++                                data-ttl="<?= (int) $f->token_ttl ?>"
++                                data-single="<?= (int) $f->single_use ?>"
++                                data-status="<?= (int) $f->status ?>"
++                                data-zip="<?= esc((string) ($f->zip_password ?? ''), 'attr') ?>">
++                                <i class="bi bi-pencil"></i>
++                            </button>
++                            <form method="post" action="<?= site_url('admin/downloads/delete') ?>"
++                                  class="d-inline" data-confirm-delete="<?= esc($f->title, 'attr') ?>">
++                                <?= csrf_field() ?>
++                                <input type="hidden" name="id_file" value="<?= (int) $f->id_file ?>">
++                                <button type="submit" class="em-btn is-sm is-danger"><i class="bi bi-trash"></i></button>
++                            </form>
++                        </div>
++                    </div>
++                <?php endforeach; ?>
++            </div>
++        <?php endif; ?>
++    </div>
++</section>
++
++<section class="em-card em-rise" style="margin-top:1rem">
++    <div class="em-panel-h"><h2><i class="bi bi-plug"></i> API</h2></div>
++    <div class="em-panel-b">
++        <p class="em-hint">Apps fetch a one-time link by POSTing to this endpoint:</p>
++        <pre class="dl-api">POST <?= esc($apiBase) ?>
++Content-Type: application/json
++
++{ "file": "&lt;slug&gt;", "key": "&lt;user key&gt;", "game": "CODM" }
++
++&rarr; { "status": "ok", "link": "&lt;one-time url&gt;", "expires": 1699999999, "single_use": true }</pre>
++        <p class="em-hint">A <b>free</b> file needs no key. Then GET the <code>link</code> to download.</p>
++    </div>
++</section>
++
++<!-- ===================== file dialog ===================== -->
++<dialog class="em-modal" id="fileModal">
++    <form method="post" action="<?= site_url('admin/downloads/save') ?>" enctype="multipart/form-data">
++        <?= csrf_field() ?>
++        <input type="hidden" name="id_file" id="f_id" value="">
++        <header class="em-modal-h"><h3 id="f_title">Add file</h3></header>
++        <div class="em-modal-b">
++            <div class="em-field">
++                <label for="f_name">Title</label>
++                <input type="text" class="form-control" name="title" id="f_name" maxlength="120" required>
++                <p class="em-hint">What people see in the list.</p>
++            </div>
++            <div class="row g-3">
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="f_slug">Slug (for the API)</label>
++                        <input type="text" class="form-control" name="slug" id="f_slug" maxlength="64" placeholder="auto from title">
++                        <p class="em-hint">Letters, numbers, - and _. Leave blank to auto-make it.</p>
++                    </div>
++                </div>
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="f_game">Game</label>
++                        <select class="form-select" name="game" id="f_game">
++                            <option value="ALL">ALL &mdash; any valid key</option>
++                            <?php foreach ($games as $g) : ?>
++                                <option value="<?= esc($g->code, 'attr') ?>"><?= esc($g->code) ?> &mdash; <?= esc($g->name) ?></option>
++                            <?php endforeach; ?>
++                        </select>
++                        <p class="em-hint">Which key unlocks it. ALL = any game's key.</p>
++                    </div>
++                </div>
++            </div>
++            <div class="row g-3">
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="f_access">Who can download</label>
++                        <select class="form-select" name="access" id="f_access">
++                            <option value="1">Key required</option>
++                            <option value="0">Free &mdash; anyone</option>
++                        </select>
++                    </div>
++                </div>
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="f_prot">Protection at rest</label>
++                        <select class="form-select" name="protection" id="f_prot">
++                            <option value="0">Plain (stored outside the web)</option>
++                            <option value="1">Encrypted (AES, transparent)</option>
++                            <option value="2">Password ZIP (you give the password)</option>
++                        </select>
++                    </div>
++                </div>
++            </div>
++            <div class="em-field" id="f_zip_wrap" hidden>
++                <label for="f_zip">ZIP password</label>
++                <input type="text" class="form-control" name="zip_password" id="f_zip" maxlength="128">
++                <p class="em-hint">You hand this to buyers yourself; the panel never opens the ZIP. Leave unchanged on edit to keep it.</p>
++            </div>
++            <div class="row g-3">
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="f_ttl">Link life (minutes)</label>
++                        <input type="number" class="form-control" name="token_ttl" id="f_ttl" min="1" max="10080" value="60">
++                        <p class="em-hint">How long a handed-out link stays valid.</p>
++                    </div>
++                </div>
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="f_single">Link reuse</label>
++                        <select class="form-select" name="single_use" id="f_single">
++                            <option value="1">One-time (burns after a download)</option>
++                            <option value="0">Reusable until it expires</option>
++                        </select>
++                    </div>
++                </div>
++            </div>
++            <div class="row g-3">
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="f_status">Status</label>
++                        <select class="form-select" name="status" id="f_status">
++                            <option value="1">Active</option>
++                            <option value="0">Hidden</option>
++                        </select>
++                    </div>
++                </div>
++                <div class="col-6">
++                    <div class="em-field">
++                        <label for="f_file">File <span id="f_file_opt" class="em-hint" style="display:none">(leave empty to keep current)</span></label>
++                        <input type="file" class="form-control" name="file" id="f_file">
++                        <p class="em-hint">Server upload limits apply (php.ini / LimitRequestBody).</p>
++                    </div>
++                </div>
++            </div>
++        </div>
++        <footer class="em-modal-f">
++            <button type="button" class="em-btn" data-close>Cancel</button>
++            <button type="submit" class="em-btn is-primary"><i class="bi bi-check-lg"></i> Save file</button>
++        </footer>
++    </form>
++</dialog>
++
++<style>
++    .dl-list { display: flex; flex-direction: column; }
++    .dl-row { display: flex; align-items: center; gap: .8rem; padding: .85rem 1.15rem; }
++    .dl-row + .dl-row { border-top: 1px solid var(--em-line); }
++    .dl-ic { font-size: 1.4rem; color: var(--em-accent); flex-shrink: 0; }
++    .dl-body { flex: 1; min-width: 0; }
++    .dl-title { font-weight: 600; }
++    .dl-sub { font-size: .76rem; color: var(--em-dim); margin-top: .25rem; line-height: 1.9; }
++    .dl-act { display: flex; gap: .4rem; flex-shrink: 0; }
++    .dl-api { white-space: pre-wrap; word-break: break-word; font-size: .78rem; direction: ltr; text-align: left; }
++    #f_zip_wrap[hidden] { display: none; }
++</style>
++
++<script>
++    (function () {
++        var modal = document.getElementById('fileModal');
++        function open() { modal.showModal ? modal.showModal() : modal.setAttribute('open', ''); }
++        function close() { modal.close ? modal.close() : modal.removeAttribute('open'); }
++        document.querySelectorAll('[data-close]').forEach(function (b) {
++            b.addEventListener('click', function (e) { e.preventDefault(); close(); });
++        });
++
++        function toggleZip() {
++            document.getElementById('f_zip_wrap').hidden =
++                (document.getElementById('f_prot').value !== '2');
++        }
++        document.getElementById('f_prot').addEventListener('change', toggleZip);
++
++        function fill(d) {
++            document.getElementById('f_id').value     = d.id     || '';
++            document.getElementById('f_name').value   = d.title  || '';
++            document.getElementById('f_slug').value   = d.slug   || '';
++            document.getElementById('f_game').value   = d.game   || 'ALL';
++            document.getElementById('f_access').value = d.access !== undefined ? d.access : '1';
++            document.getElementById('f_prot').value   = d.protection !== undefined ? d.protection : '0';
++            document.getElementById('f_ttl').value    = d.ttl || 60;
++            document.getElementById('f_single').value = d.single !== undefined ? d.single : '1';
++            document.getElementById('f_status').value = d.status !== undefined ? d.status : '1';
++            document.getElementById('f_zip').value    = d.zip || '';
++            document.getElementById('f_title').textContent = d.id ? 'Edit file' : 'Add file';
++            document.getElementById('f_file_opt').style.display = d.id ? 'inline' : 'none';
++            document.getElementById('f_file').required = !d.id;
++            toggleZip();
++        }
++
++        document.querySelectorAll('[data-file-new]').forEach(function (b) {
++            b.addEventListener('click', function () { fill({}); open(); });
++        });
++        document.querySelectorAll('[data-file-edit]').forEach(function (b) {
++            b.addEventListener('click', function () {
++                fill({
++                    id: b.dataset.id, title: b.dataset.title, slug: b.dataset.slug,
++                    game: b.dataset.game, access: b.dataset.access, protection: b.dataset.protection,
++                    ttl: b.dataset.ttl, single: b.dataset.single, status: b.dataset.status, zip: b.dataset.zip
++                });
++                open();
++            });
++        });
++    })();
++</script>
++
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/Admin/games.php app/Views/Admin/games.php
 --- /tmp/orig_app/Views/Admin/games.php	1970-01-01 00:00:00.000000000 +0000
@@ -17803,6 +18966,124 @@ diff -ruN /tmp/orig_app/Views/Auth/register.php app/Views/Auth/register.php
                      <?php endif; ?>
                  </div>
  
+diff -ruN /tmp/orig_app/Views/Download/page.php app/Views/Download/page.php
+--- /tmp/orig_app/Views/Download/page.php	1970-01-01 00:00:00.000000000 +0000
++++ app/Views/Download/page.php	2026-08-29 21:31:56.909229013 +0000
+@@ -0,0 +1,114 @@
++<!doctype html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<title>Downloads</title>
++<?php
++$fmt = static function ($b) {
++    $b = (int) $b;
++    if ($b <= 0) return '';
++    if ($b < 1024) return $b . ' B';
++    $u = ['KB', 'MB', 'GB']; $i = -1;
++    do { $b /= 1024; $i++; } while ($b >= 1024 && $i < 2);
++    return round($b, 1) . ' ' . $u[$i];
++};
++?>
++<style>
++    :root { color-scheme: dark; }
++    body { margin:0; background:#15100f; color:#f1e7e2;
++        font:15px/1.6 "Segoe UI",Roboto,system-ui,sans-serif;
++        display:flex; justify-content:center; padding:1.2rem; }
++    .wrap { width:100%; max-width:640px; }
++    h1 { font-size:1.5rem; margin:.4rem 0 .2rem; }
++    .sub { color:#9b857b; margin:0 0 1.4rem; font-size:.92rem; }
++    .card { background:#1e1715; border:1px solid #33251f; border-radius:14px; padding:1rem 1.15rem; margin-bottom:1rem; }
++    .card h2 { font-size:.85rem; text-transform:uppercase; letter-spacing:.04em; color:#9b857b; margin:.1rem 0 .9rem; }
++    .row { display:flex; align-items:center; gap:.8rem; padding:.7rem 0; }
++    .row + .row { border-top:1px solid #2a201c; }
++    .row .info { flex:1; min-width:0; }
++    .row .name { font-weight:600; }
++    .row .meta { font-size:.76rem; color:#9b857b; margin-top:.15rem; }
++    .pill { display:inline-block; font-size:.7rem; padding:.05em .5em; border-radius:6px; background:#2a201c; color:#c9b3a8; }
++    input[type=text] { width:100%; box-sizing:border-box; padding:.6rem .7rem; border-radius:9px;
++        border:1px solid #3a2a24; background:#140f0e; color:#f1e7e2; font:inherit; margin-bottom:.7rem; }
++    button { font:inherit; font-weight:600; border:0; border-radius:9px; padding:.5rem .95rem; cursor:pointer;
++        background:#f4725a; color:#1a0f0c; white-space:nowrap; }
++    button.ghost { background:#2a201c; color:#f1e7e2; }
++    button[disabled] { opacity:.55; cursor:default; }
++    .msg { font-size:.85rem; margin-top:.5rem; min-height:1.2em; }
++    .msg.err { color:#ff8a73; } .msg.ok { color:#7bd88f; }
++    .empty { color:#9b857b; font-size:.9rem; }
++    code { background:#140f0e; padding:.05em .35em; border-radius:5px; }
++</style>
++</head>
++<body>
++<div class="wrap">
++    <h1>Downloads</h1>
++    <p class="sub">Free files are open. For the rest, enter your license key.</p>
++
++    <?php if (! empty($free)) : ?>
++    <div class="card">
++        <h2>Free</h2>
++        <?php foreach ($free as $f) : ?>
++            <div class="row">
++                <div class="info">
++                    <div class="name"><?= esc($f['title']) ?></div>
++                    <div class="meta"><span class="pill"><?= esc($f['game']) ?></span> <?= esc($fmt($f['size'])) ?></div>
++                </div>
++                <button class="dl" data-slug="<?= esc($f['slug'], 'attr') ?>" data-need="0">Download</button>
++            </div>
++        <?php endforeach; ?>
++    </div>
++    <?php endif; ?>
++
++    <div class="card">
++        <h2>With a key</h2>
++        <?php if (empty($gated)) : ?>
++            <p class="empty">No key-gated files right now.</p>
++        <?php else : ?>
++            <input type="text" id="key" placeholder="Your license key (e.g. CODM_xxxxxxxx)" autocomplete="off" spellcheck="false">
++            <?php foreach ($gated as $f) : ?>
++                <div class="row">
++                    <div class="info">
++                        <div class="name"><?= esc($f['title']) ?></div>
++                        <div class="meta"><span class="pill"><?= esc($f['game']) ?></span> <?= esc($fmt($f['size'])) ?></div>
++                    </div>
++                    <button class="dl ghost" data-slug="<?= esc($f['slug'], 'attr') ?>" data-game="<?= esc($f['game'], 'attr') ?>" data-need="1">Download</button>
++                </div>
++            <?php endforeach; ?>
++        <?php endif; ?>
++        <div class="msg" id="msg"></div>
++    </div>
++</div>
++
++<script>
++    var API = <?= json_encode(base_url('download'), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
++    var msg = document.getElementById('msg');
++    function say(t, cls) { msg.textContent = t || ''; msg.className = 'msg' + (cls ? ' ' + cls : ''); }
++
++    document.querySelectorAll('button.dl').forEach(function (b) {
++        b.addEventListener('click', function () {
++            var slug = b.dataset.slug, need = b.dataset.need === '1';
++            var key = need ? (document.getElementById('key') || {}).value : '';
++            if (need && !key) { say('Enter your key first.', 'err'); return; }
++            b.disabled = true; say('Checking…');
++            fetch(API, {
++                method: 'POST',
++                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
++                body: JSON.stringify({ file: slug, key: key, game: b.dataset.game || '' })
++            }).then(function (r) { return r.json().catch(function () { return {}; }); })
++              .then(function (j) {
++                  b.disabled = false;
++                  if (j && j.status === 'ok' && j.link) {
++                      say('Starting download…', 'ok');
++                      window.location = j.link;
++                  } else {
++                      say((j && j.message) ? j.message : 'Could not get the file.', 'err');
++                  }
++              }).catch(function () { b.disabled = false; say('Network error. Try again.', 'err'); });
++        });
++    });
++</script>
++</body>
++</html>
 diff -ruN /tmp/orig_app/Views/Keys/deleted.php app/Views/Keys/deleted.php
 --- /tmp/orig_app/Views/Keys/deleted.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Views/Keys/deleted.php	2026-08-27 01:24:14.195402715 +0000
@@ -18973,7 +20254,7 @@ diff -ruN /tmp/orig_app/Views/Keys/list.php app/Views/Keys/list.php
                                          'Your device key has been reset.',
 diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
 --- /tmp/orig_app/Views/Layout/Header.php	2026-08-24 23:02:52.617286818 +0000
-+++ app/Views/Layout/Header.php	2026-08-28 09:53:47.576022524 +0000
++++ app/Views/Layout/Header.php	2026-08-29 21:30:13.637222874 +0000
 @@ -37,6 +37,11 @@
                                  <li>
                                      <hr class="dropdown-divider">
@@ -18986,7 +20267,7 @@ diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
                                  <?php if ($user->level == 1) : ?>
                                      <li class="dropdown-item text-muted">Admin</li>
                                      <li>
-@@ -50,6 +55,31 @@
+@@ -50,6 +55,36 @@
                                          </a>
                                      </li>
                                      <li>
@@ -19002,6 +20283,11 @@ diff -ruN /tmp/orig_app/Views/Layout/Header.php app/Views/Layout/Header.php
 +                                    <li>
 +                                        <a class="dropdown-item <?= url_is('admin/deleted-keys') ? 'active' : '' ?>" href="<?= site_url('admin/deleted-keys') ?>">
 +                                            <i class="bi bi-archive"></i> Deleted Keys
++                                        </a>
++                                    </li>
++                                    <li>
++                                        <a class="dropdown-item <?= url_is('admin/downloads') ? 'active' : '' ?>" href="<?= site_url('admin/downloads') ?>">
++                                            <i class="bi bi-cloud-arrow-down"></i> Downloads
 +                                        </a>
 +                                    </li>
 +                                    <li>

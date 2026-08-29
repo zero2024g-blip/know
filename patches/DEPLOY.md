@@ -1420,6 +1420,59 @@ session id regenerates on login (no fixation); login is rate-limited and
 enumeration-safe; SQLi in login/register/connector is inert. A full summary a
 tester can read is in `SECURITY.md`.
 
+## Downloads — a licensed file distributor (Admin → Downloads)
+
+A place to host files (plugins, tools, APKs) that users pull down, either free
+or gated behind a valid game key, with an API for your apps. Run
+`MIGRATION.sql` section 12 (three new `download_*` tables, create-if-missing).
+
+How it works:
+  - Files are stored on disk under **`writable/uploads/downloads`**, which is
+    outside anything the web serves (blocked by the root `.htaccess`). There is
+    no public URL to a file — ever. A download only happens through a **one-time
+    signed link** with a 256-bit token.
+  - Per file you set: the **game** it belongs to (or `ALL` = any key), whether
+    it is **free or key-required**, the **link life** (minutes), whether the
+    link is **one-time** (burns after a download) or reusable until it expires,
+    and the **protection at rest**.
+  - **Game gating**: a `CODM` file needs a valid, active, non-expired `CODM`
+    key; an `ALL` file takes any valid key; a `free` file needs none. A wrong or
+    wrong-game key is refused with one generic message (no oracle).
+  - **IP rate limit** on the API (20 tries / 5 min → 15-min block), so nobody
+    can hammer it guessing which key works.
+
+The API (what your app calls):
+
+    POST  <panel>/public/download        (JSON or form)
+      { "file": "<slug>", "key": "<user key>", "game": "CODM" }
+    → { "status":"ok", "link":"<one-time url>", "expires":..., "single_use":true }
+
+    GET  <the link>   → streams the file, then (if one-time) the link is dead.
+
+**Protection at rest** — three options per file, all verified end to end:
+  - **Plain** — stored as-is (still outside the web root + token-gated).
+  - **Encrypted** — stored **AES-256-GCM** with a key derived from your app key
+    in `.env`; decrypted only in memory as it is sent, so the visitor gets the
+    original file and a thief who copies the folder gets ciphertext. (Needs a
+    real `encryption.key` in `.env`; if it is missing the option is disabled.)
+  - **Password ZIP** — wrapped in an **AES-256** ZIP with a password you set and
+    hand to buyers yourself. The panel serves it opaque and never holds the
+    plaintext. Two honest caveats: an AES ZIP opens with **7-Zip / WinRAR**, not
+    the basic `unzip` or the built-in Windows "Extract" — tell buyers that; and
+    the password is stored so you can look it up to re-share it (admin-only,
+    never leaves the panel).
+
+**Upload size**: the admin upload is a normal POST, so it is capped by your
+server, not the panel — `LimitRequestBody` in `.htaccess` (currently
+**2 MB**) and PHP's `upload_max_filesize` / `post_max_size`. To host a large
+APK, raise those in hPanel (PHP settings) and, if you keep the project-root
+layout, bump `LimitRequestBody`. Encrypted storage reads the whole file into
+memory once, so also keep `memory_limit` comfortably above the largest file.
+
+Verified live: free/keyed/wrong-key/wrong-game paths, one-time burn, expiry,
+the IP block, AES decrypt-on-send, and an AES ZIP that opens only with the
+right password.
+
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.

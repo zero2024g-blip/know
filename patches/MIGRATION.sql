@@ -479,3 +479,64 @@ CREATE TABLE IF NOT EXISTS `security_log` (
   KEY `idx_event`   (`event`, `created_at`),
   KEY `idx_created` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ---------------------------------------------------------------------
+-- 12. Download manager (Admin -> Downloads)
+--     Added 2026-08-29. Three new tables, all safe (create-if-missing).
+--     Files themselves live on disk under writable/uploads/downloads,
+--     which is outside anything the web serves; only these rows and the
+--     one-time tokens reference them.
+-- ---------------------------------------------------------------------
+
+-- 12a. One row per file you offer for download.
+--        access      0 = free (anyone), 1 = a valid game key is required.
+--        game        the key's game that unlocks it, or ALL for any key.
+--        protection  0 = plain, 1 = AES-256 encrypted at rest, 2 = password ZIP.
+--        token_ttl   minutes a handed-out link stays valid.
+--        single_use  1 = the link burns after one download.
+CREATE TABLE IF NOT EXISTS `download_files` (
+  `id_file`      INT AUTO_INCREMENT PRIMARY KEY,
+  `title`        VARCHAR(120) NOT NULL,
+  `slug`         VARCHAR(64)  NOT NULL,
+  `stored_name`  VARCHAR(96)  NOT NULL,
+  `orig_name`    VARCHAR(160) NOT NULL,
+  `size`         BIGINT       NOT NULL DEFAULT 0,
+  `mime`         VARCHAR(120) NULL,
+  `game`         VARCHAR(24)  NOT NULL DEFAULT 'ALL',
+  `access`       TINYINT      NOT NULL DEFAULT 1,
+  `protection`   TINYINT      NOT NULL DEFAULT 0,
+  `zip_password` VARCHAR(128) NULL,
+  `token_ttl`    INT          NOT NULL DEFAULT 60,
+  `single_use`   TINYINT      NOT NULL DEFAULT 1,
+  `status`       TINYINT      NOT NULL DEFAULT 1,
+  `downloads`    INT          NOT NULL DEFAULT 0,
+  `created_by`   VARCHAR(66)  NULL,
+  `created_at`   DATETIME NOT NULL,
+  `updated_at`   DATETIME NULL,
+  UNIQUE KEY `uq_slug` (`slug`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 12b. One-time download links. A token is 256 random bits, valid until it
+--      expires or (for a single-use file) is spent.
+CREATE TABLE IF NOT EXISTS `download_tokens` (
+  `id_token`   INT AUTO_INCREMENT PRIMARY KEY,
+  `token`      CHAR(64) NOT NULL,
+  `file_id`    INT NOT NULL,
+  `key_used`   VARCHAR(96) NULL,
+  `ip_hash`    VARCHAR(64) NULL,
+  `expires`    INT NOT NULL,
+  `used`       TINYINT NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL,
+  UNIQUE KEY `uq_token` (`token`),
+  KEY `idx_expires` (`expires`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 12c. Per-IP rate limit for the download API, so nobody can hammer it
+--      guessing which key works. Same shape as the connector's limiter.
+CREATE TABLE IF NOT EXISTS `download_ratelimit` (
+  `ip_hash`       VARCHAR(64) PRIMARY KEY,
+  `fails`         INT NOT NULL DEFAULT 0,
+  `window_end`    INT NOT NULL DEFAULT 0,
+  `blocked_until` INT NOT NULL DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
