@@ -1423,11 +1423,12 @@ tester can read is in `SECURITY.md`.
 ## Not done — needs a decision from you
 - **CSP.** Views contain inline `<script>`. Enabling CSP means adding a
   nonce to each block first, or the panel stops working.
-- **Legacy password hashes.** Rehash-on-login is already in place, but
-  idle accounts keep the old scheme. Find them with:
-
-      SELECT id_users, username FROM users WHERE password LIKE '$2y$08$%';
-
-  then force a reset on those, and delete `create_password()`.
+- **Legacy password hashes — now removed.** `create_password()` is gone;
+  Argon2id is the only password hasher, and the old md5-then-bcrypt login
+  bridge no longer exists. Because of that, an idle account still on the old
+  scheme can no longer log in. **Before you deploy, run the check in
+  SECURITY.md → "Removing the legacy password bridge"** and reset any account
+  it lists (a `tools/hash-pass.php` helper is included for that). Referral
+  codes are unaffected — they use a separate `code_digest()` and keep working.
 - **Connect.php** was empty in the archive. It is exempt from CSRF *and*
   auth, so it is the most exposed route in the app and still unreviewed.

@@ -11230,7 +11230,7 @@ diff -ruN /tmp/orig_app/Controllers/Account.php app/Controllers/Account.php
 +}
 diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
 --- /tmp/orig_app/Controllers/Auth.php	2026-08-24 23:02:52.529003646 +0000
-+++ app/Controllers/Auth.php	2026-08-28 09:51:10.185399704 +0000
++++ app/Controllers/Auth.php	2026-08-29 13:08:31.987428094 +0000
 @@ -71,6 +71,8 @@
          // 1) Already hard-blocked? show remaining time, no auth attempt.
          $remain = $this->rateRemaining($ipHash);
@@ -11240,7 +11240,33 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
              return redirect()->route('login')->with('msgDanger', $this->waitMessage($remain));
          }
  
-@@ -133,7 +135,25 @@
+@@ -93,17 +95,18 @@
+         $needsRehash  = false;
+ 
+         if ($cekUser) {
++            // Argon2id only. The legacy md5-then-bcrypt bridge for pre-upgrade
++            // accounts has been removed; every stored password is Argon2id, and
++            // the rehash below keeps parameters current if they ever change.
+             if (password_verify($password, $cekUser->password)) {
+                 $loginSuccess = true;
+-                if (password_needs_rehash($cekUser->password, PASSWORD_ARGON2ID)) {
++                if (password_needs_rehash($cekUser->password, PASSWORD_ARGON2ID, [
++                    'memory_cost' => 65536,
++                    'time_cost'   => 4,
++                    'threads'     => 2,
++                ])) {
+                     $needsRehash = true;
+                 }
+-            } else {
+-                $old_hash_check = create_password($password, false);
+-                if (password_verify($old_hash_check, $cekUser->password)) {
+-                    $loginSuccess = true;
+-                    $needsRehash  = true;
+-                }
+             }
+         } else {
+             // Timing-safe: run the KDF even when the username doesn't exist.
+@@ -133,7 +136,25 @@
                  'time_login' => $stay_log ? $time::now()->addHours(24) : $time::now()->addMinutes(30),
                  'time_since' => $time::now(),
              ]);
@@ -11267,7 +11293,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          }
  
          // Wrong credentials -> count the failed attempt.
-@@ -143,10 +163,31 @@
+@@ -143,10 +164,31 @@
      private function loginFail(string $ipHash)
      {
          $blk = $this->rateFail($ipHash, self::LOGIN_LIMIT, self::LOGIN_WINDOW, self::LOGIN_BLOCK);
@@ -11299,7 +11325,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      public function register_action()
      {
          $ipHash = md5('register_' . $this->clientIp());
-@@ -189,20 +230,71 @@
+@@ -189,20 +231,71 @@
              'saldo'    => $rCheck->set_saldo ?: 0,
              'uplink'   => $rCheck->created_by,
              'status'   => 1,
@@ -11376,7 +11402,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          $msg = $blk > 0 ? $this->waitMessage($blk) : $reason;
          return redirect()->back()->withInput()->with('msgDanger', $msg);
      }
-@@ -210,9 +302,17 @@
+@@ -210,9 +303,17 @@
      public function logout()
      {
          if (session()->has('userid')) {
@@ -11395,7 +11421,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          }
          return redirect()->to('login');
      }
-@@ -241,6 +341,7 @@
+@@ -241,6 +342,7 @@
                  return (int) $row['blocked_until'] - $now;
              }
          } catch (\Throwable $e) {
@@ -11403,7 +11429,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
          }
          return 0;
      }
-@@ -279,6 +380,7 @@
+@@ -279,6 +381,7 @@
              }
              return $remaining;
          } catch (\Throwable $e) {
@@ -11411,7 +11437,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
              return 0;
          }
      }
-@@ -289,9 +391,27 @@
+@@ -289,9 +392,27 @@
          try {
              db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete();
          } catch (\Throwable $e) {
@@ -11439,7 +11465,7 @@ diff -ruN /tmp/orig_app/Controllers/Auth.php app/Controllers/Auth.php
      /** Human-friendly "try again in X" message. */
      private function waitMessage(int $seconds): string
      {
-@@ -311,9 +431,4 @@
+@@ -311,9 +432,4 @@
      /**
       * Real client IP (Cloudflare header first — the site is behind Cloudflare).
       */
@@ -13896,7 +13922,7 @@ diff -ruN /tmp/orig_app/Controllers/Security.php app/Controllers/Security.php
 +}
 diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
 --- /tmp/orig_app/Controllers/User.php	2026-08-24 23:02:52.530998392 +0000
-+++ app/Controllers/User.php	2026-08-28 10:00:33.446816346 +0000
++++ app/Controllers/User.php	2026-08-29 13:08:58.903427478 +0000
 @@ -2,42 +2,45 @@
  
  namespace App\Controllers;
@@ -13960,6 +13986,15 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          ];
          return view('User/dashboard', $data);
      }
+@@ -81,7 +84,7 @@
+             return redirect()->back()->withInput()->with('msgDanger', 'Failed, check the form');
+         } else {
+             $code = random_string('alnum', 6);
+-            $codeHash = create_password($code, false);
++            $codeHash = code_digest($code);
+             $referral_code = [
+                 'code' => $codeHash,
+                 'set_saldo' => ($saldo < 1 ? 0 : $saldo),
 @@ -98,9 +101,25 @@
  
      public function api_get_users()
@@ -14086,7 +14121,7 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          }
      }
      
-@@ -237,26 +310,161 @@
+@@ -237,26 +310,159 @@
  
          $user = $this->user;
          $validation = Services::validation();
@@ -14240,30 +14275,26 @@ diff -ruN /tmp/orig_app/Controllers/User.php app/Controllers/User.php
          $validation = Services::validation();
  
 -        if (!password_verify($currHash, $user->password)) {
-+        // Verify against BOTH schemes. The old code only built the legacy
-+        // md5(pepper.plain) and compared that, which can never match an
-+        // Argon2id hash of the plaintext - so every account upgraded at
-+        // login was permanently unable to change its password.
-+        $currentOk = password_verify($current, $user->password)
-+                  || password_verify(create_password($current, false), $user->password);
++        // Argon2id only, matching login. The legacy md5-then-bcrypt scheme has
++        // been removed everywhere, so the current password is verified the one
++        // modern way.
++        $currentOk = password_verify($current, $user->password);
 +
 +        if (! $currentOk) {
              $msg = "Wrong current password.";
              $validation->setError('current', $msg);
          } elseif ($current == $password) {
-@@ -285,7 +493,10 @@
+@@ -285,7 +491,8 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Something wrong! Please check the form');
          } else {
 -            $newPassword = create_password($password);
-+            // create_passwordV2 = Argon2id. The old call used create_password,
-+            // which is the legacy md5-then-bcrypt-cost-8 scheme, so changing
-+            // your password silently downgraded it and undid the migration.
++            // Argon2id, the only password hasher in the panel.
 +            $newPassword = create_passwordV2($password);
              $this->model->update(session('userid'), ['password' => $newPassword]);
              return redirect()->back()->with('msgSuccess', 'Password Successfuly Changed.');
          }
-@@ -315,7 +526,7 @@
+@@ -315,7 +522,7 @@
          if (!$this->validate($form_rules)) {
              return redirect()->back()->withInput()->with('msgDanger', 'Failed! Please check the form');
          } else {
@@ -14469,8 +14500,8 @@ diff -ruN /tmp/orig_app/Filters/AuthFilter.php app/Filters/AuthFilter.php
 +}
 diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 --- /tmp/orig_app/Helpers/nata_helper.php	2026-08-24 23:02:52.536343011 +0000
-+++ app/Helpers/nata_helper.php	2026-08-28 22:50:23.702374359 +0000
-@@ -1,97 +1,157 @@
++++ app/Helpers/nata_helper.php	2026-08-29 13:08:15.291428475 +0000
+@@ -1,97 +1,163 @@
 -<?php
 -
 -/**
@@ -14571,25 +14602,31 @@ diff -ruN /tmp/orig_app/Helpers/nata_helper.php app/Helpers/nata_helper.php
 +<?php
 +
 +/**
-+ * create_password
++ * code_digest
 + *
-+ * @param  mixed $password
-+ * @param  mixed $enc
++ * A keyed, deterministic digest for REFERRAL CODES only -- not passwords.
++ * Referral codes are looked up by their hash, so this has to be repeatable
++ * for the same input (unlike a password hash, which must be salted and
++ * one-way). The pepper and the md5 are kept exactly as before so codes
++ * already stored in the database still match.
++ *
++ * The old weak `create_password()` (md5-then-bcrypt-cost-8) that used to hash
++ * account passwords is gone: every password is created and changed with
++ * create_passwordV2() (Argon2id) below, which is the only password hasher.
++ *
++ * @param  string $code
 + * @return string
 + */
-+function create_password($password, $enc = true)
++function code_digest(string $code): string
 +{
-+    $optn = ['cost' => 8];
-+    $patt = "X███████████████";
-+    $hash = md5($patt . $password);
-+    $pass = password_hash($hash, PASSWORD_DEFAULT, $optn);
-+    return ($enc ? $pass : $hash);
++    $pepper = "X███████████████";
++    return md5($pepper . $code);
 +}
 +
-+function create_passwordV2(string $password): string 
++function create_passwordV2(string $password): string
 +{
 +    return password_hash($password, PASSWORD_ARGON2ID, [
-+        'memory_cost' => 65536, 
++        'memory_cost' => 65536,
 +        'time_cost'   => 4,
 +        'threads'     => 2
 +    ]);
@@ -14883,7 +14920,7 @@ diff -ruN /tmp/orig_app/Models/BalanceModel.php app/Models/BalanceModel.php
 +}
 diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
 --- /tmp/orig_app/Models/CodeModel.php	2026-08-24 23:02:52.605921932 +0000
-+++ app/Models/CodeModel.php	2026-08-26 13:35:23.632960449 +0000
++++ app/Models/CodeModel.php	2026-08-29 13:08:23.599428285 +0000
 @@ -18,14 +18,46 @@
          return $this->get()->getResultObject();
      }
@@ -14907,13 +14944,13 @@ diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
 -            if ($ok) return true;
 +        if (! $username) {
 +            return false;
-+        }
+         }
+-        return false;
 +
 +        $row = $this->checkCode($code);
 +        if (! $row) {
 +            return false;
-         }
--        return false;
++        }
 +
 +        // Claim the row and check it was this call that claimed it. Two
 +        // registrations racing for the same code both reach here; only the
@@ -14936,6 +14973,15 @@ diff -ruN /tmp/orig_app/Models/CodeModel.php app/Models/CodeModel.php
      }
  
      /**
+@@ -37,7 +69,7 @@
+      */
+     public function checkCode($code, $dehash = true)
+     {
+-        $code = $dehash ? create_password($code, false) : $code;
++        $code = $dehash ? code_digest($code) : $code;
+         return $this->getWhere(['code' => $code])
+             ->getRowObject();
+     }
 diff -ruN /tmp/orig_app/Models/DeletedKeyModel.php app/Models/DeletedKeyModel.php
 --- /tmp/orig_app/Models/DeletedKeyModel.php	1970-01-01 00:00:00.000000000 +0000
 +++ app/Models/DeletedKeyModel.php	2026-08-26 19:48:04.882188064 +0000

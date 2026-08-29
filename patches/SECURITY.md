@@ -15,9 +15,38 @@ copy.
 - **Session theft**: a session is bound to the browser's user-agent
   fingerprint; a stolen cookie replayed from another browser is rejected and
   the session is destroyed.
-- **Passwords** are Argon2id (64 MB, time cost 4). Any legacy hash is
-  re-hashed to Argon2id on the next correct login.
+- **Passwords** are Argon2id (64 MB, time cost 4) — the only hasher in the
+  panel. The old `create_password()` (md5-then-bcrypt-cost-8) is gone: it is
+  not used to create, change, or verify any password. Registration, password
+  change, and login all go through Argon2id, and a still-current Argon2id hash
+  is re-hashed only if the parameters change.
+  **Before deploying this build, run the check under "Removing the legacy
+  password bridge" below** — with the bridge gone, any account not already on
+  Argon2id can no longer log in.
 - Cookies are `Secure`, `HttpOnly`, `SameSite=Lax`.
+
+## Removing the legacy password bridge (do this before deploy)
+
+Older accounts were stored as `bcrypt(md5(pepper + password))`. Until now,
+login verified those the old way and upgraded them to Argon2id on the spot.
+That bridge has been removed, so **an account still on the old scheme cannot
+log in after this update**. Almost always every active account has already
+been upgraded (anyone who logged in since Argon2id was added is Argon2id), but
+check first:
+
+```sql
+-- Accounts that will be locked out (anything not Argon2id):
+SELECT id_users, username FROM users WHERE password NOT LIKE '$argon2id$%';
+```
+
+- **No rows** → nothing to do, deploy freely.
+- **Some rows** → those users need a password reset by you. Upload
+  `tools/hash-pass.php` once, open it, type a temporary password to get an
+  Argon2id hash, set it with
+  `UPDATE users SET password='<hash>' WHERE username='<name>';`, hand the user
+  the temporary password, and delete `tools/hash-pass.php`. (Referral codes are
+  unaffected — they never used passwords; they are hashed with a separate
+  `code_digest()` and keep working unchanged.)
 
 ## Registration
 - **No privilege escalation by mass assignment**: `level`, `saldo` and
