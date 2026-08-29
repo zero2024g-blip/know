@@ -1318,6 +1318,52 @@ that game showed the affordance. The connector still needs the one-line
 `max > 0` guard (CONNECTOR-PROTOCOL.md) for an unlimited key to actually
 accept devices.
 
+On the **Edit key** page an unlimited key (max devices 0) now shows the
+device badge as **`used/∞`** instead of `used/0`, and the badge switches to
+`∞` live if you type 0 in the Max Devices box — so an unlimited key reads as
+unlimited, not as zero.
+
+## Per-game quantity limits, and where the real limits live
+
+Two new columns, `games.max_qty` and `games.qty_mode`, set from **Admin →
+Games** in the same modal as the device controls and working exactly the same
+way:
+  - **Max quantity (sellers)** — the most keys a seller may make in one
+    Generate, 1 to 100. **0 = no limit** (the system ceiling of 100). You are
+    never bound by it; only sellers.
+  - **Who can set the quantity** — Everyone / Admins only / Off. *Admins only*
+    hides the Quantity field from sellers (their request makes one key) but
+    leaves it open for you; *Off* hides it from everyone (one key per request).
+
+Defaults (0 / everyone) keep today's behaviour: a seller can still make
+several keys at once, now under a firm ceiling. Add the two columns from
+`MIGRATION.sql` (section 10a-2); skip them if you don't want quantity limits
+yet — the code treats a missing value as the sane default.
+
+**These are real limits, not page dressing — this was the point of the
+round.** Every restriction is enforced in PHP on submit, reading the rules
+from the database and never trusting what the form sent, so editing the HTML
+(widening a field, un-hiding it, changing a number) changes nothing that is
+charged or created. Proven with live tests that bypassed the browser and
+posted tampered values directly:
+
+  - Seller forced quantity 6 on a game capped at 5 → refused, 0 keys, $0.
+  - Seller forced quantity 10 on an *admins-only* game → server made 1 key.
+  - Admin quantity 20 (over a seller cap of 5) → allowed (admin bypass);
+    admin quantity 200 (over the 100 ceiling) → refused.
+  - Seller forced 50 devices over a cap of 10, and 0 on an unlimited-off game
+    → both refused.
+  - **Estimation is display only.** A seller edited the estimate box to
+    `$0.00` on a $12 key and submitted; the server ignored it and charged the
+    real $12. The price is computed server-side from the tier and device rules
+    and debited atomically — the number shown in the box is never sent or
+    trusted, so it cannot be used to buy a key for less.
+
+Key generation is therefore fully yours to shape per game: which durations
+sell, the device cap and price, whether unlimited is allowed, how many keys a
+seller may make at once, and who — admin or seller — may set each. A seller
+gets exactly what you allow and cannot reach past it with browser tools.
+
 ## Auth hardening and a security review (for your tester)
 
 Reviewed login and registration end to end and hardened one thing:

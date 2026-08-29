@@ -387,6 +387,24 @@ ALTER TABLE `games`
   ADD COLUMN `device_price`    DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER `allow_unlimited`,
   ADD COLUMN `device_mode`     TINYINT       NOT NULL DEFAULT 2    AFTER `device_price`;
 
+-- 10a-2. Quantity controls per game, same shape and roles as the device
+--        controls, also set from Admin -> Games:
+--        max_qty   the most keys a SELLER may make in one Generate request: a
+--                  1..100 number, or 0 = no admin cap (the system ceiling of
+--                  100). An admin is never bound by it (only the 100 ceiling).
+--        qty_mode  who may set the quantity:
+--                    2 = everyone (admin + seller, seller capped)
+--                    1 = admins only (a seller's request makes 1 key)
+--                    0 = off (every request makes 1 key)
+--        Defaults (0 / everyone) keep the current behaviour: a seller may make
+--        several keys at once, now bounded by a firm server-side ceiling.
+--        This is enforced in PHP on submit, never trusting the form, so it
+--        cannot be bypassed by editing the page. Safe to skip these two
+--        columns if you do not want per-game quantity limits yet.
+ALTER TABLE `games`
+  ADD COLUMN `max_qty`  INT     NOT NULL DEFAULT 0 AFTER `device_mode`,
+  ADD COLUMN `qty_mode` TINYINT NOT NULL DEFAULT 2 AFTER `max_qty`;
+
 -- 10b. Own a key by the seller's immutable id, not their username.
 --      A username can be deleted and registered again by someone else; the
 --      id never is. Without this, a re-registered "AliAli" inherits every key
