@@ -517,6 +517,13 @@ CREATE TABLE IF NOT EXISTS `download_files` (
   UNIQUE KEY `uq_slug` (`slug`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 12a-2. Delivery + listing controls (added later; safe if already present).
+--        delivery  0 = browser link, 1 = API only, 2 = both.
+--        listed    1 = shown on the /download page (a key file appears after
+--                  the key), 0 = unlisted (reachable only by its direct link).
+ALTER TABLE `download_files` ADD COLUMN IF NOT EXISTS `delivery` TINYINT NOT NULL DEFAULT 0 AFTER `access`;
+ALTER TABLE `download_files` ADD COLUMN IF NOT EXISTS `listed`   TINYINT NOT NULL DEFAULT 1 AFTER `delivery`;
+
 -- 12b. One-time download links. A token is 256 random bits, valid until it
 --      expires or (for a single-use file) is spent.
 CREATE TABLE IF NOT EXISTS `download_tokens` (
