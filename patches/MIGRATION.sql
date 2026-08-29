@@ -381,11 +381,13 @@ VALUES ('connector.maintenance', '0', NOW(), NOW());
 --                          1 = admins only (a seller's key is 1 device)
 --                          0 = off (every key is 1 device)
 --      Defaults keep new games to one device, unlimited off, until you change it.
-ALTER TABLE `games`
-  ADD COLUMN `max_devices`     INT           NOT NULL DEFAULT 1    AFTER `name`,
-  ADD COLUMN `allow_unlimited` TINYINT       NOT NULL DEFAULT 0    AFTER `max_devices`,
-  ADD COLUMN `device_price`    DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER `allow_unlimited`,
-  ADD COLUMN `device_mode`     TINYINT       NOT NULL DEFAULT 2    AFTER `device_price`;
+-- Each column is added only if missing (MariaDB), and each is its own
+-- statement, so a column that already exists never blocks the others and the
+-- whole file can be re-imported safely (no "#1060 Duplicate column" halt).
+ALTER TABLE `games` ADD COLUMN IF NOT EXISTS `max_devices`     INT           NOT NULL DEFAULT 1    AFTER `name`;
+ALTER TABLE `games` ADD COLUMN IF NOT EXISTS `allow_unlimited` TINYINT       NOT NULL DEFAULT 0    AFTER `max_devices`;
+ALTER TABLE `games` ADD COLUMN IF NOT EXISTS `device_price`    DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER `allow_unlimited`;
+ALTER TABLE `games` ADD COLUMN IF NOT EXISTS `device_mode`     TINYINT       NOT NULL DEFAULT 2    AFTER `device_price`;
 
 -- 10a-2. Quantity controls per game, same shape and roles as the device
 --        controls, also set from Admin -> Games:
@@ -401,9 +403,8 @@ ALTER TABLE `games`
 --        This is enforced in PHP on submit, never trusting the form, so it
 --        cannot be bypassed by editing the page. Safe to skip these two
 --        columns if you do not want per-game quantity limits yet.
-ALTER TABLE `games`
-  ADD COLUMN `max_qty`  INT     NOT NULL DEFAULT 0 AFTER `device_mode`,
-  ADD COLUMN `qty_mode` TINYINT NOT NULL DEFAULT 2 AFTER `max_qty`;
+ALTER TABLE `games` ADD COLUMN IF NOT EXISTS `max_qty`  INT     NOT NULL DEFAULT 0 AFTER `device_mode`;
+ALTER TABLE `games` ADD COLUMN IF NOT EXISTS `qty_mode` TINYINT NOT NULL DEFAULT 2 AFTER `max_qty`;
 
 -- 10a-3. A per-key "may be unlimited" right.
 --        Max Devices is editable on the Edit key page (admin only). Setting it
@@ -415,8 +416,7 @@ ALTER TABLE `games`
 --        is set to 1 when a key is created unlimited (or later set unlimited
 --        while the switch was on) and is never cleared. A key that was never
 --        unlimited keeps 0 and still cannot be set to 0 on a switched-off game.
-ALTER TABLE `keys_code`
-  ADD COLUMN `unlimited_ok` TINYINT NOT NULL DEFAULT 0 AFTER `max_devices`;
+ALTER TABLE `keys_code` ADD COLUMN IF NOT EXISTS `unlimited_ok` TINYINT NOT NULL DEFAULT 0 AFTER `max_devices`;
 
 -- Backfill: every key that is currently unlimited keeps the right to be
 -- unlimited. Safe -- it only grants the round-trip to keys that already are 0.
@@ -426,10 +426,8 @@ UPDATE `keys_code` SET `unlimited_ok` = 1 WHERE `max_devices` <= 0;
 --      A username can be deleted and registered again by someone else; the
 --      id never is. Without this, a re-registered "AliAli" inherits every key
 --      the previous "AliAli" made.
-ALTER TABLE `keys_code`
-  ADD COLUMN `registrator_id` INT NULL AFTER `registrator`;
-ALTER TABLE `keys_code`
-  ADD INDEX `idx_reg_id` (`registrator_id`);
+ALTER TABLE `keys_code` ADD COLUMN IF NOT EXISTS `registrator_id` INT NULL AFTER `registrator`;
+ALTER TABLE `keys_code` ADD INDEX  IF NOT EXISTS `idx_reg_id` (`registrator_id`);
 
 -- Backfill: give every existing key to the CURRENT holder of its username.
 -- Safe — no seller loses sight of a key they own.
@@ -462,8 +460,7 @@ UPDATE `keys_code` k
 -- 11a. The readable address on each sign-in, for the list in Your settings.
 --      The existing ip_hash still does the rate-limit matching; this is only
 --      for display, behind the Hide/Show toggle.
-ALTER TABLE `login_sessions`
-  ADD COLUMN `ip_address` VARCHAR(45) NULL AFTER `ip_hash`;
+ALTER TABLE `login_sessions` ADD COLUMN IF NOT EXISTS `ip_address` VARCHAR(45) NULL AFTER `ip_hash`;
 
 -- 11b. Failed and blocked attempts at login, register and key check, shown in
 --      Admin -> Security log. Written fail-open, so a failure to log never
