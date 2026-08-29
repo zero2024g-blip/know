@@ -124,6 +124,19 @@
                می‌شود و ورود، تو را به «localhost refused to connect» می‌برد.</p>',
     ][$problem];
 
+    // Show only a web-root-relative hint, never the absolute server path. The
+    // full path ("/home/u450370133/domains/.../public_html/eagle_panel/.env")
+    // leaks the hosting account id and the server layout to anyone who trips
+    // this page. Keep just the part from the web root down, which is all the
+    // reader needs to find the file.
+    $shown = str_replace('\\', '/', $env);
+    if (preg_match('#(?:^|/)(?:public_html|htdocs|httpdocs|wwwroot|www)/(.+)$#i', $shown, $m)) {
+        $shown = $m[1];                        // e.g. "eagle_panel/.env"
+    } else {
+        $parts = array_values(array_filter(explode('/', $shown), 'strlen'));
+        $shown = implode('/', array_slice($parts, -2));   // last two segments
+    }
+
     header('HTTP/1.1 503 Service Unavailable', true, 503);
     header('Content-Type: text/html; charset=UTF-8');
     header('Cache-Control: no-store');
@@ -149,8 +162,8 @@
        , '<h1>', $title, '</h1>'
        , '<p class="sub">پنل تا وقتی این درست نشود بالا نمی‌آید.</p>'
        , $body
-       , '<div class="path">مسیری که پنل دنبال فایل می‌گردد:<br><code>'
-       , htmlspecialchars($env, ENT_QUOTES, 'UTF-8')
+       , '<div class="path">فایل باید اینجا باشد:<br><code>'
+       , htmlspecialchars($shown, ENT_QUOTES, 'UTF-8')
        , '</code></div>'
        , '</div></body></html>';
 
