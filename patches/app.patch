@@ -20482,8 +20482,8 @@ diff -ruN /tmp/orig_app/Views/User/account.php app/Views/User/account.php
 +<?= $this->endSection() ?>
 diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 --- /tmp/orig_app/Views/User/dashboard.php	2026-08-24 23:02:52.619981516 +0000
-+++ app/Views/User/dashboard.php	2026-08-27 00:20:11.443282797 +0000
-@@ -2,145 +2,208 @@
++++ app/Views/User/dashboard.php	2026-08-29 21:18:06.793179669 +0000
+@@ -2,145 +2,216 @@
  
  <?= $this->section('content') ?>
  
@@ -20617,6 +20617,9 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +                                <div class="rh-sub">
 +                                    <?= esc($in[0]) ?> &middot; <?= esc($in[2]) ?> hours &middot;
 +                                    <?= esc($in[3]) ?> device<?= ((int) $in[3] === 1) ? '' : 's' ?>
++                                    <?php if (! empty($h->created_at)) : ?>
++                                        &middot; <span class="rh-when"><?= esc($time::parse($h->created_at)->humanize()) ?></span>
++                                    <?php endif; ?>
                                  </div>
                              </div>
 -                        <?php endforeach; ?>
@@ -20627,7 +20630,7 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 -            </div>
 -        </div>
 +                            <div class="rh-right">
-+                                <span class="rh-time"><?= $time::parse($h->created_at)->humanize() ?></span>
++                                <span class="rh-time"><?= ! empty($h->created_at) ? esc($time::parse($h->created_at)->humanize()) : '' ?></span>
 +                            </div>
 +                        </div>
 +                    <?php endforeach; ?>
@@ -20800,6 +20803,10 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +    .rh-sub { font-size: .76rem; color: var(--em-dim); margin-top: .25rem; }
 +    .rh-right { text-align: right; flex-shrink: 0; }
 +    .rh-time { font-size: .76rem; color: var(--em-dim); white-space: nowrap; }
++    /* On wide screens the time sits in its own right-hand column, so the copy
++       repeated inline is hidden. On mobile the right column is dropped (below)
++       and the inline copy takes over, so "created X ago" is never lost. */
++    .rh-when { display: none; }
 +
 +    /* .em-kv and .em-pill.is-accent now live in ember.css: the account page
 +       uses them too, and a page-local rule only styles the page it sits in. */
@@ -20810,6 +20817,7 @@ diff -ruN /tmp/orig_app/Views/User/dashboard.php app/Views/User/dashboard.php
 +    @media (max-width: 640px) {
 +        .rh-row { padding: .8rem .9rem; }
 +        .rh-right { display: none; }
++        .rh-when { display: inline; }   /* time moves inline on mobile */
 +        .em-kv { padding: .7rem .9rem; }
      }
  </style>
