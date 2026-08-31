@@ -1,0 +1,525 @@
+<?php
+
+namespace App\Controllers;
+
+use App\Models\KeysModel;
+use CodeIgniter\I18n\Time;
+
+/**
+ * ============================================================================
+ *  CONNECTOR v2  (app/Controllers/ConnectV2.php)
+ * ============================================================================
+ *  A SECOND connector that runs ALONGSIDE the original Connect.php, on its own
+ *  route (default: /connect_v2, see app/Config/Routes.php). The old connector
+ *  keeps working untouched, so you can ship a new client and migrate at your
+ *  own pace — old apps stay on Connect, new apps talk to this one.
+ *
+ *  What is DIFFERENT from v1, and why:
+ *   - Crypto namespace is "EG2" (v1 is "EG1"). A message built for one version
+ *     will not open on the other, so a captured v1 request can never be
+ *     replayed at v2, and the two protocols can diverge later independently.
+ *   - User-Agent gate is "EagleA/2.0" (v1 is "EagleA/1.2").
+ *   - Its own key:  connect.aesKeyV2 in .env. If that is not set it FALLS BACK
+ *     to connect.aesKey, so v2 works immediately with your existing key and you
+ *     can give it a separate key later without touching v1.
+ *
+ *  Everything else is identical to v1 and shares the SAME database: the same
+ *  keys_code rows, the same per-IP rate-limit table, the same atomic device
+ *  claim, the same "unlimited when max_devices <= 0" rule. No schema change.
+ *
+ *  Fill in the SAME five things you filled in for Connect.php (staticWords,
+ *  Public_Key, setAccess, the per-game version strings) plus, optionally, a
+ *  separate .env key:
+ *
+ *   1) .env  ->  connect.aesKeyV2 = <64 hex chars>   (optional; falls back to
+ *                connect.aesKey when absent)
+ *   2) $this->staticWords   — your token salt word (must match the C++ client)
+ *   3) $this->Public_Key    — the public key the client sends
+ *   4) $this->setAccess     — the access token the client checks
+ *   5) the per-game version strings — the exact build strings the client reports
+ * ============================================================================
+ */
+class ConnectV2 extends BaseController
+{
+    protected $model, $game, $aVer, $uKey, $sDev, $PublicKey;
+    protected $staticWords, $Public_Key, $setAccess;
+    protected $aes_key;
+
+    protected $maintenance;
+    /** The client's nonce for this request, echoed back in the reply. */
+    private $reply_nonce = null;
+    protected $codm_version, $pubgm_version, $ffm_version, $dfm_version, $mlbb_version, $spof_version;
+
+    /** The exact User-Agent a v2 client must send. */
+    private const CLIENT_UA = 'EagleA/2.0';
+
+    /** Failed attempts allowed from one IP before it is shut out, and for how long. */
+    private const RL_TABLE  = 'connect_ratelimit';   // shared with v1 on purpose
+    private const RL_LIMIT  = 20;    // failures...
+    private const RL_WINDOW = 300;   // ...within 5 minutes
+    private const RL_BLOCK  = 900;   // then blocked for 15
+
+    public function __construct()
+    {
+        // v2 key first, then fall back to the shared v1 key so this works the
+        // moment you drop the file in, with nothing new to configure.
+        $hexKey = (string) (env('connect.aesKeyV2') ?: env('connect.aesKey') ?: '');
+        if (strlen($hexKey) !== 64 || ! ctype_xdigit($hexKey)) {
+            log_message('critical', 'connect.aesKeyV2 (and fallback connect.aesKey) missing or malformed in .env — connector v2 is disabled.');
+            $this->aes_key = null;
+            return;
+        }
+        $this->aes_key = hex2bin($hexKey);
+
+        // panel
+        $this->model = new KeysModel();
+        $this->maintenance = \App\Models\SettingModel::maintenance();
+
+        // keys  (must match the C++ client)
+        $this->staticWords = "YOUR_STATIC_WORDS";
+        $this->Public_Key = "YOUR_PUBLIC_KEY";
+        $this->setAccess = "YOUR_ACCESS_TOKEN";
+
+        // versions
+        $this->codm_version = "X.Y.Z:YOURBUILDID"; //Codm
+        $this->pubgm_version = "X.Y.Z:YOURBUILDID"; //Pubgm
+        $this->ffm_version = "X.Y.Z:YOURBUILDID"; //FF
+        $this->dfm_version = "X.Y.Z:YOURBUILDID"; //DFM
+        $this->mlbb_version = "0.0.1:YOURBUILDID";
+        $this->spof_version = "X.Y.Z:YOURBUILDID"; //Spoofer
+    }
+
+    public function index()
+    {
+        if ($this->request->getPost()) {
+            $u_a = $_SERVER['HTTP_USER_AGENT'] ?? 'None';
+            if ($u_a !== self::CLIENT_UA) {
+                return redirect()->to('/');
+            }
+            return $this->index_post();
+        }
+        return redirect()->to('/');
+    }
+
+    public function index_post()
+    {
+        $ipHash = md5('connect_' . $this->clientIp());
+
+        $blocked = $this->rlRemaining($ipHash);
+        if ($blocked > 0) {
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
+        }
+
+        if ($this->aes_key === null) {
+            return $this->response->setStatusCode(503)->setBody('');
+        }
+
+        $raw_data = $this->request->getPost('data');
+        if (!$raw_data) {
+            return $this->response->setJSON(['status' => -1, 'error' => 'No data received.']);
+        }
+
+        $aes_params = $this->aes_decrypt($raw_data);
+        if (!$aes_params) {
+            return $this->aes_encrypt(["status" => -1, "reason" => "Decryption failed."]);
+        }
+
+        $this->request->setGlobal('post', $aes_params);
+        $game = $aes_params['game'] ?? null;
+        $aVer = $aes_params['app_ver'] ?? null;
+        $uKey = $aes_params['user_key'] ?? null;
+        $sDev = $aes_params['serial'] ?? null;
+        $PublicKey = $aes_params['public'] ?? null;
+
+        $isMT = $this->maintenance;
+        $data = [];
+
+        $validation = \Config\Services::validation();
+        $rules = [
+            'game'     => 'required|min_length[2]',
+            'app_ver'  => 'required',
+            'user_key' => 'required',
+            'serial'   => 'required',
+            'public'   => 'required'
+        ];
+        $validation->setRules($rules);
+
+        if (!$validation->run($aes_params)) {
+            $data = ['status' => -1, 'reason' => "Invalid Parameter."]; #E-1
+            $this->rlFail($ipHash);
+            return $this->aes_encrypt($data);
+        }
+
+        // A serial that contains a comma would split the stored device list and
+        // let one device eat a whole key's slots. Real serials never contain a
+        // comma. Same generic answer, counted against the rate limit.
+        if (strpos((string) $sDev, ',') !== false) {
+            $this->rlFail($ipHash);
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
+        }
+
+        if ($isMT) {
+            $data = ['status' => -1, 'reason' => \App\Models\SettingModel::maintenanceMessage()]; #E-2
+            return $this->aes_encrypt($data);
+        }
+
+        if (! is_string($PublicKey) || ! hash_equals($this->Public_Key, $PublicKey)) {
+            $data = ['status' => -1, 'reason' => "Invalid Public Key."]; #E-5
+            return $this->aes_encrypt($data);
+        }
+
+        if (!$game or !$aVer or !$uKey or !$sDev or !$PublicKey) {
+            $data = ['status' => -1, 'reason' => "Invalid Input."]; #E-3
+        }
+        else {
+            $time = new \CodeIgniter\I18n\Time;
+            $model = $this->model;
+            $findKey = $model->getKeysGame(['user_key' => $uKey, 'game' => $game]);
+
+            if ($findKey) {
+                if ($findKey->status != 1) {
+                    $data = ['status' => -1, 'reason' => "License/Key is Blocked."]; #E-6
+                }
+                else {
+                    $id_keys  = $findKey->id_keys;
+                    $duration = $findKey->duration;
+                    $expired  = $findKey->expired_date;
+                    $max_dev  = $findKey->max_devices;
+
+                    $checkUP = $this->isUpdate($aVer, $game);
+                    if (!$checkUP) {
+                        if (empty($expired)) {
+                            $hours = (int) $duration;
+                            if ($hours < 1) {
+                                return $this->aes_encrypt([
+                                    'status' => -1,
+                                    'reason' => 'License/Key is Not Registered.',
+                                ]);
+                            }
+                            $setExpired = $time::now()->addHours($hours);
+                            $model->update($id_keys, ['expired_date' => $setExpired->toDateTimeString()]);
+                            $data['expired_check'] = false;
+                        }
+                        else {
+                            $data['expired_check'] = $time::now()->isAfter($expired);
+                        }
+
+                        if (!$data['expired_check']) {
+                            $devicesAdd = $this->claimDeviceSlot($id_keys, $sDev, $max_dev);
+
+                            if ($devicesAdd) {
+                                $salt = bin2hex(random_bytes(8));
+                                $real = "$sDev-$game-$uKey-$this->staticWords-$salt";
+                                $gameINFO = [];
+
+                                if ($game == 'CODM')       { $gameINFO = ['t_time' => 110]; }
+                                else if ($game == 'PUBGM') { $gameINFO = ['t_time' => 120]; }
+                                else if ($game == 'FF')    { $gameINFO = ['t_time' => 130]; }
+                                else if ($game == 'DFM')   { $gameINFO = ['t_time' => 140]; }
+
+                                $data = [
+                                    'status' => 1,
+                                    'data' => [
+                                        'id_key'  => $findKey->id_keys,
+                                        'token'   => hash('sha256', $real),
+                                        'salt'    => $salt,
+                                        'rng'     => $time->getTimestamp(),
+                                        'expired' => empty($expired) ? $setExpired->toDateTimeString() : $expired,
+                                        'access'  => $this->setAccess,
+                                    ],
+                                    'game' => $gameINFO
+                                ];
+                            }
+                            else {
+                                $data = ['status' => -1, 'reason' => "Max Devices Reached."]; #E-7
+                            }
+                        }
+                        else {
+                            $data = ['status' => -1, 'reason' => "License/Key is Expired."]; #E-8
+                        }
+                    }
+                    else {
+                        $data = ['status' => -1, 'reason' => "Please Update Your App."]; #E-9
+                    }
+                }
+            }
+            else {
+                $data = ['status' => -1, 'reason' => "License/Key is Not Registered."]; #E-10
+            }
+        }
+
+        if (($data['status'] ?? -1) === 1) {
+            $this->rlClear($ipHash);
+        } else {
+            $this->rlFail($ipHash);
+        }
+
+        return $this->aes_encrypt($data);
+    }
+
+    // -----------------------------------------------------------------
+    //  Rate limit — shares v1's table so an attacker cannot dodge the
+    //  limit just by switching to the v2 endpoint.
+    // -----------------------------------------------------------------
+
+    private function rlRemaining(string $ipHash): int
+    {
+        try {
+            $db  = db_connect();
+            $now = time();
+
+            if (random_int(1, 20) === 1) {
+                $db->table(self::RL_TABLE)
+                   ->where('blocked_until <', $now)->where('window_end <', $now)->delete();
+            }
+
+            $row = $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->get()->getRowArray();
+            if ($row && (int) $row['blocked_until'] > $now) {
+                return (int) $row['blocked_until'] - $now;
+            }
+        } catch (\Throwable $e) {
+            log_message('critical', 'ConnectV2 rate limiter unavailable (' . self::RL_TABLE
+                . '): {msg}. Key enumeration protection is NOT active.', ['msg' => $e->getMessage()]);
+        }
+        return 0;
+    }
+
+    private function rlFail(string $ipHash): void
+    {
+        try {
+            $db  = db_connect();
+            $now = time();
+            $row = $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->get()->getRowArray();
+
+            $fails     = $row ? (int) $row['fails'] : 0;
+            $windowEnd = $row ? (int) $row['window_end'] : 0;
+
+            if ($windowEnd < $now) {
+                $fails     = 0;
+                $windowEnd = $now + self::RL_WINDOW;
+            }
+            $fails++;
+
+            $blockedUntil = 0;
+            if ($fails >= self::RL_LIMIT) {
+                $blockedUntil = $now + self::RL_BLOCK;
+                $fails        = 0;
+            }
+
+            $payload = ['fails' => $fails, 'window_end' => $windowEnd, 'blocked_until' => $blockedUntil];
+            if ($row) {
+                $db->table(self::RL_TABLE)->where('ip_hash', $ipHash)->update($payload);
+            } else {
+                $payload['ip_hash'] = $ipHash;
+                $db->table(self::RL_TABLE)->insert($payload);
+            }
+        } catch (\Throwable $e) {
+            log_message('critical', 'ConnectV2 rate limiter write failed: {msg}', ['msg' => $e->getMessage()]);
+        }
+    }
+
+    private function rlClear(string $ipHash): void
+    {
+        try {
+            db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete();
+        } catch (\Throwable $e) {
+        }
+    }
+
+    /**
+     * Take one device slot on this key, or refuse. The row is locked for the
+     * length of the transaction, so simultaneous requests serialise.
+     */
+    private function claimDeviceSlot(int $idKeys, string $serial, $maxDev): bool
+    {
+        $db = \Config\Database::connect();
+        $db->transBegin();
+
+        try {
+            $row = $db->query(
+                'SELECT devices, max_devices FROM keys_code WHERE id_keys = ? FOR UPDATE',
+                [$idKeys]
+            )->getRowObject();
+
+            if (! $row) {
+                $db->transRollback();
+                return false;
+            }
+
+            $max  = (int) ($row->max_devices ?? $maxDev);
+            $list = ($row->devices === null || $row->devices === '')
+                ? []
+                : explode(',', $row->devices);
+
+            if (in_array($serial, $list, true)) {
+                $db->transCommit();
+                return true;
+            }
+
+            // max_devices <= 0 means unlimited.
+            if ($max > 0 && count($list) >= $max) {
+                $db->transRollback();
+                return false;
+            }
+
+            $list[] = $serial;
+            $db->table('keys_code')
+               ->where('id_keys', $idKeys)
+               ->update(['devices' => implode(',', $list)]);
+
+            if ($db->transStatus() === false) {
+                throw new \RuntimeException('device slot update failed');
+            }
+            $db->transCommit();
+            return true;
+        } catch (\Throwable $e) {
+            $db->transRollback();
+            log_message('error', 'claimDeviceSlot (v2) failed: {msg}', ['msg' => $e->getMessage()]);
+            return false;
+        }
+    }
+
+    protected function isUpdate($my_version, $my_game)
+    {
+        $gameVersions = [
+            'CODM'    => $this->codm_version,
+            'PUBGM'   => $this->pubgm_version,
+            'FF'      => $this->ffm_version,
+            'FFM'     => $this->ffm_version,
+            'MLBB'    => $this->mlbb_version,
+            'DFM'     => $this->dfm_version,
+            'SPOOFER' => $this->spof_version,
+        ];
+
+        if (isset($gameVersions[$my_game])) {
+            return (! hash_equals(md5($gameVersions['SPOOFER']), (string) $my_version)
+                 && ! hash_equals(md5($gameVersions[$my_game]),  (string) $my_version));
+        }
+
+        log_message('warning', 'ConnectV2: no version configured for game "{g}" — its keys cannot connect.', ['g' => $my_game]);
+        return true;
+    }
+
+    // -----------------------------------------------------------------
+    //  Transport crypto — AES-256-GCM, namespace "EG2".
+    //
+    //  Wire format, one line of ASCII:
+    //      EG2.<base64url nonce>.<base64url ciphertext||tag>
+    //
+    //  A fresh 12-byte nonce per message; a 16-byte GCM tag over the
+    //  ciphertext with "EG2" bound as additional authenticated data, so a
+    //  tampered or cross-version message fails to open instead of decrypting.
+    // -----------------------------------------------------------------
+
+    private const CRYPTO_VERSION = 'EG2';
+    private const CRYPTO_CIPHER  = 'aes-256-gcm';
+    private const NONCE_BYTES    = 12;
+    private const TAG_BYTES      = 16;
+    private const MAX_SKEW       = 300;
+
+    private function b64u_encode(string $bin): string
+    {
+        return rtrim(strtr(base64_encode($bin), '+/', '-_'), '=');
+    }
+
+    private function b64u_decode(string $txt): string|false
+    {
+        return base64_decode(strtr($txt, '-_', '+/'), true);
+    }
+
+    private function aes_decrypt($envelope)
+    {
+        if (! is_string($envelope)) {
+            return null;
+        }
+
+        $parts = explode('.', trim($envelope));
+        if (count($parts) !== 3 || $parts[0] !== self::CRYPTO_VERSION) {
+            return null;
+        }
+
+        $nonce = $this->b64u_decode($parts[1]);
+        $blob  = $this->b64u_decode($parts[2]);
+
+        if ($nonce === false || $blob === false
+            || strlen($nonce) !== self::NONCE_BYTES
+            || strlen($blob) <= self::TAG_BYTES) {
+            return null;
+        }
+
+        $tag        = substr($blob, -self::TAG_BYTES);
+        $ciphertext = substr($blob, 0, -self::TAG_BYTES);
+
+        $plain = openssl_decrypt(
+            $ciphertext,
+            self::CRYPTO_CIPHER,
+            $this->aes_key,
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag,
+            self::CRYPTO_VERSION
+        );
+
+        if ($plain === false) {
+            return null;
+        }
+
+        $params = json_decode($plain, true);
+        if (json_last_error() !== JSON_ERROR_NONE || ! is_array($params)) {
+            return null;
+        }
+
+        $ts = (int) ($params['ts'] ?? 0);
+        if ($ts <= 0 || abs(time() - $ts) > self::MAX_SKEW) {
+            return null;
+        }
+
+        $this->reply_nonce = $params['cnonce'] ?? null;
+
+        return $params;
+    }
+
+    private function aes_encrypt($data)
+    {
+        if (! empty($this->reply_nonce)) {
+            $data['cnonce'] = $this->reply_nonce;
+        }
+        $data['ts'] = time();
+
+        $nonce = random_bytes(self::NONCE_BYTES);
+        $tag   = '';
+
+        $ciphertext = openssl_encrypt(
+            json_encode($data),
+            self::CRYPTO_CIPHER,
+            $this->aes_key,
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag,
+            self::CRYPTO_VERSION,
+            self::TAG_BYTES
+        );
+
+        $envelope = self::CRYPTO_VERSION
+            . '.' . $this->b64u_encode($nonce)
+            . '.' . $this->b64u_encode($ciphertext . $tag);
+
+        return $this->response
+            ->setHeader('Content-Type', 'text/plain')
+            ->setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
+            ->setHeader('Pragma', 'no-cache')
+            ->setBody($envelope);
+    }
+}
+
+# -------- Errors -----------
+# 'reason' => "Invalid Parameter"            #E-1
+# 'reason' => "Server is under Maintenance"  #E-2
+# 'reason' => "Invalid Input"                #E-3
+# 'reason' => "Invalid Public Key"           #E-5
+# 'reason' => "License/Key is Blocked"       #E-6
+# 'reason' => "Max Devices Reached"          #E-7
+# 'reason' => "License/Key is Expired"       #E-8
+# 'reason' => "Please Update Your App"       #E-9
+# 'reason' => "License/Key is Not Registered" #E-10
+# -------- Errors -----------
