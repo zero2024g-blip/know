@@ -547,3 +547,26 @@ CREATE TABLE IF NOT EXISTS `download_ratelimit` (
   `window_end`    INT NOT NULL DEFAULT 0,
   `blocked_until` INT NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ===================================================================
+-- 13. Two-factor authentication (panel login). Section added later;
+--     every statement is safe to re-run.
+--
+--   users.totp_secret   the authenticator seed, ENCRYPTED at rest by the
+--                        panel (never plaintext). NULL until enrolled.
+--   users.totp_enabled  0 = off (default), 1 = on.
+--   twofa_recovery       single-use backup codes, stored only as keyed
+--                        hashes (HMAC under the app key), never in the clear.
+-- ===================================================================
+ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `totp_secret`  VARCHAR(255) NULL DEFAULT NULL;
+ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `totp_enabled` TINYINT NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS `twofa_recovery` (
+  `id_rec`     INT AUTO_INCREMENT PRIMARY KEY,
+  `id_user`    INT NOT NULL,
+  `code_hash`  CHAR(64) NOT NULL,
+  `used_at`    DATETIME NULL DEFAULT NULL,
+  `created_at` DATETIME NOT NULL,
+  KEY `idx_user` (`id_user`),
+  KEY `idx_lookup` (`id_user`, `code_hash`, `used_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
