@@ -45,6 +45,16 @@ class ConnectV2 extends BaseController
     protected $staticWords, $Public_Key, $setAccess;
     protected $aes_key;
 
+    /**
+     * Ed25519 SECRET key (64 bytes) used to SIGN every response. The matching
+     * PUBLIC key is baked into the client, which never holds this one. This is
+     * what makes a forged activation impossible: an attacker who unpacks the
+     * client has the AES key and can build a request, but cannot produce a
+     * signature the client will accept without this private key. Loaded from
+     * .env connect.signKeyV2 (base64). Generate a pair with patches/genkey-sign.php.
+     */
+    private $sign_sk = null;
+
     protected $maintenance;
     /** The client's nonce for this request, echoed back in the reply. */
     private $reply_nonce = null;
@@ -70,6 +80,22 @@ class ConnectV2 extends BaseController
             return;
         }
         $this->aes_key = hex2bin($hexKey);
+
+        // Response-signing key. Fail closed on a malformed value, but only WARN
+        // when it is simply absent: a panel that has not generated a pair yet
+        // still answers (unsigned), and a client built to require signatures
+        // will refuse those answers — which is the safe direction to fail.
+        $b64sk = (string) (env('connect.signKeyV2') ?: '');
+        if ($b64sk !== '') {
+            $sk = base64_decode($b64sk, true);
+            if ($sk !== false && strlen($sk) === SODIUM_CRYPTO_SIGN_SECRETKEYBYTES) {
+                $this->sign_sk = $sk;
+            } else {
+                log_message('critical', 'connect.signKeyV2 is set but malformed — v2 responses will NOT be signed.');
+            }
+        } else {
+            log_message('warning', 'connect.signKeyV2 is not set — v2 responses are unsigned. Run patches/genkey-sign.php.');
+        }
 
         // panel
         $this->model = new KeysModel();
@@ -401,14 +427,23 @@ class ConnectV2 extends BaseController
     }
 
     // -----------------------------------------------------------------
-    //  Transport crypto — AES-256-GCM, namespace "EG2".
+    //  Transport crypto — AES-256-GCM, namespace "EG2", + Ed25519 signing.
     //
-    //  Wire format, one line of ASCII:
+    //  Request wire format (client -> server), one line of ASCII:
     //      EG2.<base64url nonce>.<base64url ciphertext||tag>
     //
-    //  A fresh 12-byte nonce per message; a 16-byte GCM tag over the
-    //  ciphertext with "EG2" bound as additional authenticated data, so a
-    //  tampered or cross-version message fails to open instead of decrypting.
+    //  Response wire format (server -> client): the same, PLUS a fourth field,
+    //  the server's Ed25519 signature over the response plaintext:
+    //      EG2.<base64url nonce>.<base64url ciphertext||tag>.<base64url sig>
+    //
+    //  A fresh 12-byte nonce per message; a 16-byte GCM tag over the ciphertext
+    //  with "EG2" bound as additional authenticated data, so a tampered or
+    //  cross-version message fails to open. The AES layer gives confidentiality
+    //  and integrity on the wire; the signature gives AUTHENTICITY of origin —
+    //  it proves the panel produced this exact response. The client verifies it
+    //  with the embedded public key and rejects anything unsigned or mis-signed,
+    //  so a cloned client (which has the AES key) still cannot forge a "valid"
+    //  activation, and a fake server cannot impersonate the panel.
     // -----------------------------------------------------------------
 
     private const CRYPTO_VERSION = 'EG2';
@@ -486,11 +521,18 @@ class ConnectV2 extends BaseController
         }
         $data['ts'] = time();
 
+        // Sign the exact plaintext bytes that will be sealed. Signing the
+        // plaintext (not the ciphertext) means the client verifies origin on
+        // the same bytes it will parse, with no JSON canonicalisation to get
+        // wrong on either side. cnonce and ts are inside it, so a captured
+        // signed response cannot be replayed.
+        $plain = json_encode($data);
+
         $nonce = random_bytes(self::NONCE_BYTES);
         $tag   = '';
 
         $ciphertext = openssl_encrypt(
-            json_encode($data),
+            $plain,
             self::CRYPTO_CIPHER,
             $this->aes_key,
             OPENSSL_RAW_DATA,
@@ -503,6 +545,11 @@ class ConnectV2 extends BaseController
         $envelope = self::CRYPTO_VERSION
             . '.' . $this->b64u_encode($nonce)
             . '.' . $this->b64u_encode($ciphertext . $tag);
+
+        if ($this->sign_sk !== null) {
+            $sig = sodium_crypto_sign_detached($plain, $this->sign_sk);
+            $envelope .= '.' . $this->b64u_encode($sig);
+        }
 
         return $this->response
             ->setHeader('Content-Type', 'text/plain')

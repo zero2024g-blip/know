@@ -38,6 +38,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/err.h>
+#include <openssl/pem.h>
 
 #include <nlohmann/json.hpp>   // https://github.com/nlohmann/json (single header)
 
@@ -64,6 +65,13 @@ namespace cfg {
     // Must equal ConnectV2::$Public_Key and ::$staticWords.
     static const std::string PUBLIC_KEY   = "YOUR_PUBLIC_KEY";
     static const std::string STATIC_WORDS = "YOUR_STATIC_WORDS";
+
+    // Ed25519 PUBLIC key that verifies the server's signature on every
+    // response (base64, 32 bytes). Printed by patches/genkey-sign.php. This is
+    // NOT a secret — but if it is wrong or empty, every response is rejected.
+    // Leaving it empty disables verification (NOT recommended: that is the one
+    // thing standing between you and a forged/fake server).
+    static const std::string SIGN_PUBKEY_B64 = "PUT_SERVER_ED25519_PUBLIC_KEY_HERE";
 
     // The FULL endpoint URL.
     static const std::string ENDPOINT = "https://panel.example.com/data/zezr_connector_v2";
@@ -281,6 +289,28 @@ static bool gcm_decrypt(const Bytes& key, const Bytes& nonce, const std::string&
 }
 
 // ----------------------------------------------------------------------------
+//  Ed25519 signature verification (OpenSSL 1.1.1+)
+// ----------------------------------------------------------------------------
+
+// Verify that `sig` is the server's signature over `msg`, using the embedded
+// 32-byte public key. Returns true only on a good signature.
+static bool ed25519_verify(const Bytes& pubkey, const std::string& msg, const Bytes& sig) {
+    if (pubkey.size() != 32 || sig.size() != 64) return false;
+    EVP_PKEY* pk = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr,
+                                               pubkey.data(), pubkey.size());
+    if (!pk) return false;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    bool ok = false;
+    if (ctx && EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, pk) == 1) {
+        ok = EVP_DigestVerify(ctx, sig.data(), sig.size(),
+                              (const unsigned char*)msg.data(), msg.size()) == 1;
+    }
+    if (ctx) EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pk);
+    return ok;
+}
+
+// ----------------------------------------------------------------------------
 //  envelope build / open
 // ----------------------------------------------------------------------------
 
@@ -296,6 +326,10 @@ static std::string seal(const Bytes& key, const std::string& json_plain) {
 }
 
 // Returns parsed JSON on success; throws on any malformed / failed envelope.
+// A response envelope is  EG2.<nonce>.<ct||tag>.<sig>  (4 parts). The trailing
+// signature is verified over the decrypted plaintext with the embedded public
+// key: this is what proves the panel — not a cloned client or a fake server —
+// produced the response.
 static json open_envelope(const Bytes& key, const std::string& envelope) {
     // split on '.'
     std::vector<std::string> parts;
@@ -306,7 +340,7 @@ static json open_envelope(const Bytes& key, const std::string& envelope) {
         parts.push_back(envelope.substr(start, dot - start));
         start = dot + 1;
     }
-    if (parts.size() != 3 || parts[0] != cfg::CRYPTO_VERSION)
+    if ((parts.size() != 3 && parts.size() != 4) || parts[0] != cfg::CRYPTO_VERSION)
         die("response: bad envelope header");
 
     Bytes nonce = b64url_decode(parts[1]);
@@ -320,6 +354,24 @@ static json open_envelope(const Bytes& key, const std::string& envelope) {
     std::string plain;
     if (!gcm_decrypt(key, nonce, cfg::CRYPTO_VERSION, ct, tag, plain))
         die("response: tag mismatch (tampered or wrong key)");
+
+    // Signature check. When a public key is configured we REQUIRE a valid
+    // signature and refuse anything without one — that is the whole defence
+    // against a forged/fake server, so it fails closed.
+    // On unless the key is empty or still the placeholder (which begins "PUT_";
+    // a real standard-base64 key never does). Detecting the placeholder by
+    // prefix keeps its full text to a single spot in this file, so replacing
+    // that one constant cannot accidentally flip this check off.
+    bool verifyOn = !cfg::SIGN_PUBKEY_B64.empty()
+                 &&  cfg::SIGN_PUBKEY_B64.rfind("PUT_", 0) != 0;
+    if (verifyOn) {
+        if (parts.size() != 4)
+            die("response: not signed (server has no signing key, or a downgrade)");
+        Bytes pub = b64_decode(cfg::SIGN_PUBKEY_B64);  // standard base64
+        Bytes sig = b64url_decode(parts[3]);
+        if (!ed25519_verify(pub, plain, sig))
+            die("response: bad signature (forged, tampered, or wrong signing key)");
+    }
 
     return json::parse(plain, nullptr, /*allow_exceptions=*/true);
 }
@@ -506,11 +558,19 @@ int main(int argc, char** argv) {
 
 // ============================================================================
 //  SECURITY NOTE — read before shipping
-//  The AES key ships inside the client, so anyone who unpacks the binary can
-//  read it and forge or read traffic. GCM here stops interception and tampering
-//  on the wire; it does NOT stop someone who owns the client. Treat AES_KEY_HEX
-//  as an obfuscation layer, not a secret against a determined attacker. If you
-//  need real protection against a cloned client, the server must sign responses
-//  with a private key the client never holds. Store the key split/obfuscated,
-//  strip symbols, and enable your platform's integrity checks.
+//  The AES key ships inside the client, so anyone who unpacks the binary has
+//  it and can read/tamper the WIRE. That is why responses are also SIGNED:
+//  SIGN_PUBKEY_B64 verifies an Ed25519 signature made with a private key that
+//  lives only on the server (connect.signKeyV2) and never ships here. So even
+//  a fully cloned client, or a fake server, cannot produce a response this
+//  client accepts — verifyOn rejects anything unsigned or mis-signed.
+//
+//  What signing does NOT do: it does not stop the *owner of the device* from
+//  patching this binary to ignore the result of activate() — no client-side
+//  check can, because they control the CPU. Signing removes the "forge a valid
+//  server response" attack; defeating a patched client additionally needs the
+//  protected feature itself to depend on a server-held secret (e.g. deliver it
+//  inside the signed payload) rather than on a local boolean. Still: keep
+//  AES_KEY_HEX split/obfuscated, strip symbols, and enable platform integrity
+//  checks — every layer raises the cost.
 // ============================================================================

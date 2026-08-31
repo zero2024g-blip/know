@@ -21,7 +21,8 @@ new app ──POST──▶ /data/zezr_connector_v2    (ConnectV2.php, EG2, UA E
 | Route | `/data/zezr_connector` | `/data/zezr_connector_v2` |
 | Crypto namespace | `EG1` | `EG2` |
 | User-Agent | `EagleA/1.2` | `EagleA/2.0` |
-| Key (.env) | `connect.aesKey` | `connect.aesKeyV2` *(falls back to `connect.aesKey`)* |
+| AES key (.env) | `connect.aesKey` | `connect.aesKeyV2` *(falls back to `connect.aesKey`)* |
+| Response signing | — | **Ed25519** (`connect.signKeyV2`), client verifies |
 
 The crypto namespace is bound into the GCM tag as additional authenticated
 data, so a captured v1 request **cannot** be replayed at v2 and vice-versa —
@@ -33,6 +34,63 @@ nonce, replay window (±300 s), timing-safe key checks, the atomic per-device
 slot claim, `max_devices <= 0` = unlimited, and per-IP rate limiting. The
 rate-limit table is **shared** with v1 on purpose, so a scanner cannot dodge
 the limit by hopping between the two endpoints.
+
+## The one thing v2 adds that v1 could never do: signed responses
+
+v1 (and any AES-only scheme) has a hard ceiling: **the AES key ships inside
+the client**, so anyone who unpacks the binary has it and can then forge a
+"valid" activation or stand up a fake server that answers `status: 1`. AES
+proves *no outsider* tampered on the wire; it cannot prove *who* wrote the
+message, because both sides share the same key.
+
+v2 closes that hole the way a bank does — with a key the client never holds:
+
+```
+          ┌─────────── SECRET (server only, .env) ───────────┐
+          │  connect.signKeyV2  — signs every response        │
+          └───────────────────────────────────────────────────┘
+                                │  Ed25519
+          ┌───────────── PUBLIC (baked into client) ──────────┐
+          │  SIGN_PUBKEY_B64 — only VERIFIES, cannot sign      │
+          └───────────────────────────────────────────────────┘
+```
+
+Every v2 response carries an Ed25519 signature over its plaintext. The client
+verifies it with the embedded public key and **refuses** anything unsigned or
+mis-signed. Consequences:
+
+- A cloned client that has the AES key still cannot forge an activation — it
+  cannot produce a signature the real client will accept.
+- A fake/emulated server cannot impersonate the panel.
+- A captured response cannot be replayed (the signed plaintext contains your
+  one-time `cnonce` and a timestamp).
+
+This is verified fail-closed: if the client has a public key configured, an
+unsigned response is rejected as a downgrade. It was tested against a forged
+signing key, an unsigned server, and a wrong client key — all three are
+rejected; only the genuine pair passes.
+
+### Set it up (one command)
+
+```
+php genkey-sign.php
+```
+
+It prints two lines — put the first in the panel's `.env`, the second in the
+C++ client:
+
+```
+# .env  (SECRET — never commit or share)
+connect.signKeyV2 = <base64 secret key>
+
+# eagle_connector_v2.cpp
+static const std::string SIGN_PUBKEY_B64 = "<base64 public key>";
+```
+
+To rotate, run it again and ship a client build carrying the new public key.
+While `connect.signKeyV2` is unset the panel logs a warning and answers
+unsigned — and a client built with a real public key will reject those, which
+is the safe direction to fail.
 
 ## Install (4 steps, no database change)
 
@@ -122,10 +180,19 @@ Response JSON (sealed the same way):
 `status: -1` carries a `reason` instead (same error strings as v1: blocked,
 expired, max devices, please update, not registered, …).
 
-## Honest limit
+## Honest limit (what signing does and does not buy)
 
-The AES key ships inside the client, so anyone who unpacks the binary has it
-and can read or forge v2 traffic. GCM here stops interception and tampering on
-the wire — it does not stop someone who owns the client. Treat the embedded
-key as obfuscation, not a secret. Real protection against a cloned client
-needs the server to sign responses with a private key the client never holds.
+Signing removes the biggest attack: no one can forge a valid server response
+or stand up a fake server, because that needs the Ed25519 secret key, which
+never leaves your panel.
+
+It does **not** stop the owner of a device from patching the client binary to
+ignore what `activate()` returned — no purely client-side check ever can,
+because they control the CPU. To also defeat a patched client, the protected
+feature must depend on something only the server can provide: put the real
+secret the app needs *inside the signed payload* (e.g. an unlock value, a
+per-session config) instead of gating on a local `if (ok)`. Then a patched
+client that skips the check simply never receives the thing it needs.
+
+Keep the embedded AES key split/obfuscated, strip symbols from release builds,
+and enable your platform's integrity checks. Each layer raises the cost.
