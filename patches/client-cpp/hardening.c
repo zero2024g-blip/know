@@ -4,6 +4,9 @@
 //  Build:  cc -O2 -c hardening.c -o hardening.o                (link into app)
 //  Self-test: cc -O2 -DHD_TEST hardening.c -o hdtest -lcrypto && ./hdtest
 // ============================================================================
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE          /* for memmem() in the self-test */
+#endif
 #include "hardening.h"
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
@@ -115,21 +118,39 @@ __attribute__((section("hdprot"), used, noinline))
 static uint32_t hd_protected_marker(uint32_t x) {
     x ^= 0x9e3779b9u; x *= 2654435761u; x ^= x >> 15; return x;
 }
-extern char __start_hdprot[] __attribute__((weak));
-extern char __stop_hdprot[]  __attribute__((weak));
 
+// Your brand/attribution lives in its own PROTECTED data section on purpose.
+// hd_self_hash() covers this section too, and hd_bind_key() folds that hash into
+// the working key — so editing or deleting this string changes the key, and the
+// server payload no longer decrypts. "Remove the brand" also breaks the app.
+// Change it to your own mark; it stays referenced (below) so the linker keeps it.
+__attribute__((section("hdbrand"), used))
+volatile const char HD_BRAND[] = "ZERO \xE2\x9A\xA1 panel.zeromods.id \xE2\x80\x94 do not remove";
+
+extern char __start_hdprot[]  __attribute__((weak));
+extern char __stop_hdprot[]   __attribute__((weak));
+extern char __start_hdbrand[] __attribute__((weak));
+extern char __stop_hdbrand[]  __attribute__((weak));
+
+// SHA-256 over the protected CODE section concatenated with the BRAND section.
 void hd_self_hash(uint8_t out[32]) {
-    // Touch the marker so the linker keeps the section and this TU references it.
     volatile uint32_t sink = hd_protected_marker(0x1234u);
+    sink ^= (uint32_t)(unsigned char)HD_BRAND[0];       // keep the brand referenced
     (void)sink;
-    if (__start_hdprot && __stop_hdprot && __stop_hdprot > __start_hdprot) {
-        SHA256((const unsigned char*)__start_hdprot,
-               (size_t)(__stop_hdprot - __start_hdprot), out);
-    } else {
-        // Section symbols unavailable (unusual toolchain): fall back to a
-        // constant so callers still get 32 bytes; document to verify the map.
-        memset(out, 0xA5, 32);
-    }
+
+    size_t n1 = (__start_hdprot  && __stop_hdprot  && __stop_hdprot  > __start_hdprot)
+              ? (size_t)(__stop_hdprot  - __start_hdprot)  : 0;
+    size_t n2 = (__start_hdbrand && __stop_hdbrand && __stop_hdbrand > __start_hdbrand)
+              ? (size_t)(__stop_hdbrand - __start_hdbrand) : 0;
+    if (n1 + n2 == 0) { memset(out, 0xA5, 32); return; }  // unusual toolchain
+
+    unsigned char* buf = (unsigned char*)malloc(n1 + n2);
+    if (!buf) { memset(out, 0xA5, 32); return; }
+    if (n1) memcpy(buf,      __start_hdprot,  n1);
+    if (n2) memcpy(buf + n1, __start_hdbrand, n2);
+    SHA256(buf, n1 + n2, out);
+    OPENSSL_cleanse(buf, n1 + n2);
+    free(buf);
 }
 
 void hd_bind_key(const uint8_t base[32], uint8_t out[32]) {
@@ -161,19 +182,29 @@ int main(void) {
     uint8_t h[32]; hd_self_hash(h);
     printf("self hash   : "); hex(h, 32); printf("\n");
 
-    // Demonstrate the anti-strip principle: flipping ONE byte of the protected
-    // section changes the hash, hence the bound key.
-    if (__start_hdprot && __stop_hdprot && __stop_hdprot > __start_hdprot) {
-        size_t sz = (size_t)(__stop_hdprot - __start_hdprot);
-        uint8_t* copy = (uint8_t*)malloc(sz);
-        memcpy(copy, __start_hdprot, sz);
-        copy[0] ^= 0x01;                       // simulate a 1-byte patch
-        uint8_t h2[32]; SHA256(copy, sz, h2);
-        printf("patched hash: "); hex(h2, 32); printf("\n");
-        printf("=> 1-byte patch changes the hash: %s\n",
-               memcmp(h, h2, 32) != 0 ? "YES (key would break)" : "no");
-        free(copy);
-    }
+    // Build the same combined buffer hd_self_hash() uses, then show that a
+    // 1-byte change in the CODE section, or in the BRAND, changes the hash —
+    // which changes the bound key, which breaks decryption.
+    size_t n1 = (size_t)(__stop_hdprot  - __start_hdprot);
+    size_t n2 = (size_t)(__stop_hdbrand - __start_hdbrand);
+    uint8_t* buf = (uint8_t*)malloc(n1 + n2);
+    memcpy(buf, __start_hdprot, n1);
+    memcpy(buf + n1, __start_hdbrand, n2);
+
+    uint8_t hc[32]; SHA256(buf, n1 + n2, hc);
+    printf("=> self_hash matches recomputed: %s\n", memcmp(h, hc, 32) == 0 ? "yes" : "NO");
+
+    buf[0] ^= 0x01;                                  // patch the protected code
+    uint8_t h2[32]; SHA256(buf, n1 + n2, h2);
+    printf("=> 1-byte code patch changes the hash: %s\n",
+           memcmp(h, h2, 32) != 0 ? "YES (key would break)" : "no");
+    buf[0] ^= 0x01;                                  // restore
+
+    buf[n1] ^= 0x01;                                 // edit the brand's first byte
+    uint8_t h3[32]; SHA256(buf, n1 + n2, h3);
+    printf("=> editing the brand changes the hash: %s\n",
+           memcmp(h, h3, 32) != 0 ? "YES (stripping the brand breaks the app)" : "no");
+    free(buf);
 
     uint8_t base[32]; memset(base, 0x11, 32);
     uint8_t k1[32], k2[32];

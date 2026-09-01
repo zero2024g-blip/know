@@ -87,6 +87,35 @@ honest. Column 2 buys the time and the evidence; Column 1 lands the ban.
 - Put the real value where root can't reach: **on your server**. Anything the
   client must hold, hold it for microseconds and wipe it (`hd_wipe`).
 
+## Three specific bypasses, answered
+
+**"They patch out the heartbeat."** A heartbeat that only *checks in* is
+patchable and worthless. Make it *deliver* — each interval the server hands a
+fresh, short-lived slice of the working secret (rotating key / config chunk).
+Then skipping the heartbeat means the app runs out of valid secret and dies on
+its own; keeping it means the key keeps calling from many IPs and the velocity
+guard revokes it (see REDISTRIBUTION.md). Either branch loses — as long as the
+secret rotates and `exp` is short.
+
+**"They rip out the login and boot it free."** Only possible if the app can run
+without the server secret. It cannot: the offsets/config/asset-key are issued
+per session to a valid key and never live in the binary. "No login" = "no
+server secret" = dead app. Their only move is to extract the secret once and
+hardcode it — so **rotate the offsets each game update** and a hardcoded free
+build breaks on the next patch, while the watermark (`wm`) names the key that
+leaked. The login was never the guard; the data dependency is.
+
+**"They delete your brand name from the file."** You cannot stop them editing a
+visible string — but you can bind the brand to functionality. `HD_BRAND` lives
+in a protected section that `hd_self_hash()` covers and `hd_bind_key()` folds
+into the working key. Edit or remove the brand and the hash changes, the key
+changes, and the server payload no longer decrypts. Tested: altering the brand
+byte changes the self-hash. So a re-branded build is also a broken build — and
+it still carries your hidden `wm` watermark to identify the leaker.
+
+The theme in all three: never let the app enforce the rule locally (patchable);
+make the app *need* something only your server can supply (not patchable).
+
 ## Build
 
 ```
