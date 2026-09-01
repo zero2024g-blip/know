@@ -611,3 +611,35 @@ CREATE TABLE IF NOT EXISTS `connect_flags` (
 -- Example canary (delete or change): a key that only a cracker would ever try.
 -- INSERT IGNORE INTO `connect_canary` (`user_key`,`note`,`created_at`)
 --   VALUES ('CODM_FREEVIP2024','seeded on a cracking forum', NOW());
+
+-- ===================================================================
+-- 15. Connector v2 anti-redistribution. Section added later; safe to re-run.
+--     Optional — the connector works without these; only the velocity
+--     auto-revoke and the activation log go quiet.
+--
+--   connect_activations  one row per successful activation (key, device, ip).
+--                        Used to count distinct IPs per key = redistribution
+--                        signal. Auto-pruned after ~7 days.
+--   connect_revoked      keys shut off (auto on a velocity breach, or by you).
+--                        A revoked key gets a poisoned (broken) activation.
+--                        To un-revoke, delete the row.
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS `connect_activations` (
+  `id_act`     BIGINT AUTO_INCREMENT PRIMARY KEY,
+  `user_key`   VARCHAR(96) NOT NULL,
+  `serial`     VARCHAR(128) NULL,
+  `ip_hash`    VARCHAR(64) NULL,
+  `created_at` DATETIME NOT NULL,
+  KEY `idx_key_time` (`user_key`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `connect_revoked` (
+  `user_key`   VARCHAR(96) PRIMARY KEY,
+  `reason`     VARCHAR(32) NOT NULL,
+  `created_at` DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- To shut off a leaked key by hand (kills the free build for everyone on it):
+--   INSERT IGNORE INTO connect_revoked (user_key, reason, created_at)
+--     VALUES ('THE_LEAKED_KEY', 'manual', NOW());
+-- To restore it:  DELETE FROM connect_revoked WHERE user_key='THE_LEAKED_KEY';

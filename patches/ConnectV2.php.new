@@ -71,6 +71,18 @@ class ConnectV2 extends BaseController
     private const BL_TABLE     = 'connect_blacklist';
     private const CANARY_TABLE = 'connect_canary';
     private const FLAG_TABLE   = 'connect_flags';
+    private const ACT_TABLE    = 'connect_activations';  // one row per successful activation
+    private const REVOKE_TABLE = 'connect_revoked';      // keys shut off (auto or by admin)
+
+    // --- redistribution detection --------------------------------------------
+    //  A public "free build" made from ONE bought key means that one key lights
+    //  up from many IPs. Counting distinct IPs per key over a window catches it.
+    //  SOFT = log evidence; HARD = auto-revoke + poison. Tune to your traffic:
+    //  a single buyer maps to a handful of devices, not dozens of IPs/hour.
+    private const VEL_WINDOW = 3600;   // 1 hour
+    private const VEL_SOFT   = 15;     // distinct IPs/hour -> record evidence
+    private const VEL_HARD   = 40;     // distinct IPs/hour -> revoke the key
+    private const FLAG_VELOCITY = 256; // marker in connect_flags.flags
 
     // --- tamper flag bits (must match the C++ client) ---
     private const FLAG_DEBUG = 1;   // a debugger is attached
@@ -242,6 +254,11 @@ class ConnectV2 extends BaseController
         if (! $poison && $this->isBlacklisted($sDev)) {
             $poison = true;
         }
+        // A key we already shut off (auto-revoked for redistribution, or by an
+        // admin) gets the poison path — the free build "works" but is broken.
+        if (! $poison && $this->isRevokedKey($uKey)) {
+            $poison = true;
+        }
 
         if ($this->maintenance) {
             return $this->aes_encrypt($this->fail(\App\Models\SettingModel::maintenanceMessage())); // #E-2
@@ -293,6 +310,23 @@ class ConnectV2 extends BaseController
         if (! $this->claimDeviceSlot($id_keys, $sDev, $max_dev)) {
             $this->rlFail($ipHash);
             return $this->aes_encrypt($this->fail('Max Devices Reached.'));  // #E-7
+        }
+
+        // ---- redistribution guard ----
+        // Record this activation, then see how many distinct IPs this one key
+        // has served lately. One buyer = a few IPs; a free public build = many.
+        $this->recordActivation($uKey, $sDev, $ipHash);
+        $ips = $this->keyDistinctIPs($uKey);
+        if ($ips >= self::VEL_HARD) {
+            // Clear redistribution: shut the key off and hand THIS caller a
+            // poisoned (broken) activation, so the public build dies.
+            $this->revokeKey($uKey, 'velocity');
+            $this->recordFlag($sDev, $ipHash, self::FLAG_VELOCITY, $uKey);
+            return $this->aes_encrypt($this->poisonSuccess($game));
+        }
+        if ($ips >= self::VEL_SOFT) {
+            // Suspicious but not conclusive: leave evidence for the admin.
+            $this->recordFlag($sDev, $ipHash, self::FLAG_VELOCITY, $uKey);
         }
 
         // ---- success ----
@@ -487,6 +521,67 @@ class ConnectV2 extends BaseController
                 'created_at' => date('Y-m-d H:i:s'),
             ]);
         } catch (\Throwable $e) {
+        }
+    }
+
+    private function isRevokedKey($uKey): bool
+    {
+        try {
+            return db_connect()->table(self::REVOKE_TABLE)
+                ->where('user_key', (string) $uKey)->countAllResults() > 0;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    private function revokeKey(string $uKey, string $reason): void
+    {
+        try {
+            $db = db_connect();
+            if ($db->table(self::REVOKE_TABLE)->where('user_key', $uKey)->countAllResults() > 0) {
+                return;
+            }
+            $db->table(self::REVOKE_TABLE)->insert([
+                'user_key'   => substr($uKey, 0, 96),
+                'reason'     => $reason,
+                'created_at' => date('Y-m-d H:i:s'),
+            ]);
+            log_message('warning', 'ConnectV2 auto-revoked key for {r}', ['r' => $reason]);
+        } catch (\Throwable $e) {
+        }
+    }
+
+    private function recordActivation(string $uKey, string $serial, string $ipHash): void
+    {
+        try {
+            db_connect()->table(self::ACT_TABLE)->insert([
+                'user_key'   => substr($uKey, 0, 96),
+                'serial'     => substr($serial, 0, 128),
+                'ip_hash'    => $ipHash,
+                'created_at' => date('Y-m-d H:i:s'),
+            ]);
+        } catch (\Throwable $e) {
+        }
+    }
+
+    /** Distinct IPs this key has activated from within the velocity window. */
+    private function keyDistinctIPs(string $uKey): int
+    {
+        try {
+            $db  = db_connect();
+            // Opportunistic cleanup so the log cannot grow without bound.
+            if (random_int(1, 50) === 1) {
+                $db->table(self::ACT_TABLE)
+                   ->where('created_at <', date('Y-m-d H:i:s', time() - 7 * 86400))->delete();
+            }
+            $since = date('Y-m-d H:i:s', time() - self::VEL_WINDOW);
+            $row = $db->table(self::ACT_TABLE)
+                ->select('COUNT(DISTINCT ip_hash) AS c', false)
+                ->where('user_key', $uKey)->where('created_at >=', $since)
+                ->get()->getRow();
+            return $row ? (int) $row->c : 0;
+        } catch (\Throwable $e) {
+            return 0;
         }
     }
 
