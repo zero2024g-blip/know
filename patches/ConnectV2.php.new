@@ -356,13 +356,44 @@ class ConnectV2 extends BaseController
      */
     private function secretConfig(string $game, $findKey): array
     {
-        // >>> PUT YOUR REAL PER-SESSION SECRET HERE <<<
-        // Whatever the app cannot run without. Example placeholder:
+        // Everything the module needs to actually run. A bypassed client gets a
+        // junk kx, so it never opens this — no offsets, no asset key, no
+        // entitlements. Replace the placeholder values with your real ones.
         return [
-            'ok'      => 1,
-            'game'    => $game,
-            'note'    => 'server-delivered config — replace secretConfig() with your real payload',
-            'issued'  => time(),
+            'v' => 3,                          // config schema version
+
+            // Features this key/tier unlocks. The SERVER decides; the client
+            // only turns on what is listed. Gate per licence here.
+            'feat' => ['aim', 'esp', 'radar'],
+
+            // Per-build memory offsets the module reads. The crown jewels:
+            // delivered from here so a bypass has none, AND so you can hot-fix
+            // them after a game update without shipping a new build. Rotate
+            // these server-side whenever the game patches.
+            'off' => [
+                'base'   => '0xREPLACE_ME',
+                'entity' => '0xREPLACE_ME',
+                'matrix' => '0xREPLACE_ME',
+            ],
+
+            // Key to decrypt your bundled encrypted assets/scripts (see
+            // feature_example.c). It never ships in the binary — it arrives
+            // here, inside the encrypted config. Keep the same key server-side
+            // to encrypt those assets once.
+            'res_key' => base64_encode(hash('sha256', 'asset-key|' . $this->payload_key . '|' . $game, true)),
+
+            // Server-controlled tunables (limits, timings the app must obey).
+            'tune' => ['t_time' => ['CODM' => 110, 'PUBGM' => 120, 'FF' => 130, 'DFM' => 140][$game] ?? 100],
+
+            // Time-box. A hard expiry (kill switch) and how often the client
+            // must re-activate. Short life + re-activation makes a dumped config
+            // go stale fast.
+            'exp' => $findKey->expired_date ?: null,
+            'hb'  => 300,                       // re-activate every 5 min
+
+            // Per-key watermark. If a config leaks, this points at the source
+            // key — your leak trace.
+            'wm' => substr(hash('sha256', 'wm|' . $this->payload_key . '|' . $findKey->id_keys), 0, 12),
         ];
     }
 
