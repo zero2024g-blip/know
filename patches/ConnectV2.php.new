@@ -103,7 +103,8 @@ class ConnectV2 extends BaseController
     private const RD_RNG    = 'rg';
     private const RD_EXP    = 'xp';
     private const RD_ACCESS = 'ac';
-    private const RD_PAYLOAD = 'kx';
+    private const RD_PAYLOAD = 'kx';   // the per-session secret (base64)
+    private const RD_CFG     = 'rc';   // config encrypted UNDER that secret
     private const RG_TTIME  = 'tt';
 
     public function __construct()
@@ -301,6 +302,10 @@ class ConnectV2 extends BaseController
 
         $tt = ['CODM' => 110, 'PUBGM' => 120, 'FF' => 130, 'DFM' => 140][$game] ?? 0;
 
+        // The per-session secret and the config encrypted under it. A client
+        // that did not genuinely activate cannot derive the right key, so the
+        // config will not open — this is the layer that survives a patched app.
+        $kxRaw = $this->kxRaw($id_keys, $sDev, $salt, $expOut);
         $data = [
             self::RS_STATUS => 1,
             self::RS_DATA => [
@@ -310,7 +315,8 @@ class ConnectV2 extends BaseController
                 self::RD_RNG     => $time->getTimestamp(),
                 self::RD_EXP     => $expOut,
                 self::RD_ACCESS  => $this->setAccess,
-                self::RD_PAYLOAD => $this->payloadFor($id_keys, $sDev, $salt, $expOut),
+                self::RD_PAYLOAD => base64_encode($kxRaw),
+                self::RD_CFG     => $this->sealConfig($kxRaw, $this->secretConfig($game, $findKey)),
             ],
             self::RS_GAME => [self::RG_TTIME => $tt],
         ];
@@ -329,15 +335,46 @@ class ConnectV2 extends BaseController
     }
 
     /**
-     * A per-session secret the real client needs to function. Derived from a
-     * server-only key, so it cannot be reproduced offline. Wire your app so it
-     * genuinely depends on this (e.g. use it to decrypt your resources); then a
-     * patched client that skips activation simply never gets a working value.
+     * The raw per-session secret (32 bytes), derived from a SERVER-ONLY key so
+     * it cannot be reproduced offline. The client receives it (base64) as kx and
+     * uses it to open the config below.
      */
-    private function payloadFor($idKey, string $serial, string $salt, string $expired): string
+    private function kxRaw($idKey, string $serial, string $salt, string $expired): string
     {
         $msg = $idKey . '|' . $serial . '|' . $salt . '|' . $expired;
-        return base64_encode(hash_hmac('sha256', $msg, $this->payload_key, true));
+        return hash_hmac('sha256', $msg, $this->payload_key, true);
+    }
+
+    /**
+     * THE anti-bypass payload. Your app's real secret (offsets, config, an
+     * unlock value — whatever it needs to actually work) is encrypted here under
+     * a key derived from kx. Only a client that received a genuine kx can open
+     * it; a poisoned/junk kx yields a GCM failure, so a patched client that
+     * skipped activation gets nothing usable.
+     *
+     * Replace secretConfig() with whatever your app truly needs.
+     */
+    private function secretConfig(string $game, $findKey): array
+    {
+        // >>> PUT YOUR REAL PER-SESSION SECRET HERE <<<
+        // Whatever the app cannot run without. Example placeholder:
+        return [
+            'ok'      => 1,
+            'game'    => $game,
+            'note'    => 'server-delivered config — replace secretConfig() with your real payload',
+            'issued'  => time(),
+        ];
+    }
+
+    /** AES-256-GCM the config under a key derived from the raw kx. */
+    private function sealConfig(string $kxRaw, array $config): string
+    {
+        $cfgKey = hash('sha256', 'EG2cfg' . $kxRaw, true);   // 32 bytes
+        $nonce  = random_bytes(12);
+        $tag    = '';
+        $ct = openssl_encrypt(json_encode($config), 'aes-256-gcm', $cfgKey,
+            OPENSSL_RAW_DATA, $nonce, $tag, 'EG2CFG', 16);
+        return base64_encode($nonce . $ct . $tag);
     }
 
     /** A fabricated success with a junk payload, for a flagged/canary caller. */
@@ -353,7 +390,8 @@ class ConnectV2 extends BaseController
                 self::RD_RNG     => time(),
                 self::RD_EXP     => date('Y-m-d H:i:s', time() + 86400 * 30),
                 self::RD_ACCESS  => $this->setAccess,
-                self::RD_PAYLOAD => base64_encode(random_bytes(32)),  // junk, will not work
+                self::RD_PAYLOAD => base64_encode(random_bytes(32)),  // junk kx
+                self::RD_CFG     => base64_encode(random_bytes(60)),  // junk cfg, will not open
             ],
             self::RS_GAME => [self::RG_TTIME => $tt],
         ];

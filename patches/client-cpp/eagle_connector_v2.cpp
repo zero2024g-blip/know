@@ -48,6 +48,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -105,6 +106,7 @@ namespace cfg {
         static const char* SALT = "sl"; static const char* RNG = "rg";
         static const char* EXP = "xp"; static const char* ACCESS = "ac";
         static const char* PAYLOAD = "kx"; static const char* TTIME = "tt";
+        static const char* CFG = "rc";   // config encrypted under kx
     }
 
     // Tamper flag bits reported to the server (must match ConnectV2.php).
@@ -232,6 +234,20 @@ static std::string sha256_hex(const std::string& in) {
     }
     EVP_MD_CTX_free(ctx);
     return to_hex(out, outlen);
+}
+
+static Bytes sha256_raw(const std::string& in) {
+    unsigned char out[EVP_MAX_MD_SIZE];
+    unsigned int  outlen = 0;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) die("EVP_MD_CTX_new");
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(ctx, in.data(), in.size()) != 1 ||
+        EVP_DigestFinal_ex(ctx, out, &outlen) != 1) {
+        EVP_MD_CTX_free(ctx); die("sha256 failed");
+    }
+    EVP_MD_CTX_free(ctx);
+    return Bytes(out, out + outlen);
 }
 
 // constant-time string compare (for cnonce / token checks)
@@ -466,48 +482,86 @@ static std::string url_escape(const std::string& s) {
 //  run rooted phones. NONE of these checks are unbeatable: a determined
 //  attacker patches them out. Their value is raising the cost and feeding the
 //  server-side honeypot, not stopping anyone by themselves.
+//
+//  On arm64 the file reads go through DIRECT SYSCALLS (svc #0), not libc
+//  open/read/close/access. A hooking framework like Frida usually hooks the
+//  libc functions; a raw svc bypasses those hooks, so faking "no debugger /
+//  no su / clean maps" is harder. Off arm64 (e.g. an x86-64 build for testing)
+//  it falls back to the portable calls.
+
+#if defined(__aarch64__)
+// arm64 (asm-generic) syscall numbers.
+enum { SYS_openat = 56, SYS_close = 57, SYS_read = 63, SYS_faccessat = 48 };
+static const long AT_FDCWD_ = -100;
+
+static __attribute__((always_inline)) inline long sc1(long n, long a) {
+    register long x8 __asm__("x8") = n; register long x0 __asm__("x0") = a;
+    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    return x0;
+}
+static __attribute__((always_inline)) inline long sc3(long n, long a, long b, long c) {
+    register long x8 __asm__("x8") = n; register long x0 __asm__("x0") = a;
+    register long x1 __asm__("x1") = b; register long x2 __asm__("x2") = c;
+    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static __attribute__((always_inline)) inline long sc4(long n, long a, long b, long c, long d) {
+    register long x8 __asm__("x8") = n; register long x0 __asm__("x0") = a;
+    register long x1 __asm__("x1") = b; register long x2 __asm__("x2") = c;
+    register long x3 __asm__("x3") = d;
+    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return x0;
+}
+static bool raw_exists(const char* path) {
+    return sc4(SYS_faccessat, AT_FDCWD_, (long)path, 0 /*F_OK*/, 0) == 0;
+}
+static std::string raw_read(const char* path) {
+    long fd = sc4(SYS_openat, AT_FDCWD_, (long)path, 0 /*O_RDONLY*/, 0);
+    if (fd < 0) return std::string();
+    std::string out; char buf[4096]; long n;
+    while ((n = sc3(SYS_read, fd, (long)buf, (long)sizeof(buf))) > 0) out.append(buf, (size_t)n);
+    sc1(SYS_close, fd);
+    return out;
+}
+#else
+// Portable fallback (lets this file build and be tested off-target).
+static bool raw_exists(const char* path) { return access(path, F_OK) == 0; }
+static std::string raw_read(const char* path) {
+    std::ifstream f(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+#endif
+
 static int tamperFlags() {
     int flags = 0;
-#if defined(__unix__) || defined(__ANDROID__)
+#if defined(__unix__) || defined(__ANDROID__) || defined(__aarch64__)
     // 1) Debugger: /proc/self/status -> TracerPid != 0
-    try {
-        std::ifstream st("/proc/self/status");
-        std::string line;
-        while (std::getline(st, line)) {
-            if (line.rfind("TracerPid:", 0) == 0) {
-                long pid = strtol(line.c_str() + 10, nullptr, 10);
-                if (pid != 0) flags |= cfg::FLAG_DEBUG;
-                break;
-            }
+    {
+        std::string st = raw_read("/proc/self/status");
+        size_t p = st.find("TracerPid:");
+        if (p != std::string::npos) {
+            long pid = strtol(st.c_str() + p + 10, nullptr, 10);
+            if (pid != 0) flags |= cfg::FLAG_DEBUG;
         }
-    } catch (...) {}
-
+    }
     // 2) Root: any of the usual su / superuser / magisk paths present
     {
         const char* paths[] = {
             "/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su",
             "/system/app/Superuser.apk", "/system/bin/magisk", "/data/adb/magisk",
         };
-        for (const char* p : paths) if (access(p, F_OK) == 0) { flags |= cfg::FLAG_ROOT; break; }
+        for (const char* p : paths) if (raw_exists(p)) { flags |= cfg::FLAG_ROOT; break; }
     }
-
     // 3) Hooking framework: scan the loaded modules for known signatures
-    try {
-        std::ifstream maps("/proc/self/maps");
-        std::string line;
+    {
+        std::string maps = raw_read("/proc/self/maps");
         const char* sigs[] = { "frida", "gum-js", "xposed", "substrate", "libriru", "magisk" };
-        while (std::getline(maps, line)) {
-            for (const char* s : sigs) {
-                if (line.find(s) != std::string::npos) { flags |= cfg::FLAG_HOOK; break; }
-            }
-            if (flags & cfg::FLAG_HOOK) break;
-        }
-    } catch (...) {}
-
+        for (const char* s : sigs) if (maps.find(s) != std::string::npos) { flags |= cfg::FLAG_HOOK; break; }
+    }
     // 4) Emulator: goldfish/ranchu device nodes
     {
         const char* emu[] = { "/dev/qemu_pipe", "/dev/socket/qemud", "/dev/goldfish_pipe" };
-        for (const char* p : emu) if (access(p, F_OK) == 0) { flags |= cfg::FLAG_EMU; break; }
+        for (const char* p : emu) if (raw_exists(p)) { flags |= cfg::FLAG_EMU; break; }
     }
 #endif
     return flags;
@@ -525,6 +579,8 @@ struct ActivationResult {
     std::string access;        // data.access
     std::string expired;       // data.expired
     std::string payload;       // data.kx — the server-delivered per-session secret
+    std::string config;        // decrypted server config JSON (opened with kx)
+    bool        config_ok = false;  // did the kx actually open the config?
     long long   id_key = 0;
     long long   t_time = 0;    // game.t_time
     bool        token_verified = false;
@@ -592,6 +648,27 @@ public:
         if (resp.contains(cfg::f::GAMEO) && resp[cfg::f::GAMEO].is_object())
             out.t_time = resp[cfg::f::GAMEO].value(cfg::f::TTIME, 0LL);
 
+        // THE gate: open the server config with a key derived from kx. A client
+        // that did not genuinely activate holds a junk kx, so this GCM decrypt
+        // fails and there is no config to run on — the bypass produces a broken
+        // app, not a free one.
+        std::string cfgB64 = d.value(cfg::f::CFG, std::string());
+        if (!out.payload.empty() && !cfgB64.empty()) {
+            Bytes kxRaw = b64_decode(out.payload);                       // standard base64
+            Bytes cfgKey = sha256_raw("EG2cfg" + std::string(kxRaw.begin(), kxRaw.end()));
+            Bytes blob = b64_decode(cfgB64);
+            if (blob.size() > 12 + 16) {
+                Bytes nonce(blob.begin(), blob.begin() + 12);
+                Bytes tag(blob.end() - 16, blob.end());
+                Bytes ct(blob.begin() + 12, blob.end() - 16);
+                std::string plain;
+                if (gcm_decrypt(cfgKey, nonce, "EG2CFG", ct, tag, plain)) {
+                    out.config = plain;
+                    out.config_ok = true;
+                }
+            }
+        }
+
         // Prove the server actually knew STATIC_WORDS: recompute the token.
         //   token = sha256( serial-game-user_key-STATIC_WORDS-salt )
         std::string expect = sha256_hex(
@@ -633,13 +710,15 @@ int main(int argc, char** argv) {
                       << "  access         : " << r.access << "\n"
                       << "  expired        : " << r.expired << "\n"
                       << "  t_time         : " << r.t_time << "\n"
-                      << "  payload (kx)   : " << r.payload << "\n";
-            // THIS is the anti-bypass point: feed r.payload into whatever your
-            // app genuinely needs (e.g. use it to derive the key that decrypts
-            // your resources). Do NOT gate on a local "if (r.ok)" — a patched
-            // client flips that. If the real feature needs a correct kx, a
-            // patched client that skipped activation gets a junk kx and fails.
-            if (!r.token_verified) rc = 1;
+                      << "  payload (kx)   : " << r.payload << "\n"
+                      << "  config opened  : " << (r.config_ok ? "yes" : "NO — kx did not open it (a bypass lands here)") << "\n";
+            if (r.config_ok)
+                std::cout << "  config         : " << r.config << "\n";
+            // The real gate is config_ok, not r.ok: r.ok is a local boolean a
+            // patched client can flip, but config_ok is true ONLY when the kx
+            // the server derived actually opened the server config. Run your
+            // feature off r.config; a bypassed client has no config to run on.
+            if (!r.token_verified || !r.config_ok) rc = 1;
         }
     } catch (const std::exception& e) {
         std::cerr << "ERROR: " << e.what() << "\n";

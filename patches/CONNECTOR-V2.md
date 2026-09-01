@@ -227,7 +227,8 @@ Inside the (already AES-encrypted) JSON, the fields no longer read as
 | tamper flags | `h9` | rng | `d.rg` |
 | | | expired | `d.xp` |
 | | | access | `d.ac` |
-| | | **payload** | `d.kx` |
+| | | **payload (kx)** | `d.kx` |
+| | | **config (enc)** | `d.rc` |
 | | | t_time | `g.tt` |
 
 Honest note: the traffic is already encrypted, so a network sniffer never saw
@@ -248,8 +249,23 @@ Why it matters: a rooted attacker can patch the client to ignore any local
 check — but they cannot compute a correct `kx` (it needs the server key), and a
 patched client that skips activation is handed a **junk** `kx`. If the feature
 depends on `kx`, the bypass produces a broken app instead of a free one. This
-is the only layer that resists a patched client; the C++ `main()` shows where
-to plug `r.payload` in.
+is the only layer that resists a patched client.
+
+**It is wired as a real decryption, not a boolean.** Alongside `kx`, every
+success carries `d.rc`: your app's actual secret/config, AES-256-GCM encrypted
+under a key derived from `kx` (`sha256("EG2cfg" + kx_raw)`, AAD `"EG2CFG"`). The
+client derives the same key from the `kx` it received and decrypts `rc`:
+
+- genuine activation → correct `kx` → `rc` opens → `r.config` holds your data,
+  `r.config_ok == true`.
+- bypass / poisoned caller → junk `kx` → the GCM tag fails → **no config**,
+  `r.config_ok == false`.
+
+So the decisive gate in the client is `config_ok` (a value only a real `kx` can
+produce), **not** `r.ok` (a local boolean a patched build flips). Put your real
+secret in the server's `secretConfig()` (a placeholder is provided), and run
+your feature off `r.config`. Tested: a genuine call prints the config; a
+simulated bypass lands on `config_ok == false` with nothing to run on.
 
 ## 3) Tamper signal (`h9`) — native, no Java
 
@@ -268,6 +284,12 @@ customers run rooted phones. Only an attached debugger or a hooking framework
 (strong signs of active reverse-engineering) get the serial blacklisted. A
 blacklisted serial then receives a poisoned (junk `kx`) activation. Tested: run
 the client under a tracer and the server records `h9 = 1`.
+
+**On arm64 the probe reads `/proc` via direct syscalls (`svc #0`)**, not libc
+`open`/`read`/`access`. Frida and friends typically hook the libc wrappers; a
+raw `svc` goes under those hooks, so faking "no debugger / clean maps" is
+harder. Off arm64 (e.g. an x86-64 test build) it falls back to normal calls.
+Verified: the arm64 build compiles and emits real `svc #0` instructions.
 
 ## 4) Defensive honeypot (server-side only — attacks no one)
 
