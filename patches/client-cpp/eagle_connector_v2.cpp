@@ -46,10 +46,14 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#if defined(__unix__) || defined(__APPLE__) || defined(__ANDROID__)
+#include <unistd.h>
+#endif
 
 using json = nlohmann::json;
 using Bytes = std::vector<unsigned char>;
@@ -84,6 +88,30 @@ namespace cfg {
     static const int NONCE_BYTES = 12;
     static const int TAG_BYTES   = 16;
     static const int MAX_SKEW    = 300;
+
+    // Obfuscated wire field names (must match ConnectV2.php). The traffic is
+    // already AES-encrypted, so these are only seen by someone who has unpacked
+    // the client — a small extra cost for a reverse-engineer, not real secrecy.
+    namespace f {
+        // request
+        static const char* GAME = "q0"; static const char* VER = "q7";
+        static const char* KEY  = "z2"; static const char* SER = "d5";
+        static const char* PUB  = "p1"; static const char* TS  = "t";
+        static const char* NON  = "n";  static const char* TAMP = "h9";
+        // response
+        static const char* STATUS = "s"; static const char* DATA = "d";
+        static const char* GAMEO  = "g"; static const char* REASON = "e";
+        static const char* ID = "i"; static const char* TOKEN = "tk";
+        static const char* SALT = "sl"; static const char* RNG = "rg";
+        static const char* EXP = "xp"; static const char* ACCESS = "ac";
+        static const char* PAYLOAD = "kx"; static const char* TTIME = "tt";
+    }
+
+    // Tamper flag bits reported to the server (must match ConnectV2.php).
+    static const int FLAG_DEBUG = 1;   // a debugger is attached
+    static const int FLAG_ROOT  = 2;   // rooted device (server treats as info only)
+    static const int FLAG_HOOK  = 4;   // Frida/Xposed/substrate present
+    static const int FLAG_EMU   = 8;   // emulator (server treats as info only)
 }
 
 // ----------------------------------------------------------------------------
@@ -430,6 +458,62 @@ static std::string url_escape(const std::string& s) {
 }
 
 // ----------------------------------------------------------------------------
+//  Native tamper probe (pure C/C++, no Java/Android SDK)
+// ----------------------------------------------------------------------------
+//  Returns a bitmask reported to the server as "h9". The server decides what
+//  to do with it — a debugger or a hook gets the device quietly blacklisted;
+//  root/emulator are treated as information only, because many honest customers
+//  run rooted phones. NONE of these checks are unbeatable: a determined
+//  attacker patches them out. Their value is raising the cost and feeding the
+//  server-side honeypot, not stopping anyone by themselves.
+static int tamperFlags() {
+    int flags = 0;
+#if defined(__unix__) || defined(__ANDROID__)
+    // 1) Debugger: /proc/self/status -> TracerPid != 0
+    try {
+        std::ifstream st("/proc/self/status");
+        std::string line;
+        while (std::getline(st, line)) {
+            if (line.rfind("TracerPid:", 0) == 0) {
+                long pid = strtol(line.c_str() + 10, nullptr, 10);
+                if (pid != 0) flags |= cfg::FLAG_DEBUG;
+                break;
+            }
+        }
+    } catch (...) {}
+
+    // 2) Root: any of the usual su / superuser / magisk paths present
+    {
+        const char* paths[] = {
+            "/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su",
+            "/system/app/Superuser.apk", "/system/bin/magisk", "/data/adb/magisk",
+        };
+        for (const char* p : paths) if (access(p, F_OK) == 0) { flags |= cfg::FLAG_ROOT; break; }
+    }
+
+    // 3) Hooking framework: scan the loaded modules for known signatures
+    try {
+        std::ifstream maps("/proc/self/maps");
+        std::string line;
+        const char* sigs[] = { "frida", "gum-js", "xposed", "substrate", "libriru", "magisk" };
+        while (std::getline(maps, line)) {
+            for (const char* s : sigs) {
+                if (line.find(s) != std::string::npos) { flags |= cfg::FLAG_HOOK; break; }
+            }
+            if (flags & cfg::FLAG_HOOK) break;
+        }
+    } catch (...) {}
+
+    // 4) Emulator: goldfish/ranchu device nodes
+    {
+        const char* emu[] = { "/dev/qemu_pipe", "/dev/socket/qemud", "/dev/goldfish_pipe" };
+        for (const char* p : emu) if (access(p, F_OK) == 0) { flags |= cfg::FLAG_EMU; break; }
+    }
+#endif
+    return flags;
+}
+
+// ----------------------------------------------------------------------------
 //  the connector call
 // ----------------------------------------------------------------------------
 
@@ -440,6 +524,7 @@ struct ActivationResult {
     std::string salt;          // data.salt
     std::string access;        // data.access
     std::string expired;       // data.expired
+    std::string payload;       // data.kx — the server-delivered per-session secret
     long long   id_key = 0;
     long long   t_time = 0;    // game.t_time
     bool        token_verified = false;
@@ -464,13 +549,14 @@ public:
         long long ts = (long long)time(nullptr);
 
         json req = {
-            {"game",     game},
-            {"app_ver",  md5_hex(versionString)},   // server compares md5(version)
-            {"user_key", userKey},
-            {"serial",   serial},
-            {"public",   cfg::PUBLIC_KEY},
-            {"ts",       ts},
-            {"cnonce",   cnonce},
+            {cfg::f::GAME, game},
+            {cfg::f::VER,  md5_hex(versionString)},   // server compares md5(version)
+            {cfg::f::KEY,  userKey},
+            {cfg::f::SER,  serial},
+            {cfg::f::PUB,  cfg::PUBLIC_KEY},
+            {cfg::f::TS,   ts},
+            {cfg::f::NON,  cnonce},
+            {cfg::f::TAMP, tamperFlags()},            // native tamper bitmask
         };
 
         std::string envelope = seal(key_, req.dump());
@@ -480,30 +566,31 @@ public:
         json resp = open_envelope(key_, raw);
 
         // Bind the reply to this request.
-        std::string rcnonce = resp.value("cnonce", std::string());
+        std::string rcnonce = resp.value(cfg::f::NON, std::string());
         if (!ct_equal(rcnonce, cnonce))
             die("response cnonce mismatch (replay or wrong key)");
-        long long rts = resp.value("ts", 0LL);
+        long long rts = resp.value(cfg::f::TS, 0LL);
         if (rts <= 0 || llabs((long long)time(nullptr) - rts) > cfg::MAX_SKEW)
             die("response timestamp out of window");
 
         ActivationResult out;
-        long long status = resp.value("status", -1LL);
+        long long status = resp.value(cfg::f::STATUS, -1LL);
         if (status != 1) {
             out.ok = false;
-            out.reason = resp.value("reason", std::string("unknown error"));
+            out.reason = resp.value(cfg::f::REASON, std::string("unknown error"));
             return out;
         }
 
-        const json& d = resp.at("data");
+        const json& d = resp.at(cfg::f::DATA);
         out.ok      = true;
-        out.token   = d.value("token", std::string());
-        out.salt    = d.value("salt", std::string());
-        out.access  = d.value("access", std::string());
-        out.expired = d.value("expired", std::string());
-        out.id_key  = d.value("id_key", 0LL);
-        if (resp.contains("game") && resp["game"].is_object())
-            out.t_time = resp["game"].value("t_time", 0LL);
+        out.token   = d.value(cfg::f::TOKEN, std::string());
+        out.salt    = d.value(cfg::f::SALT, std::string());
+        out.access  = d.value(cfg::f::ACCESS, std::string());
+        out.expired = d.value(cfg::f::EXP, std::string());
+        out.payload = d.value(cfg::f::PAYLOAD, std::string());
+        out.id_key  = d.value(cfg::f::ID, 0LL);
+        if (resp.contains(cfg::f::GAMEO) && resp[cfg::f::GAMEO].is_object())
+            out.t_time = resp[cfg::f::GAMEO].value(cfg::f::TTIME, 0LL);
 
         // Prove the server actually knew STATIC_WORDS: recompute the token.
         //   token = sha256( serial-game-user_key-STATIC_WORDS-salt )
@@ -545,7 +632,13 @@ int main(int argc, char** argv) {
                       << "  token_verified : " << (r.token_verified ? "yes" : "NO — server did not know STATIC_WORDS!") << "\n"
                       << "  access         : " << r.access << "\n"
                       << "  expired        : " << r.expired << "\n"
-                      << "  t_time         : " << r.t_time << "\n";
+                      << "  t_time         : " << r.t_time << "\n"
+                      << "  payload (kx)   : " << r.payload << "\n";
+            // THIS is the anti-bypass point: feed r.payload into whatever your
+            // app genuinely needs (e.g. use it to derive the key that decrypts
+            // your resources). Do NOT gate on a local "if (r.ok)" — a patched
+            // client flips that. If the real feature needs a correct kx, a
+            // patched client that skipped activation gets a junk kx and fails.
             if (!r.token_verified) rc = 1;
         }
     } catch (const std::exception& e) {

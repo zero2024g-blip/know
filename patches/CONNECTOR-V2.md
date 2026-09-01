@@ -151,7 +151,12 @@ Dependencies: OpenSSL (libcrypto), libcurl, and the single-header
 path, e.g. `third_party/nlohmann/json.hpp`). The same source compiles under
 the Android NDK — link libcurl + libcrypto for your ABIs.
 
-### Request / response (must match `ConnectV2.php`)
+### Request / response (logical shape)
+
+> These are the **logical** field names for clarity. The current protocol sends
+> them under the **obfuscated** names in the map further down ("v2 hardening"),
+> and the response is a 4-part signed envelope. The C++ client already uses the
+> obfuscated names — this block is just to show what each field means.
 
 Request JSON, sealed as `EG2.<b64url nonce>.<b64url ciphertext||tag>` and sent
 as the POST field `data=`:
@@ -196,3 +201,98 @@ client that skips the check simply never receives the thing it needs.
 
 Keep the embedded AES key split/obfuscated, strip symbols from release builds,
 and enable your platform's integrity checks. Each layer raises the cost.
+
+---
+
+# v2 hardening: obfuscation, server payload, tamper signal, honeypot
+
+Four more layers were added to `ConnectV2.php` and the C++ client. They need the
+tables in `MIGRATION.sql` section 14 (safe to re-run; the connector still works
+without them — only the honeypot/tamper recording go quiet).
+
+## 1) Obfuscated field names
+
+Inside the (already AES-encrypted) JSON, the fields no longer read as
+`user_key` / `serial` / … but as opaque tokens. Both sides use the same map:
+
+| meaning | wire (request) | meaning | wire (response) |
+|---|---|---|---|
+| game | `q0` | status | `s` |
+| app_ver (md5) | `q7` | data object | `d` |
+| user_key | `z2` | game object | `g` |
+| serial | `d5` | reason (fail) | `e` |
+| public | `p1` | id_key | `d.i` |
+| ts | `t` | token | `d.tk` |
+| cnonce | `n` | salt | `d.sl` |
+| tamper flags | `h9` | rng | `d.rg` |
+| | | expired | `d.xp` |
+| | | access | `d.ac` |
+| | | **payload** | `d.kx` |
+| | | t_time | `g.tt` |
+
+Honest note: the traffic is already encrypted, so a network sniffer never saw
+the old names either — these opaque names only cost a reverse-engineer who has
+unpacked the client a little more time. It is obfuscation, not secrecy.
+
+## 2) Server-delivered payload (`kx`) — the real anti-bypass
+
+Every successful response carries `d.kx`: a per-session secret derived from a
+**server-only** key (`connect.payloadKeyV2`, or a value derived from your AES
+key if unset). The point:
+
+> Make your app genuinely NEED `kx` to work — e.g. use it to derive the key
+> that decrypts your resources/config. Do **not** gate on a local
+> `if (result.ok)`.
+
+Why it matters: a rooted attacker can patch the client to ignore any local
+check — but they cannot compute a correct `kx` (it needs the server key), and a
+patched client that skips activation is handed a **junk** `kx`. If the feature
+depends on `kx`, the bypass produces a broken app instead of a free one. This
+is the only layer that resists a patched client; the C++ `main()` shows where
+to plug `r.payload` in.
+
+## 3) Tamper signal (`h9`) — native, no Java
+
+The C++ client runs a pure-native probe (`tamperFlags()`, works under the NDK,
+no Java/APK needed) and reports a bitmask:
+
+| bit | value | meaning | server action |
+|---|---|---|---|
+| debugger | 1 | `/proc/self/status` TracerPid ≠ 0 | **blacklist** |
+| root | 2 | `su`/magisk paths present | log only |
+| hook | 4 | Frida/Xposed/substrate in `/proc/self/maps` | **blacklist** |
+| emulator | 8 | goldfish/ranchu device nodes | log only |
+
+Root and emulator alone are **not** grounds to block — plenty of paying
+customers run rooted phones. Only an attached debugger or a hooking framework
+(strong signs of active reverse-engineering) get the serial blacklisted. A
+blacklisted serial then receives a poisoned (junk `kx`) activation. Tested: run
+the client under a tracer and the server records `h9 = 1`.
+
+## 4) Defensive honeypot (server-side only — attacks no one)
+
+- **Canary keys** (`connect_canary`): seed trap license strings where crackers
+  look (forums, paste sites). Any use flags the caller's serial and returns a
+  poisoned success — they think it worked; it does not. Add your own:
+  ```sql
+  INSERT IGNORE INTO connect_canary (user_key, note, created_at)
+    VALUES ('CODM_FREEVIP2024', 'seeded on a forum', NOW());
+  ```
+- **Blacklist** (`connect_blacklist`): serials flagged by canary use or a
+  debugger/hook signal. Listed serials get poisoned activations.
+- **Decoy endpoint** (`/data/zezr_activate`): not used by the real client, only
+  visible in decompiled strings; any hit is logged to `connect_flags`.
+- **Flags log** (`connect_flags`): append-only record of tamper reports and
+  decoy hits — your evidence trail.
+
+None of this runs code on anyone's device. It identifies abusers and denies
+them **your** service — the legal, durable alternative to "hacking back", which
+would put the legal risk on you, not them.
+
+## What still cannot be done from the client
+
+Running the app as root and patching it will always defeat a purely local
+check — that is physics, not a bug. The defense that survives it is layer 2:
+tie the real feature to the server-delivered `kx`. Everything else (signing,
+obfuscation, tamper detection, honeypot) raises cost and catches abusers, but
+`kx` is what makes a bypass produce a broken app.

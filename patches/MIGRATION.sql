@@ -570,3 +570,44 @@ CREATE TABLE IF NOT EXISTS `twofa_recovery` (
   KEY `idx_user` (`id_user`),
   KEY `idx_lookup` (`id_user`, `code_hash`, `used_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ===================================================================
+-- 14. Connector v2 honeypot + tamper signals. Section added later; every
+--     statement is safe to re-run. All three are optional — the connector
+--     works without them; only the honeypot/tamper recording go quiet.
+--
+--   connect_blacklist  serials flagged as cracker devices (canary use, or a
+--                      debugger/hook signal). A listed serial gets a poisoned
+--                      (junk) activation instead of a working one.
+--   connect_canary     trap license keys. Seed them where crackers look; any
+--                      use flags the caller. Insert your own trap strings.
+--   connect_flags      an append-only log of tamper reports and decoy hits.
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS `connect_blacklist` (
+  `serial`     VARCHAR(128) PRIMARY KEY,
+  `ip_hash`    VARCHAR(64) NULL,
+  `reason`     VARCHAR(32) NOT NULL,
+  `flags`      INT NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `connect_canary` (
+  `user_key`   VARCHAR(96) PRIMARY KEY,
+  `note`       VARCHAR(120) NULL,
+  `created_at` DATETIME NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `connect_flags` (
+  `id_flag`    INT AUTO_INCREMENT PRIMARY KEY,
+  `serial`     VARCHAR(128) NULL,
+  `ip_hash`    VARCHAR(64) NULL,
+  `flags`      INT NOT NULL DEFAULT 0,
+  `user_key`   VARCHAR(96) NULL,
+  `created_at` DATETIME NOT NULL,
+  KEY `idx_serial` (`serial`),
+  KEY `idx_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Example canary (delete or change): a key that only a cracker would ever try.
+-- INSERT IGNORE INTO `connect_canary` (`user_key`,`note`,`created_at`)
+--   VALUES ('CODM_FREEVIP2024','seeded on a cracking forum', NOW());
