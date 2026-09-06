@@ -53,6 +53,10 @@ namespace cfg {
     inline std::string USER_AGENT()   { return OBF("EagleA/1.2"); }
     inline std::string SIGN_PUBKEY()  { return OBF("PUT_SERVER_ED25519_PUBLIC_KEY"); }  // base64
     inline std::string PINNED_PUBKEY(){ return OBF(""); }                        // "sha256//...=" or empty
+    inline std::string DOH_URL()      { return OBF(""); }                        // e.g. "https://1.1.1.1/dns-query" or empty
+    // If your server staples OCSP, set this to 1 to hard-fail on a revoked cert.
+    // Leave 0 unless you have verified the staple exists, or handshakes will fail.
+    static const long VERIFY_OCSP_STAPLE = 0;
 
     static const int NONCE = 12, TAG = 16, SKEW = 300;
     inline std::string TAG_STR()      { return OBF("EG2"); }
@@ -123,6 +127,19 @@ static int ed25519_ok(const Bytes& pub,const std::string& msg,const Bytes& sig){
     if(c)EVP_MD_CTX_free(c); EVP_PKEY_free(pk); return ok;
 }
 
+// Read a JSON field as a string whether the server stored it as a string or a
+// number (e.g. a numeric id_key). Missing -> default. Never throws.
+static std::string jstr(const json& o,const std::string& k,const std::string& dflt=std::string()){
+    if(!o.contains(k)) return dflt;
+    const json& v = o[k];
+    if(v.is_string()) return v.get<std::string>();
+    if(v.is_number_integer())  return std::to_string(v.get<long long>());
+    if(v.is_number_unsigned()) return std::to_string(v.get<unsigned long long>());
+    if(v.is_number_float())    return std::to_string(v.get<double>());
+    if(v.is_boolean())         return v.get<bool>()?"1":"0";
+    return dflt;
+}
+
 // 0 iff the two strings are identical; nonzero otherwise. No early-out branch.
 static uint64_t neq(const std::string& a,const std::string& b){
     uint64_t d = (uint64_t)(a.size() ^ b.size());
@@ -169,16 +186,17 @@ bool doLogin(const std::string& userKey, const std::string& game,
     std::string cnonce = tohex(cn.data(), cn.size());
     long long ts = (long long)time(nullptr);
 
-    // Meaningless wire field names — must match ConnectV2.php (F_* constants).
-    // Even if OBF is peeled at runtime, "_u" reveals nothing about "user_key".
+    // Wire field names — the real names, must match ConnectV2.php (F_* constants).
+    // They are still OBF()-hidden so they do not appear as plaintext in .rodata;
+    // their names are not the secret anyway — the AES seal + Ed25519 signature are.
     json j;
-    j[OBF("_i")] = game;                    // game
-    j[OBF("_p")] = md5hex(versionString);   // app_ver
-    j[OBF("_u")] = userKey;                 // user_key
-    j[OBF("_x")] = serial;                  // serial
-    j[OBF("_r")] = cfg::PUBLIC_KEY();       // public
-    j[OBF("tl")] = ts;                      // ts
-    j[OBF("gh")] = cnonce;                  // cnonce
+    j[OBF("game")]     = game;                    // game
+    j[OBF("app_ver")]  = md5hex(versionString);   // app_ver
+    j[OBF("user_key")] = userKey;                 // user_key
+    j[OBF("serial")]   = serial;                  // serial
+    j[OBF("public")]   = cfg::PUBLIC_KEY();       // public
+    j[OBF("ts")]       = ts;                      // ts
+    j[OBF("cnonce")]   = cnonce;                  // cnonce
 
     Bytes nonce = randb(cfg::NONCE), ct, tag;
     gcm_seal(key, nonce, cfg::TAG_STR(), j.dump(), ct, tag);
@@ -203,33 +221,90 @@ bool doLogin(const std::string& userKey, const std::string& game,
     curl_easy_setopt(cu, CURLOPT_USERAGENT, cfg::USER_AGENT().c_str());
     curl_easy_setopt(cu, CURLOPT_WRITEFUNCTION, sink);
     curl_easy_setopt(cu, CURLOPT_WRITEDATA, &resp);
-    // ---- transport hardening: a verified, pinned, HTTPS-only TLS 1.3 channel
-    //      that ignores device proxies. Together with the Ed25519 response
-    //      signature, this makes interception / a forged server impractical.
-    curl_easy_setopt(cu, CURLOPT_SSL_VERIFYPEER, 1L);                 // verify the CA chain
-    curl_easy_setopt(cu, CURLOPT_SSL_VERIFYHOST, 2L);                 // verify the hostname
-    curl_easy_setopt(cu, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_3);// require TLS 1.3
-    curl_easy_setopt(cu, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);      // fail if TLS can't be used
+    // ========================================================================
+    //  TRANSPORT HARDENING — bank-app grade.
+    //  A verified, pinned, HTTPS-only TLS 1.3 channel that refuses every
+    //  downgrade, ignores device/system proxies, resolves DNS securely, and
+    //  reuses nothing. Together with the Ed25519 response signature (checked
+    //  below) this makes passive sniffing and an active forged/MITM server
+    //  impractical: an interceptor sees only ciphertext, and a fake endpoint
+    //  cannot present a chain that verifies AND matches the pin AND sign a reply.
+    //
+    //  Options are grouped by what they defend against and version-guarded so the
+    //  file builds on older libcurl (the guards fall back to the closest stable
+    //  option). Verified against the current libcurl curl_easy_setopt docs.
+    // ========================================================================
+
+    // --- (1) Certificate & chain verification (anti-forgery) ---
+    curl_easy_setopt(cu, CURLOPT_SSL_VERIFYPEER, 1L);                 // verify the CA chain — never 0
+    curl_easy_setopt(cu, CURLOPT_SSL_VERIFYHOST, 2L);                 // hostname must match the cert
+    // OCSP staple check (revoked-cert defence). Opt-in: only enable when your
+    // server actually staples, otherwise the handshake hard-fails.
+    if (cfg::VERIFY_OCSP_STAPLE)
+        curl_easy_setopt(cu, CURLOPT_SSL_VERIFYSTATUS, 1L);
+
+    // --- (2) TLS version & cipher floor (anti-downgrade) ---
+    // Require TLS 1.3 and cap at the library max, so no rollback to 1.2/1.1/1.0.
+    curl_easy_setopt(cu, CURLOPT_SSLVERSION,
+        (long)(CURL_SSLVERSION_TLSv1_3 | CURL_SSLVERSION_MAX_DEFAULT));
+    curl_easy_setopt(cu, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);      // TLS is mandatory, never opportunistic
+#if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x073d00   /* 7.61.0 */
+    curl_easy_setopt(cu, CURLOPT_TLS13_CIPHERS,                       // strong AEAD suites only
+        "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256");
+    curl_easy_setopt(cu, CURLOPT_SSL_CIPHER_LIST,                     // (ignored on TLS1.3, set for belt-and-suspenders)
+        "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305");
+#endif
+    // Full handshake every time — no session-ticket / session-id resumption to
+    // correlate or shortcut. Combined with FRESH_CONNECT below.
+    curl_easy_setopt(cu, CURLOPT_SSL_SESSIONID_CACHE, 0L);
+
+    // --- (3) Protocol lockdown (anti-scheme-downgrade / SSRF) ---
     curl_easy_setopt(cu, CURLOPT_DEFAULT_PROTOCOL, "https");
-    curl_easy_setopt(cu, CURLOPT_FOLLOWLOCATION, 0L);                 // never follow a redirect
+    curl_easy_setopt(cu, CURLOPT_FOLLOWLOCATION, 0L);                 // never chase a redirect
     curl_easy_setopt(cu, CURLOPT_MAXREDIRS, 0L);
 #if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x075500   /* 7.85.0 */
-    curl_easy_setopt(cu, CURLOPT_PROTOCOLS_STR, "https");             // https only, no downgrade
+    curl_easy_setopt(cu, CURLOPT_PROTOCOLS_STR, "https");             // https only, no ftp/file/gopher/…
     curl_easy_setopt(cu, CURLOPT_REDIR_PROTOCOLS_STR, "https");
 #else
     curl_easy_setopt(cu, CURLOPT_PROTOCOLS, (long)CURLPROTO_HTTPS);
     curl_easy_setopt(cu, CURLOPT_REDIR_PROTOCOLS, (long)CURLPROTO_HTTPS);
 #endif
-    curl_easy_setopt(cu, CURLOPT_NOPROXY, "*");                       // ignore any device/system proxy (anti-MITM)
-    curl_easy_setopt(cu, CURLOPT_FORBID_REUSE, 1L);                   // no connection reuse
-    curl_easy_setopt(cu, CURLOPT_FRESH_CONNECT, 1L);
 #if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x073d00   /* 7.61.0 */
-    curl_easy_setopt(cu, CURLOPT_TLS13_CIPHERS,                       // strong AEAD suites only
-        "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256");
+    curl_easy_setopt(cu, CURLOPT_DISALLOW_USERNAME_IN_URL, 1L);       // reject creds smuggled into the URL
 #endif
-    // Certificate PINNING — the strongest anti-forgery: even a rogue/installed CA
-    // cannot MITM. Set cfg::PINNED_PUBKEY() to your "sha256//...=" pin.
+    curl_easy_setopt(cu, CURLOPT_FAILONERROR, 1L);                    // treat HTTP >= 400 as an error, no body
+
+    // --- (4) Proxy & credential lockdown (anti-MITM via device settings) ---
+    curl_easy_setopt(cu, CURLOPT_NOPROXY, "*");                       // bypass every proxy for every host
+    curl_easy_setopt(cu, CURLOPT_PROXY, "");                          // and force no proxy explicitly
+    curl_easy_setopt(cu, CURLOPT_NETRC, (long)CURL_NETRC_IGNORED);    // never read ~/.netrc credentials
+    curl_easy_setopt(cu, CURLOPT_UNRESTRICTED_AUTH, 0L);             // don't leak auth across hosts
+
+    // --- (5) Certificate PINNING — the strongest anti-forgery layer ---
+    // Even a rogue or user-installed CA (the classic rooted-device MITM) cannot
+    // intercept: the server's public key must match this pin. Set
+    // cfg::PINNED_PUBKEY() to "sha256//<base64>=".
     { std::string pin = cfg::PINNED_PUBKEY(); if(!pin.empty()) curl_easy_setopt(cu, CURLOPT_PINNEDPUBLICKEY, pin.c_str()); }
+
+    // --- (6) Secure DNS (anti-DNS-spoofing) — optional DoH ---
+    // Resolve the endpoint over an encrypted, verified DNS-over-HTTPS server so a
+    // poisoned local resolver cannot point the app at an attacker's IP.
+#if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x073e00   /* 7.62.0 */
+    { std::string doh = cfg::DOH_URL();
+      if(!doh.empty()){
+          curl_easy_setopt(cu, CURLOPT_DOH_URL, doh.c_str());
+#if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x074c00   /* 7.76.0 */
+          curl_easy_setopt(cu, CURLOPT_DOH_SSL_VERIFYPEER, 1L);       // verify the DoH server too
+          curl_easy_setopt(cu, CURLOPT_DOH_SSL_VERIFYHOST, 2L);
+#endif
+      } }
+#endif
+
+    // --- (7) Connection hygiene & abuse limits ---
+    curl_easy_setopt(cu, CURLOPT_FORBID_REUSE, 1L);                   // don't keep the connection for reuse
+    curl_easy_setopt(cu, CURLOPT_FRESH_CONNECT, 1L);                  // don't reuse an existing one
+    curl_easy_setopt(cu, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)262144); // cap the reply (256 KiB) — no giant-body DoS
+    curl_easy_setopt(cu, CURLOPT_ACCEPT_ENCODING, "identity");        // no compression (sidesteps CRIME/BREACH-style leaks)
     curl_easy_setopt(cu, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(cu, CURLOPT_TIMEOUT, 30L);
 
@@ -267,17 +342,17 @@ bool doLogin(const std::string& userKey, const std::string& game,
           sig_ok = (parts.size()==4) ? ed25519_ok(b64d(spk), plain, b64ud(parts[3])) : 0;
       } }
 
-    // Fields (meaningless tokens = server's R_* constants). Defaults so a
-    // failure response never throws.
-    long long   status = r.value(OBF("sx"), (long long)-1);         // status
-    std::string reason = r.value(OBF("z8"), std::string());         // reason
-    std::string rcn    = r.value(OBF("gh"), std::string());         // cnonce
-    long long   rts    = r.value(OBF("tl"), (long long)0);          // ts
-    json d = r.contains(OBF("d0")) ? r[OBF("d0")] : json::object(); // data
-    std::string token  = d.value(OBF("wv"), std::string());         // token
-    std::string salt   = d.value(OBF("n2"), std::string());         // salt
-    out.id_key  = d.value(OBF("af"), std::string());               // id_key
-    out.expired = d.value(OBF("px"), std::string());               // expired
+    // Fields (real names = server's R_* constants). Defaults so a failure
+    // response never throws.
+    long long   status = r.value(OBF("status"), (long long)-1);          // status
+    std::string reason = r.value(OBF("reason"), std::string());          // reason
+    std::string rcn    = r.value(OBF("cnonce"), std::string());          // cnonce
+    long long   rts    = r.value(OBF("ts"), (long long)0);               // ts
+    json d = r.contains(OBF("data")) ? r[OBF("data")] : json::object();  // data
+    std::string token  = jstr(d, OBF("token"));                          // token
+    std::string salt   = jstr(d, OBF("salt"));                           // salt
+    out.id_key  = jstr(d, OBF("id_key"));                                // id_key (string or number)
+    out.expired = jstr(d, OBF("expired"));                               // expired
 
     std::string expTok = sha256hex(serial + "-" + game + "-" + userKey + "-" + cfg::STATIC_WORDS() + "-" + salt);
     long long   drift  = llabs((long long)time(nullptr) - rts);

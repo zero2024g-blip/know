@@ -49,27 +49,27 @@ class ConnectV2 extends BaseController
 
     private const CLIENT_UA = 'EagleA/1.2';
 
-    // Meaningless wire field names. The source stays readable (these constants),
-    // but on the wire — and in the client's memory — the keys carry no meaning:
-    // "_u" tells a reverse-engineer nothing about "user_key". The CLIENT must use
-    // the exact same tokens (it does, via OBF("_u") etc.). Change them per
-    // release if you like — just keep the two sides in sync.
-    private const F_GAME = '_i';   // game
-    private const F_VER  = '_p';   // app_ver
-    private const F_KEY  = '_u';   // user_key
-    private const F_SER  = '_x';   // serial
-    private const F_PUB  = '_r';   // public
-    private const F_TS   = 'tl';   // ts
-    private const F_CN   = 'gh';   // cnonce
-    private const R_STATUS = 'sx'; // status
-    private const R_REASON = 'z8'; // reason
-    private const R_DATA   = 'd0'; // data
-    private const R_ID     = 'af'; // id_key
-    private const R_TOKEN  = 'wv'; // token
-    private const R_SALT   = 'n2'; // salt
-    private const R_RNG    = 'rj'; // rng
-    private const R_EXP    = 'px'; // expired
-    private const R_ACCESS = 'ca'; // access
+    // Wire field names. These are the real, readable names — matched exactly by
+    // the client (via OBF("game") etc.). Their secrecy is NOT what protects you:
+    // the body is AES-256-GCM sealed and the response is Ed25519-signed, so even
+    // when a reverse-engineer reads these names they cannot forge a valid request
+    // or a "logged in" reply. Keep the two sides in sync if you ever rename them.
+    private const F_GAME = 'game';
+    private const F_VER  = 'app_ver';
+    private const F_KEY  = 'user_key';
+    private const F_SER  = 'serial';
+    private const F_PUB  = 'public';
+    private const F_TS   = 'ts';
+    private const F_CN   = 'cnonce';
+    private const R_STATUS = 'status';
+    private const R_REASON = 'reason';
+    private const R_DATA   = 'data';
+    private const R_ID     = 'id_key';
+    private const R_TOKEN  = 'token';
+    private const R_SALT   = 'salt';
+    private const R_RNG    = 'rng';
+    private const R_EXP    = 'expired';
+    private const R_ACCESS = 'access';
 
     // Per-IP brute-force limit (this is normal protection, not a honeypot).
     private const RL_TABLE  = 'connect_ratelimit';
@@ -238,7 +238,7 @@ class ConnectV2 extends BaseController
         return $this->aes_encrypt($data);
     }
 
-    /** A failure response, using the obfuscated status/reason keys. */
+    /** A failure response. */
     private function fail(string $reason): array
     {
         return [self::R_STATUS => -1, self::R_REASON => $reason];
