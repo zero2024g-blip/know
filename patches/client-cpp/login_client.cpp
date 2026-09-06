@@ -203,35 +203,62 @@ bool doLogin(const std::string& userKey, const std::string& game,
     curl_easy_setopt(cu, CURLOPT_USERAGENT, cfg::USER_AGENT().c_str());
     curl_easy_setopt(cu, CURLOPT_WRITEFUNCTION, sink);
     curl_easy_setopt(cu, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(cu, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(cu, CURLOPT_SSL_VERIFYHOST, 2L);
-    curl_easy_setopt(cu, CURLOPT_FOLLOWLOCATION, 0L);
+    // ---- transport hardening: a verified, pinned, HTTPS-only TLS 1.3 channel
+    //      that ignores device proxies. Together with the Ed25519 response
+    //      signature, this makes interception / a forged server impractical.
+    curl_easy_setopt(cu, CURLOPT_SSL_VERIFYPEER, 1L);                 // verify the CA chain
+    curl_easy_setopt(cu, CURLOPT_SSL_VERIFYHOST, 2L);                 // verify the hostname
+    curl_easy_setopt(cu, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_3);// require TLS 1.3
+    curl_easy_setopt(cu, CURLOPT_USE_SSL, (long)CURLUSESSL_ALL);      // fail if TLS can't be used
+    curl_easy_setopt(cu, CURLOPT_DEFAULT_PROTOCOL, "https");
+    curl_easy_setopt(cu, CURLOPT_FOLLOWLOCATION, 0L);                 // never follow a redirect
+    curl_easy_setopt(cu, CURLOPT_MAXREDIRS, 0L);
+#if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x075500   /* 7.85.0 */
+    curl_easy_setopt(cu, CURLOPT_PROTOCOLS_STR, "https");             // https only, no downgrade
+    curl_easy_setopt(cu, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+    curl_easy_setopt(cu, CURLOPT_PROTOCOLS, (long)CURLPROTO_HTTPS);
+    curl_easy_setopt(cu, CURLOPT_REDIR_PROTOCOLS, (long)CURLPROTO_HTTPS);
+#endif
+    curl_easy_setopt(cu, CURLOPT_NOPROXY, "*");                       // ignore any device/system proxy (anti-MITM)
+    curl_easy_setopt(cu, CURLOPT_FORBID_REUSE, 1L);                   // no connection reuse
+    curl_easy_setopt(cu, CURLOPT_FRESH_CONNECT, 1L);
+#if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x073d00   /* 7.61.0 */
+    curl_easy_setopt(cu, CURLOPT_TLS13_CIPHERS,                       // strong AEAD suites only
+        "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256");
+#endif
+    // Certificate PINNING — the strongest anti-forgery: even a rogue/installed CA
+    // cannot MITM. Set cfg::PINNED_PUBKEY() to your "sha256//...=" pin.
+    { std::string pin = cfg::PINNED_PUBKEY(); if(!pin.empty()) curl_easy_setopt(cu, CURLOPT_PINNEDPUBLICKEY, pin.c_str()); }
     curl_easy_setopt(cu, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(cu, CURLOPT_TIMEOUT, 30L);
-    { std::string pin = cfg::PINNED_PUBKEY(); if(!pin.empty()) curl_easy_setopt(cu, CURLOPT_PINNEDPUBLICKEY, pin.c_str()); }
 
     CURLcode rc = curl_easy_perform(cu);
     curl_slist_free_all(h); curl_easy_cleanup(cu);
+    // Only a genuine transport (network) error is reported specifically — it
+    // says nothing about the protocol. Everything else uses one generic message.
     if(rc != CURLE_OK){ msg = OBF("[ER-C] ") + std::string(curl_easy_strerror(rc)); return false; }
-    if(resp.empty()){ msg = OBF("[!] Empty response from server"); return false; }
 
-    // --- open the response ---
+    std::string GEN = OBF("[-] Login failed.");   // the ONE opaque failure message
+    if(resp.empty()){ msg = GEN; return false; }
+
+    // --- open the response (no message describes which step failed) ---
     std::string TAGS = cfg::TAG_STR();
     std::vector<std::string> parts; { size_t s=0; while(true){ size_t d=resp.find('.',s); if(d==std::string::npos){parts.push_back(resp.substr(s));break;} parts.push_back(resp.substr(s,d-s)); s=d+1; } }
-    if((parts.size()!=3 && parts.size()!=4) || parts[0]!=TAGS){ msg = OBF("[ER-S] Bad response."); return false; }
+    if((parts.size()!=3 && parts.size()!=4) || parts[0]!=TAGS){ msg = GEN; return false; }
 
     Bytes rnonce = b64ud(parts[1]);
     Bytes rblob  = b64ud(parts[2]);
-    if((int)rnonce.size()!=cfg::NONCE || (int)rblob.size()<=cfg::TAG){ msg = OBF("[ER-S] Bad response."); return false; }
+    if((int)rnonce.size()!=cfg::NONCE || (int)rblob.size()<=cfg::TAG){ msg = GEN; return false; }
     Bytes rtag(rblob.end()-cfg::TAG, rblob.end());
     Bytes rct(rblob.begin(), rblob.end()-cfg::TAG);
 
     std::string plain;
-    if(!gcm_open(key, rnonce, TAGS, rct, rtag, plain)){ msg = OBF("[ER-S] Decryption failed."); return false; }
+    if(!gcm_open(key, rnonce, TAGS, rct, rtag, plain)){ msg = GEN; return false; }
 
     json r;
     try { r = json::parse(plain); }
-    catch(json::exception& e){ msg = OBF("[ER-J] Parsing error: ") + std::string(e.what()); return false; }
+    catch(...) { msg = GEN; return false; }   // never leak parser detail (e.what())
 
     // signature check (1 = good). Required when a public key is configured.
     int sig_ok = 1;
@@ -271,12 +298,17 @@ bool doLogin(const std::string& userKey, const std::string& game,
     std::memcpy(out.session, sess.data(), 32);
     out.advisory_ok = (acc == 0);
 
-    // ---- detailed message (cosmetic only; the gate above is out.session) ----
-    if      (status != 1)                 msg = OBF("[ER-S] ") + (reason.empty() ? OBF("Unknown error") : reason);
-    else if (!sig_ok)                     msg = OBF("[ER-S] Signature verification failed.");
-    else if (drift >= 60)                 msg = OBF("[ER-S] Invalid response time. Please check your device clock.");
-    else if (neq(token, expTok) != 0)     msg = OBF("[ER-S] Data verification failed.");
-    else                                  msg = OBF("[+] Successfully Logged In");
+    // ---- message policy (cosmetic; the real gate is out.session) ----
+    // Never reveal WHICH client-side check failed — a differential message is an
+    // oracle that helps a reverser + AI map the protocol. So:
+    //   * success            -> the success line
+    //   * a server licence status (blocked/expired/…) -> pass it through (the
+    //     user legitimately needs it; it does not describe the client crypto)
+    //   * any client-side verification failure (signature / cnonce / time /
+    //     token) -> the SAME opaque generic message, indistinguishable.
+    if      (out.advisory_ok) msg = OBF("[+] Successfully Logged In");
+    else if (status != 1)     msg = OBF("[-] ") + (reason.empty() ? OBF("Login failed.") : reason);
+    else                      msg = GEN;
 
     return out.advisory_ok;
 }
