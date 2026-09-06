@@ -62,8 +62,8 @@ connect.signKeyV2 = <خطِ گوشی>
 # connect.payloadKeyV2 = <هر متن>   (نگذاری → از aesKey مشتق می‌شود)
 ```
 
-## گام ۶ — (اختیاری) جدول‌ها
-`migration-connector.sql` را در phpMyAdmin اجرا کن (هانی‌پات + revokeِ سرعتی). کانکتور بدونشان هم کار می‌کند.
+## گام ۶ — جدول
+این نسخه **بدونِ هانی‌پات** است و فقط به جدولِ `connect_ratelimit` نیاز دارد (که از قبل در دیتابیست هست — همان که Connect.php استفاده می‌کند). هیچ جدول جدیدی لازم نیست.
 
 ---
 
@@ -75,22 +75,30 @@ curl -i https://panel.zeromods.id/data/zezr_connector_v2
 تستِ واقعی را کلاینت C++ انجام می‌دهد (زیر).
 
 ## کلاینت
-`eagle_connector_v2.cpp` — چهار ثابتِ بالا را پر کن:
+`login_client.cpp` — تابعِ لاگین به سبکِ خودت (`doLogin`)، با فیلدهای ساده و
+همان هندشیکِ token، ولی با **AES-GCM + امضای Ed25519 + cnonce**. ثابت‌های بالا را پر کن:
 ```cpp
-AES_KEY_HEX     = "..."   // = connect.aesKeyV2 (یا connect.aesKey)
-PUBLIC_KEY      = "..."   // = $Public_Key
-STATIC_WORDS    = "..."   // = $staticWords
-ENDPOINT        = "https://panel.zeromods.id/data/zezr_connector_v2"
-SIGN_PUBKEY_B64 = "..."   // کلید عمومیِ گوشی
+AES_KEY_HEX      = "..."   // = connect.aesKeyV2 (یا connect.aesKey)
+PUBLIC_KEY       = "..."   // = $Public_Key
+STATIC_WORDS     = "..."   // = $staticWords
+ACCESS           = "..."   // = $setAccess
+ENDPOINT         = "https://panel.zeromods.id/data/zezr_connector_v2"
+SIGN_PUBKEY_B64  = "..."   // کلید عمومیِ گوشی
+PINNED_PUBKEY    = "sha256//..."   // اختیاری: همان cert-pinningِ قبلی‌ات
 ```
+- `deviceSerial()` را به `getSystemProperty("ro.serialno")+...` خودت وصل کن (نمونه در فایل کامنت شده).
+- UA همان `EagleA/1.2` است (مثل کلاینت قبلی‌ات).
+
 بیلدِ تست روی کامپیوتر:
 ```
-g++ -std=c++17 eagle_connector_v2.cpp -o eagle_v2 -lcurl -lcrypto -I./third_party
-./eagle_v2 CODM "1.2.3:BUILDID" USER_KEY DEVICE-SERIAL
-# انتظار:  config opened: yes
+g++ -std=c++17 -DLOGIN_DEMO login_client.cpp -o login -lcurl -lcrypto -I./third_party
+./login CODM "1.2.3:BUILDID" USER_KEY
+# انتظار:  [+] Successfully Logged In
 ```
 (`third_party/nlohmann/json.hpp` لازم است — github.com/nlohmann/json)
 
-`hardening.c` و `guard.c` را هم به بیلدِ نهایی اضافه کن (لایه‌ی ضدتحلیل).
+**بی‌اعتمادیِ دوطرفه (تست‌شده):** لاگینِ درست ✅ ؛ سرورِ جعلی/کلید امضای غلط → رد ✅ ؛
+replay (cnonce غلط) → رد ✅ ؛ access غلط → رد ✅.
 
+`hardening.c` و `guard.c` را هم به بیلدِ نهایی اضافه کن (لایه‌ی ضدتحلیل).
 اندروید NDK: همین سورس‌ها کامپایل می‌شوند؛ به libcurl + BoringSSL لینک کن. جاوا لازم نیست.

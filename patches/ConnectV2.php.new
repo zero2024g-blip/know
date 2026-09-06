@@ -7,43 +7,33 @@ use CodeIgniter\I18n\Time;
 
 /**
  * ============================================================================
- *  CONNECTOR v2  (app/Controllers/ConnectV2.php)
+ *  CONNECTOR v2  (app/Controllers/ConnectV2.php)   —  no honeypot, mutual trust
  * ============================================================================
- *  A SECOND connector that runs ALONGSIDE the original Connect.php, on its own
- *  route (/data/zezr_connector_v2). The old connector keeps working untouched.
+ *  Runs ALONGSIDE your existing Connect.php (v1), on its own route
+ *  /data/zezr_connector_v2. Your Connect.php is untouched.
  *
- *  Layers, from the wire inward:
- *   1. AES-256-GCM transport, namespace "EG2" (v1 is "EG1"). Fresh nonce per
- *      message; a sniffer sees only noise, never field names.
- *   2. Ed25519 SIGNED responses. The secret key lives only on the server
- *      (.env connect.signKeyV2); the client verifies with an embedded public
- *      key and refuses anything unsigned. A cloned client or a fake server
- *      cannot forge an activation.
- *   3. OBFUSCATED field names inside the (already encrypted) JSON. Opaque keys
- *      like "z2","d5" instead of user_key/serial — a small extra cost to
- *      anyone who has unpacked the client and is reading its decrypted traffic.
- *   4. SERVER-DELIVERED PAYLOAD. The response carries "kx": a per-session
- *      secret the client needs to actually work, derived from a server-only
- *      key. A patched client that skips the licence check never receives a
- *      usable kx — this is the one thing that resists a rooted, patched client.
- *   5. TAMPER SIGNAL. The client reports a flags bitmask ("h9"); a debugger or
- *      a hooking framework (Frida/Xposed) gets the serial quietly blacklisted.
- *      ROOT ALONE is only logged, never auto-blocked — many honest customers
- *      run rooted phones.
- *   6. DEFENSIVE HONEYPOT. "Canary" keys (seed them where crackers look) look
- *      valid but flag whoever uses them; a flagged serial gets a POISONED
- *      success (a junk kx), so the cracker thinks it worked while it does not.
- *      Nothing runs on anyone's device — all of this is server-side.
+ *  Neither side trusts the other by default:
  *
- *  Fill in the SAME five things as Connect.php (staticWords, Public_Key,
- *  setAccess, per-game versions), plus (optional) separate .env keys:
- *     connect.aesKeyV2     64 hex   (falls back to connect.aesKey)
- *     connect.signKeyV2    base64   (Ed25519 secret; run patches/genkey-sign.php)
- *     connect.payloadKeyV2 any text (falls back to a value derived from aesKey)
+ *   - The SERVER does not trust the client: the request is AES-256-GCM sealed
+ *     (so a tampered body fails to open), the public key is checked timing-safe,
+ *     the licence + device + version are all validated, and per-IP rate limiting
+ *     stops key guessing.
  *
- *  Needs the small tables in MIGRATION.sql section 14 (blacklist / canary /
- *  flags). If they are absent the connector still works; only the honeypot and
- *  tamper recording go quiet (logged).
+ *   - The CLIENT does not trust the server: every response is SIGNED with an
+ *     Ed25519 key that lives only here (connect.signKeyV2). The client verifies
+ *     it with an embedded public key, so a fake/MITM server cannot forge a
+ *     "logged in" — even if it stole the AES key from the app. The response also
+ *     echoes the client's one-time `cnonce` inside the signed bytes, so a
+ *     captured valid response cannot be replayed.
+ *
+ *  Wire (one line of ASCII):
+ *     request  : EG2.<b64url nonce>.<b64url ct||tag>
+ *     response : EG2.<b64url nonce>.<b64url ct||tag>.<b64url ed25519 sig>
+ *
+ *  Fill in the SAME values you use in Connect.php (staticWords, Public_Key,
+ *  setAccess, per-game versions). Keys from .env:
+ *     connect.signKeyV2   base64 Ed25519 secret  (generate off-server; required)
+ *     connect.aesKeyV2    64 hex                  (optional; falls back to connect.aesKey)
  * ============================================================================
  */
 class ConnectV2 extends BaseController
@@ -51,73 +41,19 @@ class ConnectV2 extends BaseController
     protected $model;
     protected $staticWords, $Public_Key, $setAccess;
     protected $aes_key;
-    private $sign_sk = null;       // Ed25519 secret key (64 bytes) or null
-    private $payload_key = null;   // raw key for the per-session payload HMAC
+    private $sign_sk = null;
 
     protected $maintenance;
-    /** The client's nonce for this request, echoed back in the reply. */
     private $reply_nonce = null;
     protected $codm_version, $pubgm_version, $ffm_version, $dfm_version, $mlbb_version, $spof_version;
 
-    private const CLIENT_UA = 'EagleA/2.0';
+    private const CLIENT_UA = 'EagleA/1.2';
 
-    // --- rate limit (shared with v1) ---
+    // Per-IP brute-force limit (this is normal protection, not a honeypot).
     private const RL_TABLE  = 'connect_ratelimit';
     private const RL_LIMIT  = 20;
     private const RL_WINDOW = 300;
     private const RL_BLOCK  = 900;
-
-    // --- honeypot / tamper tables ---
-    private const BL_TABLE     = 'connect_blacklist';
-    private const CANARY_TABLE = 'connect_canary';
-    private const FLAG_TABLE   = 'connect_flags';
-    private const ACT_TABLE    = 'connect_activations';  // one row per successful activation
-    private const REVOKE_TABLE = 'connect_revoked';      // keys shut off (auto or by admin)
-
-    // --- redistribution detection --------------------------------------------
-    //  A public "free build" made from ONE bought key means that one key lights
-    //  up from many IPs. Counting distinct IPs per key over a window catches it.
-    //  SOFT = log evidence; HARD = auto-revoke + poison. Tune to your traffic:
-    //  a single buyer maps to a handful of devices, not dozens of IPs/hour.
-    private const VEL_WINDOW = 3600;   // 1 hour
-    private const VEL_SOFT   = 15;     // distinct IPs/hour -> record evidence
-    private const VEL_HARD   = 40;     // distinct IPs/hour -> revoke the key
-    private const FLAG_VELOCITY = 256; // marker in connect_flags.flags
-
-    // --- tamper flag bits (must match the C++ client) ---
-    private const FLAG_DEBUG = 1;   // a debugger is attached
-    private const FLAG_ROOT  = 2;   // device is rooted   (informational only)
-    private const FLAG_HOOK  = 4;   // Frida/Xposed/substrate present
-    private const FLAG_EMU   = 8;   // emulator            (informational only)
-    /** Which flags are strong enough to auto-blacklist. Root/emulator are NOT. */
-    private const TAMPER_BLOCK_MASK = self::FLAG_DEBUG | self::FLAG_HOOK;
-
-    // --- obfuscated wire field names -------------------------------------
-    //  request  (client -> server)
-    private const RQ_GAME = 'q0';
-    private const RQ_VER  = 'q7';
-    private const RQ_KEY  = 'z2';
-    private const RQ_SER  = 'd5';
-    private const RQ_PUB  = 'p1';
-    private const RQ_TS   = 't';
-    private const RQ_NON  = 'n';
-    private const RQ_TAMP = 'h9';
-    //  response (server -> client)
-    private const RS_STATUS = 's';
-    private const RS_DATA   = 'd';
-    private const RS_GAME   = 'g';
-    private const RS_NON    = 'n';
-    private const RS_TS     = 't';
-    private const RS_REASON = 'e';
-    private const RD_ID     = 'i';
-    private const RD_TOKEN  = 'tk';
-    private const RD_SALT   = 'sl';
-    private const RD_RNG    = 'rg';
-    private const RD_EXP    = 'xp';
-    private const RD_ACCESS = 'ac';
-    private const RD_PAYLOAD = 'kx';   // the per-session secret (base64)
-    private const RD_CFG     = 'rc';   // config encrypted UNDER that secret
-    private const RG_TTIME  = 'tt';
 
     public function __construct()
     {
@@ -138,35 +74,30 @@ class ConnectV2 extends BaseController
                 log_message('critical', 'connect.signKeyV2 is set but malformed — v2 responses will NOT be signed.');
             }
         } else {
-            log_message('warning', 'connect.signKeyV2 is not set — v2 responses are unsigned. Run patches/genkey-sign.php.');
+            log_message('warning', 'connect.signKeyV2 is not set — v2 responses are unsigned. A client that requires a signature will refuse them.');
         }
-
-        // Per-session payload key. A dedicated .env value if given, else a value
-        // derived from the AES key so it works out of the box (but set your own
-        // to make the payload independent of the transport key).
-        $pk = (string) (env('connect.payloadKeyV2') ?: '');
-        $this->payload_key = $pk !== '' ? $pk : hash_hmac('sha256', 'v2-payload', $this->aes_key, true);
 
         $this->model = new KeysModel();
         $this->maintenance = \App\Models\SettingModel::maintenance();
 
+        // Must match the client:
         $this->staticWords = "YOUR_STATIC_WORDS";
-        $this->Public_Key = "YOUR_PUBLIC_KEY";
-        $this->setAccess = "YOUR_ACCESS_TOKEN";
+        $this->Public_Key  = "YOUR_PUBLIC_KEY";
+        $this->setAccess   = "YOUR_ACCESS_TOKEN";
 
-        $this->codm_version = "X.Y.Z:YOURBUILDID";
+        $this->codm_version  = "X.Y.Z:YOURBUILDID";
         $this->pubgm_version = "X.Y.Z:YOURBUILDID";
-        $this->ffm_version = "X.Y.Z:YOURBUILDID";
-        $this->dfm_version = "X.Y.Z:YOURBUILDID";
-        $this->mlbb_version = "0.0.1:YOURBUILDID";
-        $this->spof_version = "X.Y.Z:YOURBUILDID";
+        $this->ffm_version   = "X.Y.Z:YOURBUILDID";
+        $this->dfm_version   = "X.Y.Z:YOURBUILDID";
+        $this->mlbb_version  = "0.0.1:YOURBUILDID";
+        $this->spof_version  = "X.Y.Z:YOURBUILDID";
     }
 
     public function index()
     {
         if ($this->request->getPost()) {
-            $u_a = $_SERVER['HTTP_USER_AGENT'] ?? 'None';
-            if ($u_a !== self::CLIENT_UA) {
+            $ua = $_SERVER['HTTP_USER_AGENT'] ?? 'None';
+            if ($ua !== self::CLIENT_UA) {
                 return redirect()->to('/');
             }
             return $this->index_post();
@@ -174,103 +105,53 @@ class ConnectV2 extends BaseController
         return redirect()->to('/');
     }
 
-    /**
-     * A DECOY endpoint. Its route is not used by the real client and only shows
-     * up to someone reading decompiled strings. Any hit is a strong sign of
-     * probing, so it records the caller and answers with a bland refusal.
-     */
-    public function decoy()
-    {
-        try {
-            db_connect()->table(self::FLAG_TABLE)->insert([
-                'serial'     => 'DECOY',
-                'ip_hash'    => md5('connect_' . $this->clientIp()),
-                'flags'      => 0,
-                'user_key'   => substr((string) $this->request->getPost('data'), 0, 64),
-                'created_at' => date('Y-m-d H:i:s'),
-            ]);
-        } catch (\Throwable $e) {
-        }
-        return $this->response->setStatusCode(200)->setJSON(['status' => -1, 'reason' => 'Invalid Parameter.']);
-    }
-
     public function index_post()
     {
         $ipHash = md5('connect_' . $this->clientIp());
 
         if ($this->rlRemaining($ipHash) > 0) {
-            return $this->aes_encrypt($this->fail('Invalid Parameter.'));
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
         }
         if ($this->aes_key === null) {
             return $this->response->setStatusCode(503)->setBody('');
         }
 
-        $raw_data = $this->request->getPost('data');
-        if (! $raw_data) {
+        $raw = $this->request->getPost('data');
+        if (! $raw) {
             return $this->response->setJSON(['status' => -1, 'error' => 'No data received.']);
         }
 
-        $p = $this->aes_decrypt($raw_data);
+        $p = $this->aes_decrypt($raw);
         if (! $p) {
-            return $this->aes_encrypt($this->fail('Decryption failed.'));
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Decryption failed.']);
         }
 
-        // Un-obfuscate onto readable locals.
-        $game      = $p[self::RQ_GAME] ?? null;
-        $aVer      = $p[self::RQ_VER]  ?? null;
-        $uKey      = $p[self::RQ_KEY]  ?? null;
-        $sDev      = $p[self::RQ_SER]  ?? null;
-        $PublicKey = $p[self::RQ_PUB]  ?? null;
-        $tamper    = (int) ($p[self::RQ_TAMP] ?? 0);
+        $game      = $p['game']     ?? null;
+        $aVer      = $p['app_ver']  ?? null;
+        $uKey      = $p['user_key'] ?? null;
+        $sDev      = $p['serial']   ?? null;
+        $PublicKey = $p['public']   ?? null;
 
-        // Minimal presence check (validation lib would need the obfuscated names).
-        if (! $this->str($game) || ! $this->str($aVer) || ! $this->str($uKey)
-            || ! $this->str($sDev) || ! $this->str($PublicKey) || strlen((string) $game) < 2) {
+        // presence
+        if (! $this->str($game) || strlen((string) $game) < 2 || ! $this->str($aVer)
+            || ! $this->str($uKey) || ! $this->str($sDev) || ! $this->str($PublicKey)) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt($this->fail('Invalid Parameter.'));  // #E-1
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);   // E-1
         }
 
         // A serial with a comma would split the stored device list.
         if (strpos((string) $sDev, ',') !== false) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt($this->fail('Invalid Parameter.'));
-        }
-
-        // ---- honeypot / tamper, before any real work ----
-        if ($tamper !== 0) {
-            $this->recordFlag($sDev, $ipHash, $tamper, $uKey);
-            if ($tamper & self::TAMPER_BLOCK_MASK) {
-                $this->blacklist($sDev, $ipHash, 'tamper', $tamper);
-            }
-        }
-        $poison = false;
-        if ($this->isCanary($uKey)) {
-            // A canary key: near-certain a cracker. Flag and poison, but look
-            // successful so they waste time on a kx that does not work.
-            $this->blacklist($sDev, $ipHash, 'canary', $tamper);
-            log_message('warning', 'ConnectV2 canary key used from {ip}', ['ip' => $this->clientIp()]);
-            $poison = true;
-        }
-        if (! $poison && $this->isBlacklisted($sDev)) {
-            $poison = true;
-        }
-        // A key we already shut off (auto-revoked for redistribution, or by an
-        // admin) gets the poison path — the free build "works" but is broken.
-        if (! $poison && $this->isRevokedKey($uKey)) {
-            $poison = true;
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
         }
 
         if ($this->maintenance) {
-            return $this->aes_encrypt($this->fail(\App\Models\SettingModel::maintenanceMessage())); // #E-2
+            return $this->aes_encrypt(['status' => -1, 'reason' => \App\Models\SettingModel::maintenanceMessage()]); // E-2
         }
 
+        // Timing-safe: the server does not trust the client's public key blindly.
         if (! hash_equals($this->Public_Key, (string) $PublicKey)) {
-            return $this->aes_encrypt($this->fail('Invalid Public Key.'));  // #E-5
-        }
-
-        // A poisoned caller gets a fabricated success and touches nothing real.
-        if ($poison) {
-            return $this->aes_encrypt($this->poisonSuccess($game));
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Public Key.']); // E-5
         }
 
         $time    = new Time();
@@ -278,188 +159,61 @@ class ConnectV2 extends BaseController
 
         if (! $findKey) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt($this->fail('License/Key is Not Registered.'));  // #E-10
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'License/Key is Not Registered.']); // E-10
         }
         if ($findKey->status != 1) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt($this->fail('License/Key is Blocked.'));  // #E-6
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'License/Key is Blocked.']); // E-6
         }
         if ($this->isUpdate($aVer, $game)) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt($this->fail('Please Update Your App.'));  // #E-9
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Please Update Your App.']); // E-9
         }
 
-        $id_keys  = $findKey->id_keys;
-        $expired  = $findKey->expired_date;
-        $max_dev  = $findKey->max_devices;
+        $id_keys    = $findKey->id_keys;
+        $expired    = $findKey->expired_date;
+        $max_dev    = $findKey->max_devices;
         $setExpired = null;
 
         if (empty($expired)) {
             $hours = (int) $findKey->duration;
             if ($hours < 1) {
                 $this->rlFail($ipHash);
-                return $this->aes_encrypt($this->fail('License/Key is Not Registered.'));
+                return $this->aes_encrypt(['status' => -1, 'reason' => 'License/Key is Not Registered.']);
             }
             $setExpired = $time::now()->addHours($hours);
             $this->model->update($id_keys, ['expired_date' => $setExpired->toDateTimeString()]);
         } elseif ($time::now()->isAfter($expired)) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt($this->fail('License/Key is Expired.'));  // #E-8
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'License/Key is Expired.']); // E-8
         }
 
         if (! $this->claimDeviceSlot($id_keys, $sDev, $max_dev)) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt($this->fail('Max Devices Reached.'));  // #E-7
-        }
-
-        // ---- redistribution guard ----
-        // Record this activation, then see how many distinct IPs this one key
-        // has served lately. One buyer = a few IPs; a free public build = many.
-        $this->recordActivation($uKey, $sDev, $ipHash);
-        $ips = $this->keyDistinctIPs($uKey);
-        if ($ips >= self::VEL_HARD) {
-            // Clear redistribution: shut the key off and hand THIS caller a
-            // poisoned (broken) activation, so the public build dies.
-            $this->revokeKey($uKey, 'velocity');
-            $this->recordFlag($sDev, $ipHash, self::FLAG_VELOCITY, $uKey);
-            return $this->aes_encrypt($this->poisonSuccess($game));
-        }
-        if ($ips >= self::VEL_SOFT) {
-            // Suspicious but not conclusive: leave evidence for the admin.
-            $this->recordFlag($sDev, $ipHash, self::FLAG_VELOCITY, $uKey);
+            return $this->aes_encrypt(['status' => -1, 'reason' => 'Max Devices Reached.']); // E-7
         }
 
         // ---- success ----
-        $salt    = bin2hex(random_bytes(8));
-        $real    = "$sDev-$game-$uKey-$this->staticWords-$salt";
-        $expOut  = empty($expired) ? $setExpired->toDateTimeString() : $expired;
+        $salt   = bin2hex(random_bytes(8));
+        $expOut = empty($expired) ? $setExpired->toDateTimeString() : $expired;
+        // The client recomputes this and only trusts the server if it matches —
+        // proof the server knows staticWords.
+        $real   = "$sDev-$game-$uKey-$this->staticWords-$salt";
 
-        $tt = ['CODM' => 110, 'PUBGM' => 120, 'FF' => 130, 'DFM' => 140][$game] ?? 0;
-
-        // The per-session secret and the config encrypted under it. A client
-        // that did not genuinely activate cannot derive the right key, so the
-        // config will not open — this is the layer that survives a patched app.
-        $kxRaw = $this->kxRaw($id_keys, $sDev, $salt, $expOut);
         $data = [
-            self::RS_STATUS => 1,
-            self::RS_DATA => [
-                self::RD_ID      => $id_keys,
-                self::RD_TOKEN   => hash('sha256', $real),
-                self::RD_SALT    => $salt,
-                self::RD_RNG     => $time->getTimestamp(),
-                self::RD_EXP     => $expOut,
-                self::RD_ACCESS  => $this->setAccess,
-                self::RD_PAYLOAD => base64_encode($kxRaw),
-                self::RD_CFG     => $this->sealConfig($kxRaw, $this->secretConfig($game, $findKey)),
+            'status' => 1,
+            'data' => [
+                'id_key'  => $id_keys,
+                'token'   => hash('sha256', $real),
+                'salt'    => $salt,
+                'rng'     => $time->getTimestamp(),
+                'expired' => $expOut,
+                'access'  => $this->setAccess,
             ],
-            self::RS_GAME => [self::RG_TTIME => $tt],
         ];
 
         $this->rlClear($ipHash);
         return $this->aes_encrypt($data);
-    }
-
-    // -----------------------------------------------------------------
-    //  Response builders
-    // -----------------------------------------------------------------
-
-    private function fail(string $reason): array
-    {
-        return [self::RS_STATUS => -1, self::RS_REASON => $reason];
-    }
-
-    /**
-     * The raw per-session secret (32 bytes), derived from a SERVER-ONLY key so
-     * it cannot be reproduced offline. The client receives it (base64) as kx and
-     * uses it to open the config below.
-     */
-    private function kxRaw($idKey, string $serial, string $salt, string $expired): string
-    {
-        $msg = $idKey . '|' . $serial . '|' . $salt . '|' . $expired;
-        return hash_hmac('sha256', $msg, $this->payload_key, true);
-    }
-
-    /**
-     * THE anti-bypass payload. Your app's real secret (offsets, config, an
-     * unlock value — whatever it needs to actually work) is encrypted here under
-     * a key derived from kx. Only a client that received a genuine kx can open
-     * it; a poisoned/junk kx yields a GCM failure, so a patched client that
-     * skipped activation gets nothing usable.
-     *
-     * Replace secretConfig() with whatever your app truly needs.
-     */
-    private function secretConfig(string $game, $findKey): array
-    {
-        // Everything the module needs to actually run. A bypassed client gets a
-        // junk kx, so it never opens this — no offsets, no asset key, no
-        // entitlements. Replace the placeholder values with your real ones.
-        return [
-            'v' => 3,                          // config schema version
-
-            // Features this key/tier unlocks. The SERVER decides; the client
-            // only turns on what is listed. Gate per licence here.
-            'feat' => ['aim', 'esp', 'radar'],
-
-            // Per-build memory offsets the module reads. The crown jewels:
-            // delivered from here so a bypass has none, AND so you can hot-fix
-            // them after a game update without shipping a new build. Rotate
-            // these server-side whenever the game patches.
-            'off' => [
-                'base'   => '0xREPLACE_ME',
-                'entity' => '0xREPLACE_ME',
-                'matrix' => '0xREPLACE_ME',
-            ],
-
-            // Key to decrypt your bundled encrypted assets/scripts (see
-            // feature_example.c). It never ships in the binary — it arrives
-            // here, inside the encrypted config. Keep the same key server-side
-            // to encrypt those assets once.
-            'res_key' => base64_encode(hash('sha256', 'asset-key|' . $this->payload_key . '|' . $game, true)),
-
-            // Server-controlled tunables (limits, timings the app must obey).
-            'tune' => ['t_time' => ['CODM' => 110, 'PUBGM' => 120, 'FF' => 130, 'DFM' => 140][$game] ?? 100],
-
-            // Time-box. A hard expiry (kill switch) and how often the client
-            // must re-activate. Short life + re-activation makes a dumped config
-            // go stale fast.
-            'exp' => $findKey->expired_date ?: null,
-            'hb'  => 300,                       // re-activate every 5 min
-
-            // Per-key watermark. If a config leaks, this points at the source
-            // key — your leak trace.
-            'wm' => substr(hash('sha256', 'wm|' . $this->payload_key . '|' . $findKey->id_keys), 0, 12),
-        ];
-    }
-
-    /** AES-256-GCM the config under a key derived from the raw kx. */
-    private function sealConfig(string $kxRaw, array $config): string
-    {
-        $cfgKey = hash('sha256', 'EG2cfg' . $kxRaw, true);   // 32 bytes
-        $nonce  = random_bytes(12);
-        $tag    = '';
-        $ct = openssl_encrypt(json_encode($config), 'aes-256-gcm', $cfgKey,
-            OPENSSL_RAW_DATA, $nonce, $tag, 'EG2CFG', 16);
-        return base64_encode($nonce . $ct . $tag);
-    }
-
-    /** A fabricated success with a junk payload, for a flagged/canary caller. */
-    private function poisonSuccess(string $game): array
-    {
-        $tt = ['CODM' => 110, 'PUBGM' => 120, 'FF' => 130, 'DFM' => 140][$game] ?? 0;
-        return [
-            self::RS_STATUS => 1,
-            self::RS_DATA => [
-                self::RD_ID      => random_int(1000, 9999),
-                self::RD_TOKEN   => hash('sha256', random_bytes(16)),
-                self::RD_SALT    => bin2hex(random_bytes(8)),
-                self::RD_RNG     => time(),
-                self::RD_EXP     => date('Y-m-d H:i:s', time() + 86400 * 30),
-                self::RD_ACCESS  => $this->setAccess,
-                self::RD_PAYLOAD => base64_encode(random_bytes(32)),  // junk kx
-                self::RD_CFG     => base64_encode(random_bytes(60)),  // junk cfg, will not open
-            ],
-            self::RS_GAME => [self::RG_TTIME => $tt],
-        ];
     }
 
     private function str($v): bool
@@ -468,127 +222,8 @@ class ConnectV2 extends BaseController
     }
 
     // -----------------------------------------------------------------
-    //  Honeypot + tamper storage (all fail-soft; a missing table only
-    //  disables the feature, it never breaks activation)
+    //  Rate limit (per-IP brute-force protection)
     // -----------------------------------------------------------------
-
-    private function isCanary($uKey): bool
-    {
-        try {
-            return db_connect()->table(self::CANARY_TABLE)
-                ->where('user_key', (string) $uKey)->countAllResults() > 0;
-        } catch (\Throwable $e) {
-            return false;
-        }
-    }
-
-    private function isBlacklisted($serial): bool
-    {
-        try {
-            return db_connect()->table(self::BL_TABLE)
-                ->where('serial', (string) $serial)->countAllResults() > 0;
-        } catch (\Throwable $e) {
-            return false;
-        }
-    }
-
-    private function blacklist(string $serial, string $ipHash, string $reason, int $flags): void
-    {
-        try {
-            $db = db_connect();
-            if ($db->table(self::BL_TABLE)->where('serial', $serial)->countAllResults() > 0) {
-                return;
-            }
-            $db->table(self::BL_TABLE)->insert([
-                'serial'     => substr($serial, 0, 128),
-                'ip_hash'    => $ipHash,
-                'reason'     => $reason,
-                'flags'      => $flags,
-                'created_at' => date('Y-m-d H:i:s'),
-            ]);
-        } catch (\Throwable $e) {
-        }
-    }
-
-    private function recordFlag(string $serial, string $ipHash, int $flags, $uKey): void
-    {
-        try {
-            db_connect()->table(self::FLAG_TABLE)->insert([
-                'serial'     => substr($serial, 0, 128),
-                'ip_hash'    => $ipHash,
-                'flags'      => $flags,
-                'user_key'   => substr((string) $uKey, 0, 96),
-                'created_at' => date('Y-m-d H:i:s'),
-            ]);
-        } catch (\Throwable $e) {
-        }
-    }
-
-    private function isRevokedKey($uKey): bool
-    {
-        try {
-            return db_connect()->table(self::REVOKE_TABLE)
-                ->where('user_key', (string) $uKey)->countAllResults() > 0;
-        } catch (\Throwable $e) {
-            return false;
-        }
-    }
-
-    private function revokeKey(string $uKey, string $reason): void
-    {
-        try {
-            $db = db_connect();
-            if ($db->table(self::REVOKE_TABLE)->where('user_key', $uKey)->countAllResults() > 0) {
-                return;
-            }
-            $db->table(self::REVOKE_TABLE)->insert([
-                'user_key'   => substr($uKey, 0, 96),
-                'reason'     => $reason,
-                'created_at' => date('Y-m-d H:i:s'),
-            ]);
-            log_message('warning', 'ConnectV2 auto-revoked key for {r}', ['r' => $reason]);
-        } catch (\Throwable $e) {
-        }
-    }
-
-    private function recordActivation(string $uKey, string $serial, string $ipHash): void
-    {
-        try {
-            db_connect()->table(self::ACT_TABLE)->insert([
-                'user_key'   => substr($uKey, 0, 96),
-                'serial'     => substr($serial, 0, 128),
-                'ip_hash'    => $ipHash,
-                'created_at' => date('Y-m-d H:i:s'),
-            ]);
-        } catch (\Throwable $e) {
-        }
-    }
-
-    /** Distinct IPs this key has activated from within the velocity window. */
-    private function keyDistinctIPs(string $uKey): int
-    {
-        try {
-            $db  = db_connect();
-            // Opportunistic cleanup so the log cannot grow without bound.
-            if (random_int(1, 50) === 1) {
-                $db->table(self::ACT_TABLE)
-                   ->where('created_at <', date('Y-m-d H:i:s', time() - 7 * 86400))->delete();
-            }
-            $since = date('Y-m-d H:i:s', time() - self::VEL_WINDOW);
-            $row = $db->table(self::ACT_TABLE)
-                ->select('COUNT(DISTINCT ip_hash) AS c', false)
-                ->where('user_key', $uKey)->where('created_at >=', $since)
-                ->get()->getRow();
-            return $row ? (int) $row->c : 0;
-        } catch (\Throwable $e) {
-            return 0;
-        }
-    }
-
-    // -----------------------------------------------------------------
-    //  Rate limit (shared table with v1)
-    // -----------------------------------------------------------------
-
     private function rlRemaining(string $ipHash): int
     {
         try {
@@ -636,6 +271,7 @@ class ConnectV2 extends BaseController
         try { db_connect()->table(self::RL_TABLE)->where('ip_hash', $ipHash)->delete(); } catch (\Throwable $e) {}
     }
 
+    // Atomic per-device slot claim. max_devices <= 0 means unlimited.
     private function claimDeviceSlot(int $idKeys, string $serial, $maxDev): bool
     {
         $db = \Config\Database::connect();
@@ -677,10 +313,7 @@ class ConnectV2 extends BaseController
 
     // -----------------------------------------------------------------
     //  Transport crypto — AES-256-GCM "EG2" + Ed25519 signing
-    //  Request : EG2.<b64u nonce>.<b64u ct||tag>
-    //  Response: EG2.<b64u nonce>.<b64u ct||tag>.<b64u sig>
     // -----------------------------------------------------------------
-
     private const CRYPTO_VERSION = 'EG2';
     private const CRYPTO_CIPHER  = 'aes-256-gcm';
     private const NONCE_BYTES    = 12;
@@ -691,7 +324,6 @@ class ConnectV2 extends BaseController
     {
         return rtrim(strtr(base64_encode($bin), '+/', '-_'), '=');
     }
-
     private function b64u_decode(string $txt): string|false
     {
         return base64_decode(strtr($txt, '-_', '+/'), true);
@@ -709,40 +341,40 @@ class ConnectV2 extends BaseController
             || strlen($nonce) !== self::NONCE_BYTES || strlen($blob) <= self::TAG_BYTES) {
             return null;
         }
-        $tag        = substr($blob, -self::TAG_BYTES);
-        $ciphertext = substr($blob, 0, -self::TAG_BYTES);
+        $tag = substr($blob, -self::TAG_BYTES);
+        $ct  = substr($blob, 0, -self::TAG_BYTES);
 
-        $plain = openssl_decrypt($ciphertext, self::CRYPTO_CIPHER, $this->aes_key,
+        $plain = openssl_decrypt($ct, self::CRYPTO_CIPHER, $this->aes_key,
             OPENSSL_RAW_DATA, $nonce, $tag, self::CRYPTO_VERSION);
         if ($plain === false) { return null; }
 
         $params = json_decode($plain, true);
         if (json_last_error() !== JSON_ERROR_NONE || ! is_array($params)) { return null; }
 
-        $ts = (int) ($params[self::RQ_TS] ?? 0);
+        $ts = (int) ($params['ts'] ?? 0);
         if ($ts <= 0 || abs(time() - $ts) > self::MAX_SKEW) { return null; }
 
-        $this->reply_nonce = $params[self::RQ_NON] ?? null;
+        $this->reply_nonce = $params['cnonce'] ?? null;
         return $params;
     }
 
     private function aes_encrypt($data)
     {
         if (! empty($this->reply_nonce)) {
-            $data[self::RS_NON] = $this->reply_nonce;
+            $data['cnonce'] = $this->reply_nonce;   // bind the reply to the request
         }
-        $data[self::RS_TS] = time();
+        $data['ts'] = time();
 
         $plain = json_encode($data);
 
         $nonce = random_bytes(self::NONCE_BYTES);
         $tag   = '';
-        $ciphertext = openssl_encrypt($plain, self::CRYPTO_CIPHER, $this->aes_key,
+        $ct = openssl_encrypt($plain, self::CRYPTO_CIPHER, $this->aes_key,
             OPENSSL_RAW_DATA, $nonce, $tag, self::CRYPTO_VERSION, self::TAG_BYTES);
 
         $envelope = self::CRYPTO_VERSION
             . '.' . $this->b64u_encode($nonce)
-            . '.' . $this->b64u_encode($ciphertext . $tag);
+            . '.' . $this->b64u_encode($ct . $tag);
 
         if ($this->sign_sk !== null) {
             $envelope .= '.' . $this->b64u_encode(sodium_crypto_sign_detached($plain, $this->sign_sk));
@@ -757,6 +389,5 @@ class ConnectV2 extends BaseController
 }
 
 # -------- Errors -----------
-# "Invalid Parameter" #E-1 | "Maintenance" #E-2 | "Invalid Input" #E-3
-# "Invalid Public Key" #E-5 | "Blocked" #E-6 | "Max Devices" #E-7
-# "Expired" #E-8 | "Update Your App" #E-9 | "Not Registered" #E-10
+# "Invalid Parameter" E-1 | "Maintenance" E-2 | "Invalid Public Key" E-5
+# "Blocked" E-6 | "Max Devices" E-7 | "Expired" E-8 | "Update" E-9 | "Not Registered" E-10
