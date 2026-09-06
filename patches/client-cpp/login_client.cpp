@@ -1,26 +1,36 @@
 // ============================================================================
-//  login_client.cpp — the app-side login for ConnectV2 (no honeypot).
+//  login_client.cpp — app-side login for ConnectV2 (no honeypot), HARDENED.
 //
-//  Mutual distrust, done right:
-//    * the client SEALS the request (AES-256-GCM) and sends a one-time cnonce;
-//    * the server SIGNS the response (Ed25519). The client REFUSES any response
-//      that is not signed by the embedded public key — so a fake/MITM server
-//      cannot forge a login even if it stole the AES key from this binary;
-//    * the client also re-derives the token = SHA256(serial-game-key-static-salt)
-//      and checks the echoed cnonce + fresh timestamp, so a replayed or
-//      hand-built response is rejected.
+//  Two anti-analysis properties on top of the mutual-auth protocol:
 //
-//  Drop-in shaped like your BsjwkO(): fill the config, wire deviceSerial() to
-//  your getSystemProperty(), and (optionally) your CertManager pinning.
+//   1) NO PLAINTEXT STRINGS. Every sensitive literal (field names, URL, UA,
+//      crypto tag, your keys, messages) is wrapped in OBF(); the binary stores
+//      scrambled bytes, decoded only at runtime. Verified: `strings`/grep of the
+//      compiled object does not show the real text. So IDA/AI can't read them.
+//
+//   2) NO FLIPPABLE BOOL. The decision is NOT a `bool` a cracker sets to true,
+//      nor an `if (ok)` to invert. Every verification is folded, branchlessly,
+//      into one accumulator that is ZERO only when ALL of them passed. From it
+//      a 32-byte SESSION KEY is derived: correct only on a fully-valid login,
+//      garbage otherwise. RUN YOUR APP OFF out.session — patching the returned
+//      message/bool yields the "ok" text but a WRONG session, so the app breaks.
+//
+//  Honest note: a debugger can still watch the decrypted strings and force the
+//  accumulator at runtime. This raises cost and kills static analysis; it is not
+//  a wall. Pair it with hardening.c/guard.c and the per-release diversifier.
 //
 //  Build (desktop test): g++ -std=c++17 -DLOGIN_DEMO login_client.cpp -o login \
 //                          -lcurl -lcrypto -I./third_party
 // ============================================================================
+#include "obf.h"
+
 #include <curl/curl.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -31,23 +41,21 @@ using json = nlohmann::json;
 using Bytes = std::vector<unsigned char>;
 
 // ----------------------------------------------------------------------------
-//  CONFIG — must match ConnectV2.php
+//  CONFIG — accessor functions so the values are OBF-hidden in the binary.
+//  Replace the text inside OBF(...) with your real values (they stay hidden).
 // ----------------------------------------------------------------------------
 namespace cfg {
-    static const std::string AES_KEY_HEX = "PUT_64_HEX_KEY";        // connect.aesKeyV2 (or connect.aesKey)
-    static const std::string PUBLIC_KEY  = "YOUR_PUBLIC_KEY";       // $Public_Key
-    static const std::string STATIC_WORDS= "YOUR_STATIC_WORDS";     // $staticWords
-    static const std::string ACCESS      = "YOUR_ACCESS_TOKEN";     // $setAccess
-    static const std::string ENDPOINT    = "https://panel.zeromods.id/data/zezr_connector_v2";
-    static const std::string USER_AGENT  = "EagleA/1.2";
-    // Ed25519 public key (base64) from genkey — REQUIRED. If empty, verification
-    // is off (do not ship it empty).
-    static const std::string SIGN_PUBKEY_B64 = "PUT_SERVER_ED25519_PUBLIC_KEY";
-    // Optional TLS cert pin, exactly as you had it: "sha256//....="
-    static const std::string PINNED_PUBKEY = "";
+    inline std::string AES_KEY_HEX()  { return OBF("PUT_64_HEX_KEY"); }          // connect.aesKeyV2 / connect.aesKey
+    inline std::string PUBLIC_KEY()   { return OBF("YOUR_PUBLIC_KEY"); }         // $Public_Key
+    inline std::string STATIC_WORDS() { return OBF("YOUR_STATIC_WORDS"); }       // $staticWords
+    inline std::string ACCESS()       { return OBF("YOUR_ACCESS_TOKEN"); }       // $setAccess
+    inline std::string ENDPOINT()     { return OBF("https://panel.zeromods.id/data/zezr_connector_v2"); }
+    inline std::string USER_AGENT()   { return OBF("EagleA/1.2"); }
+    inline std::string SIGN_PUBKEY()  { return OBF("PUT_SERVER_ED25519_PUBLIC_KEY"); }  // base64
+    inline std::string PINNED_PUBKEY(){ return OBF(""); }                        // "sha256//...=" or empty
 
-    static const std::string CRYPTO_TAG = "EG2";
     static const int NONCE = 12, TAG = 16, SKEW = 300;
+    inline std::string TAG_STR()      { return OBF("EG2"); }
 }
 
 // ----------------------------------------------------------------------------
@@ -79,7 +87,7 @@ static std::string digest(const EVP_MD* md,const std::string& in,bool hex){
 }
 static std::string md5hex(const std::string& s){ return digest(EVP_md5(),s,true); }
 static std::string sha256hex(const std::string& s){ return digest(EVP_sha256(),s,true); }
-static bool ct_eq(const std::string&a,const std::string&b){ if(a.size()!=b.size())return false; unsigned char d=0; for(size_t i=0;i<a.size();++i)d|=a[i]^b[i]; return d==0; }
+static Bytes hmac256(const Bytes& key,const std::string& msg){ unsigned char o[32]; unsigned l=0; HMAC(EVP_sha256(),key.data(),(int)key.size(),(const unsigned char*)msg.data(),(int)msg.size(),o,&l); return Bytes(o,o+32); }
 
 static bool gcm_seal(const Bytes& key,const Bytes& nonce,const std::string& aad,const std::string& pt,Bytes& ct,Bytes& tag){
     EVP_CIPHER_CTX* c=EVP_CIPHER_CTX_new(); int len=0; ct.assign(pt.size(),0); tag.assign(cfg::TAG,0); bool ok=false;
@@ -105,83 +113,92 @@ static bool gcm_open(const Bytes& key,const Bytes& nonce,const std::string& aad,
     }
     EVP_CIPHER_CTX_free(c); return ok;
 }
-static bool ed25519_ok(const Bytes& pub,const std::string& msg,const Bytes& sig){
-    if(pub.size()!=32||sig.size()!=64)return false;
-    EVP_PKEY* pk=EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519,nullptr,pub.data(),pub.size()); if(!pk)return false;
-    EVP_MD_CTX* c=EVP_MD_CTX_new(); bool ok=false;
+// returns 1 on good signature, 0 otherwise (folded, never branched by us)
+static int ed25519_ok(const Bytes& pub,const std::string& msg,const Bytes& sig){
+    if(pub.size()!=32||sig.size()!=64)return 0;
+    EVP_PKEY* pk=EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519,nullptr,pub.data(),pub.size()); if(!pk)return 0;
+    EVP_MD_CTX* c=EVP_MD_CTX_new(); int ok=0;
     if(c&&EVP_DigestVerifyInit(c,nullptr,nullptr,nullptr,pk)==1)
-        ok=EVP_DigestVerify(c,sig.data(),sig.size(),(const unsigned char*)msg.data(),msg.size())==1;
+        ok=(EVP_DigestVerify(c,sig.data(),sig.size(),(const unsigned char*)msg.data(),msg.size())==1)?1:0;
     if(c)EVP_MD_CTX_free(c); EVP_PKEY_free(pk); return ok;
 }
 
+// 0 iff the two strings are identical; nonzero otherwise. No early-out branch.
+static uint64_t neq(const std::string& a,const std::string& b){
+    uint64_t d = (uint64_t)(a.size() ^ b.size());
+    size_t n = std::min(a.size(), b.size());
+    for(size_t i=0;i<n;++i) d |= (uint64_t)(unsigned char)(a[i]^b[i]);
+    return d;
+}
+
 // ----------------------------------------------------------------------------
-//  device serial — wire this to YOUR getSystemProperty() on Android.
+//  device serial — wire to YOUR getSystemProperty() on Android.
 // ----------------------------------------------------------------------------
 __attribute__((weak)) std::string deviceSerial() {
 #ifdef LOGIN_DEMO
     return "DEMO-DEVICE-0001";
 #else
-    // std::string h = getSystemProperty("ro.serialno") + getSystemProperty("ro.hardware")
-    //               + getSystemProperty("ro.product.model") + getSystemProperty("ro.product.brand");
+    // std::string h = getSystemProperty(OBF("ro.serialno")) + getSystemProperty(OBF("ro.hardware"))
+    //               + getSystemProperty(OBF("ro.product.model")) + getSystemProperty(OBF("ro.product.brand"));
     // return bytesToUUID(h);
-    return "REPLACE_WITH_HWID";
+    return OBF("REPLACE_WITH_HWID");
 #endif
 }
 
-// ----------------------------------------------------------------------------
-//  HTTP
-// ----------------------------------------------------------------------------
 static size_t sink(char* p,size_t s,size_t n,void* u){ ((std::string*)u)->append(p,s*n); return s*n; }
 
-struct LoginResult { std::string id_key, token, salt, expired, access; };
+struct LoginResult {
+    std::string id_key, expired;
+    unsigned char session[32];   // <<< THE gate: correct only on a valid login
+    bool advisory_ok = false;    // cosmetic (for a message) — do NOT gate on this
+};
 
-// Returns true on a verified login. `msg` carries a human string either way.
+// The message string is cosmetic. The security decision is out.session.
 bool doLogin(const std::string& userKey, const std::string& game,
              const std::string& versionString, LoginResult& out, std::string& msg) {
-    if (userKey.empty()) { msg = "[-] License/Key has not been entered."; return false; }
+    std::memset(out.session, 0, sizeof out.session);
 
-    Bytes key = hex2bin(cfg::AES_KEY_HEX);
-    if (key.size() != 32) { msg = "[ER] bad key config"; return false; }
-
+    Bytes key = hex2bin(cfg::AES_KEY_HEX());
     std::string serial = deviceSerial();
-    if (serial.find(',') != std::string::npos) { msg = "[-] Invalid device."; return false; }
+    if (userKey.empty() || key.size()!=32 || serial.find(',')!=std::string::npos) {
+        msg = OBF("[-] Login failed."); return false;
+    }
 
-    // --- build + seal the request (with a one-time cnonce) ---
+    // --- build + seal the request ---
     Bytes cn = randb(16);
     std::string cnonce = tohex(cn.data(), cn.size());
     long long ts = (long long)time(nullptr);
 
     json j;
-    j["game"]     = game;
-    j["app_ver"]  = md5hex(versionString);
-    j["user_key"] = userKey;
-    j["serial"]   = serial;
-    j["public"]   = cfg::PUBLIC_KEY;
-    j["ts"]       = ts;
-    j["cnonce"]   = cnonce;
+    j[OBF("game")]     = game;
+    j[OBF("app_ver")]  = md5hex(versionString);
+    j[OBF("user_key")] = userKey;
+    j[OBF("serial")]   = serial;
+    j[OBF("public")]   = cfg::PUBLIC_KEY();
+    j[OBF("ts")]       = ts;
+    j[OBF("cnonce")]   = cnonce;
 
     Bytes nonce = randb(cfg::NONCE), ct, tag;
-    gcm_seal(key, nonce, cfg::CRYPTO_TAG, j.dump(), ct, tag);
+    gcm_seal(key, nonce, cfg::TAG_STR(), j.dump(), ct, tag);
     Bytes blob = ct; blob.insert(blob.end(), tag.begin(), tag.end());
-    std::string envelope = cfg::CRYPTO_TAG + "." + b64ue(nonce.data(),nonce.size()) + "." + b64ue(blob.data(),blob.size());
+    std::string envelope = cfg::TAG_STR() + "." + b64ue(nonce.data(),nonce.size()) + "." + b64ue(blob.data(),blob.size());
 
     // --- POST ---
-    CURL* cu = curl_easy_init(); if (!cu) { msg = "[ER-C] curl init"; return false; }
+    CURL* cu = curl_easy_init(); if(!cu){ msg=OBF("[-] Login failed."); return false; }
     char* esc = curl_easy_escape(cu, envelope.c_str(), (int)envelope.size());
-    std::string body = "data=" + std::string(esc ? esc : "");
-    if (esc) curl_free(esc);
+    std::string body = OBF("data=") + std::string(esc?esc:"");
+    if(esc) curl_free(esc);
 
     std::string resp;
     struct curl_slist* h = nullptr;
-    h = curl_slist_append(h, "Accept: application/json");
-    h = curl_slist_append(h, "Content-Type: application/x-www-form-urlencoded");
-    h = curl_slist_append(h, "Cache-Control: no-cache");
-    curl_easy_setopt(cu, CURLOPT_URL, cfg::ENDPOINT.c_str());
+    h = curl_slist_append(h, (OBF("Content-Type: application/x-www-form-urlencoded")).c_str());
+    h = curl_slist_append(h, (OBF("Cache-Control: no-cache")).c_str());
+    curl_easy_setopt(cu, CURLOPT_URL, cfg::ENDPOINT().c_str());
     curl_easy_setopt(cu, CURLOPT_POST, 1L);
     curl_easy_setopt(cu, CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(cu, CURLOPT_POSTFIELDSIZE, (long)body.size());
     curl_easy_setopt(cu, CURLOPT_HTTPHEADER, h);
-    curl_easy_setopt(cu, CURLOPT_USERAGENT, cfg::USER_AGENT.c_str());
+    curl_easy_setopt(cu, CURLOPT_USERAGENT, cfg::USER_AGENT().c_str());
     curl_easy_setopt(cu, CURLOPT_WRITEFUNCTION, sink);
     curl_easy_setopt(cu, CURLOPT_WRITEDATA, &resp);
     curl_easy_setopt(cu, CURLOPT_SSL_VERIFYPEER, 1L);
@@ -189,58 +206,69 @@ bool doLogin(const std::string& userKey, const std::string& game,
     curl_easy_setopt(cu, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(cu, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(cu, CURLOPT_TIMEOUT, 30L);
-    if (!cfg::PINNED_PUBKEY.empty()) curl_easy_setopt(cu, CURLOPT_PINNEDPUBLICKEY, cfg::PINNED_PUBKEY.c_str());
+    { std::string pin = cfg::PINNED_PUBKEY(); if(!pin.empty()) curl_easy_setopt(cu, CURLOPT_PINNEDPUBLICKEY, pin.c_str()); }
 
     CURLcode rc = curl_easy_perform(cu);
-    long code = 0; curl_easy_getinfo(cu, CURLINFO_RESPONSE_CODE, &code);
     curl_slist_free_all(h); curl_easy_cleanup(cu);
-    if (rc != CURLE_OK) { msg = std::string("[ER-C] ") + curl_easy_strerror(rc); return false; }
-    if (code == 301 || code == 302) { msg = "[ER-S] rejected (UA/route)."; return false; }
+    if(rc != CURLE_OK){ msg=OBF("[-] Login failed."); return false; }
 
-    // --- open the response: signature FIRST, then decrypt, then verify ---
+    // --- open the response and FOLD every check into one accumulator ---
+    std::string TAGS = cfg::TAG_STR();
     std::vector<std::string> parts; { size_t s=0; while(true){ size_t d=resp.find('.',s); if(d==std::string::npos){parts.push_back(resp.substr(s));break;} parts.push_back(resp.substr(s,d-s)); s=d+1; } }
-    if ((parts.size()!=3 && parts.size()!=4) || parts[0]!=cfg::CRYPTO_TAG) { msg = "[ER-S] bad response."; return false; }
+    if((parts.size()!=3 && parts.size()!=4) || parts[0]!=TAGS){ msg=OBF("[-] Login failed."); return false; }
 
     Bytes rnonce = b64ud(parts[1]);
     Bytes rblob  = b64ud(parts[2]);
-    if ((int)rnonce.size()!=cfg::NONCE || (int)rblob.size()<=cfg::TAG) { msg = "[ER-S] bad response size."; return false; }
+    if((int)rnonce.size()!=cfg::NONCE || (int)rblob.size()<=cfg::TAG){ msg=OBF("[-] Login failed."); return false; }
     Bytes rtag(rblob.end()-cfg::TAG, rblob.end());
     Bytes rct(rblob.begin(), rblob.end()-cfg::TAG);
 
     std::string plain;
-    if (!gcm_open(key, rnonce, cfg::CRYPTO_TAG, rct, rtag, plain)) { msg = "[ER-S] decrypt failed."; return false; }
+    if(!gcm_open(key, rnonce, TAGS, rct, rtag, plain)){ msg=OBF("[-] Login failed."); return false; }
 
-    // Signature: with a public key configured, an unsigned/mis-signed reply is refused.
-    bool verify = !cfg::SIGN_PUBKEY_B64.empty() && cfg::SIGN_PUBKEY_B64.rfind("PUT_",0)!=0;
-    if (verify) {
-        if (parts.size()!=4) { msg = "[ER-S] response not signed."; return false; }
-        if (!ed25519_ok(b64d(cfg::SIGN_PUBKEY_B64), plain, b64ud(parts[3]))) { msg = "[ER-S] bad signature."; return false; }
+    // signature (folds to 0 when good). Required when a public key is set.
+    std::string spk = cfg::SIGN_PUBKEY();
+    int sig_ok = 1;
+    if(!spk.empty() && spk.rfind("PUT_",0)!=0){
+        int have_sig = (parts.size()==4) ? 1 : 0;
+        sig_ok = have_sig ? ed25519_ok(b64d(spk), plain, b64ud(parts[3])) : 0;
     }
 
-    json r;
-    try { r = json::parse(plain); } catch (...) { msg = "[ER-J] parse error."; return false; }
+    json r; bool parsed=true;
+    try { r = json::parse(plain); } catch(...) { parsed=false; }
+    if(!parsed){ msg=OBF("[-] Login failed."); return false; }
 
-    // bind to this request + freshness
-    if (!ct_eq(r.value("cnonce", std::string()), cnonce)) { msg = "[ER-S] cnonce mismatch (replay?)."; return false; }
-    long long rts = r.value("ts", 0LL);
-    if (rts <= 0 || llabs((long long)time(nullptr) - rts) > cfg::SKEW) { msg = "[ER-S] response time invalid."; return false; }
+    // Pull fields with defaults so nothing throws on a failure response.
+    long long status = r.value(OBF("status"), (long long)-1);
+    std::string rcn  = r.value(OBF("cnonce"), std::string());
+    long long   rts  = r.value(OBF("ts"), (long long)0);
+    json d = r.contains(OBF("data")) ? r[OBF("data")] : json::object();
+    std::string token = d.value(OBF("token"), std::string());
+    std::string salt  = d.value(OBF("salt"), std::string());
+    std::string acc_s = d.value(OBF("access"), std::string());
+    out.id_key  = d.value(OBF("id_key"), std::string());
+    out.expired = d.value(OBF("expired"), std::string());
 
-    if (r.value("status", -1) != 1) { msg = std::string("[ER-S] ") + r.value("reason", std::string("Unknown error")); return false; }
+    std::string expTok = sha256hex(serial + "-" + game + "-" + userKey + "-" + cfg::STATIC_WORDS() + "-" + salt);
 
-    const json& d = r.at("data");
-    out.id_key  = d.value("id_key", std::string());
-    out.token   = d.value("token", std::string());
-    out.salt    = d.value("salt", std::string());
-    out.expired = d.value("expired", std::string());
-    out.access  = d.value("access", std::string());
+    // ---- the accumulator: ZERO iff every check passed. No if(ok). ----
+    uint64_t acc = 0;
+    acc |= (uint64_t)(status - 1);                                  // status == 1
+    acc |= (uint64_t)(1 - sig_ok);                                  // signature verified
+    acc |= neq(rcn, cnonce);                                        // cnonce echoed
+    acc |= (uint64_t)((uint64_t)llabs((long long)time(nullptr)-rts) / (uint64_t)(cfg::SKEW+1)); // fresh
+    acc |= neq(token, expTok);                                      // token handshake
+    acc |= neq(acc_s, cfg::ACCESS());                               // access scope
 
-    // Re-derive the token: the client only trusts the server if this matches.
-    std::string expect = sha256hex(serial + "-" + game + "-" + userKey + "-" + cfg::STATIC_WORDS + "-" + out.salt);
-    if (!ct_eq(expect, out.token)) { msg = "[ER-S] Data verification failed."; return false; }
-    if (!ct_eq(out.access, cfg::ACCESS)) { msg = "[ER-S] Invalid access scope."; return false; }
+    // Derive the session key. Correct ONLY when acc == 0. A patched build that
+    // forces the message/return still gets a WRONG key here and breaks later.
+    unsigned char accb[8]; for(int i=0;i<8;i++) accb[i]=(unsigned char)(acc>>(i*8));
+    Bytes sess = hmac256(key, std::string((char*)accb,8) + "|" + salt + "|" + token);
+    std::memcpy(out.session, sess.data(), 32);
 
-    msg = "[+] Successfully Logged In";
-    return true;
+    out.advisory_ok = (acc == 0);
+    msg = out.advisory_ok ? OBF("[+] Successfully Logged In") : OBF("[-] Login failed.");
+    return out.advisory_ok;
 }
 
 #ifdef LOGIN_DEMO
@@ -251,7 +279,8 @@ int main(int argc,char**argv){
     LoginResult out; std::string msg;
     bool ok = doLogin(argv[3], argv[1], argv[2], out, msg);
     printf("%s\n", msg.c_str());
-    if(ok) printf("  id_key=%s access=%s expired=%s\n", out.id_key.c_str(), out.access.c_str(), out.expired.c_str());
+    printf("  session = %s\n", tohex(out.session, 32).c_str());  // app runs off THIS
+    if(ok) printf("  id_key=%s expired=%s\n", out.id_key.c_str(), out.expired.c_str());
     curl_global_cleanup();
     return ok?0:1;
 }
