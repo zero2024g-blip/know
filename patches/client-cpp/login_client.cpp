@@ -212,65 +212,72 @@ bool doLogin(const std::string& userKey, const std::string& game,
 
     CURLcode rc = curl_easy_perform(cu);
     curl_slist_free_all(h); curl_easy_cleanup(cu);
-    if(rc != CURLE_OK){ msg=OBF("[-] Login failed."); return false; }
+    if(rc != CURLE_OK){ msg = OBF("[ER-C] ") + std::string(curl_easy_strerror(rc)); return false; }
+    if(resp.empty()){ msg = OBF("[!] Empty response from server"); return false; }
 
-    // --- open the response and FOLD every check into one accumulator ---
+    // --- open the response ---
     std::string TAGS = cfg::TAG_STR();
     std::vector<std::string> parts; { size_t s=0; while(true){ size_t d=resp.find('.',s); if(d==std::string::npos){parts.push_back(resp.substr(s));break;} parts.push_back(resp.substr(s,d-s)); s=d+1; } }
-    if((parts.size()!=3 && parts.size()!=4) || parts[0]!=TAGS){ msg=OBF("[-] Login failed."); return false; }
+    if((parts.size()!=3 && parts.size()!=4) || parts[0]!=TAGS){ msg = OBF("[ER-S] Bad response."); return false; }
 
     Bytes rnonce = b64ud(parts[1]);
     Bytes rblob  = b64ud(parts[2]);
-    if((int)rnonce.size()!=cfg::NONCE || (int)rblob.size()<=cfg::TAG){ msg=OBF("[-] Login failed."); return false; }
+    if((int)rnonce.size()!=cfg::NONCE || (int)rblob.size()<=cfg::TAG){ msg = OBF("[ER-S] Bad response."); return false; }
     Bytes rtag(rblob.end()-cfg::TAG, rblob.end());
     Bytes rct(rblob.begin(), rblob.end()-cfg::TAG);
 
     std::string plain;
-    if(!gcm_open(key, rnonce, TAGS, rct, rtag, plain)){ msg=OBF("[-] Login failed."); return false; }
+    if(!gcm_open(key, rnonce, TAGS, rct, rtag, plain)){ msg = OBF("[ER-S] Decryption failed."); return false; }
 
-    // signature (folds to 0 when good). Required when a public key is set.
-    std::string spk = cfg::SIGN_PUBKEY();
+    json r;
+    try { r = json::parse(plain); }
+    catch(json::exception& e){ msg = OBF("[ER-J] Parsing error: ") + std::string(e.what()); return false; }
+
+    // signature check (1 = good). Required when a public key is configured.
     int sig_ok = 1;
-    if(!spk.empty() && spk.rfind("PUT_",0)!=0){
-        int have_sig = (parts.size()==4) ? 1 : 0;
-        sig_ok = have_sig ? ed25519_ok(b64d(spk), plain, b64ud(parts[3])) : 0;
-    }
+    { std::string spk = cfg::SIGN_PUBKEY();
+      if(!spk.empty() && spk.rfind("PUT_",0)!=0){
+          sig_ok = (parts.size()==4) ? ed25519_ok(b64d(spk), plain, b64ud(parts[3])) : 0;
+      } }
 
-    json r; bool parsed=true;
-    try { r = json::parse(plain); } catch(...) { parsed=false; }
-    if(!parsed){ msg=OBF("[-] Login failed."); return false; }
-
-    // Pull fields with defaults so nothing throws on a failure response.
-    // Same meaningless tokens as the server's R_* constants.
-    long long status = r.value(OBF("sx"), (long long)-1);          // status
-    std::string rcn  = r.value(OBF("gh"), std::string());          // cnonce
-    long long   rts  = r.value(OBF("tl"), (long long)0);           // ts
+    // Fields (meaningless tokens = server's R_* constants). Defaults so a
+    // failure response never throws.
+    long long   status = r.value(OBF("sx"), (long long)-1);         // status
+    std::string reason = r.value(OBF("z8"), std::string());         // reason
+    std::string rcn    = r.value(OBF("gh"), std::string());         // cnonce
+    long long   rts    = r.value(OBF("tl"), (long long)0);          // ts
     json d = r.contains(OBF("d0")) ? r[OBF("d0")] : json::object(); // data
-    std::string token = d.value(OBF("wv"), std::string());         // token
-    std::string salt  = d.value(OBF("n2"), std::string());         // salt
-    std::string acc_s = d.value(OBF("ca"), std::string());         // access
+    std::string token  = d.value(OBF("wv"), std::string());         // token
+    std::string salt   = d.value(OBF("n2"), std::string());         // salt
     out.id_key  = d.value(OBF("af"), std::string());               // id_key
     out.expired = d.value(OBF("px"), std::string());               // expired
 
     std::string expTok = sha256hex(serial + "-" + game + "-" + userKey + "-" + cfg::STATIC_WORDS() + "-" + salt);
+    long long   drift  = llabs((long long)time(nullptr) - rts);
 
-    // ---- the accumulator: ZERO iff every check passed. No if(ok). ----
+    // ---- THE GATE: one accumulator, zero iff every check passed. No if(ok). ----
+    // Only the token handshake, signature, replay and freshness — no access check.
     uint64_t acc = 0;
     acc |= (uint64_t)(status - 1);                                  // status == 1
     acc |= (uint64_t)(1 - sig_ok);                                  // signature verified
-    acc |= neq(rcn, cnonce);                                        // cnonce echoed
-    acc |= (uint64_t)((uint64_t)llabs((long long)time(nullptr)-rts) / (uint64_t)(cfg::SKEW+1)); // fresh
+    acc |= neq(rcn, cnonce);                                        // cnonce echoed (anti-replay)
+    acc |= (uint64_t)((uint64_t)drift / (uint64_t)60);             // fresh (< 60s, like the original)
     acc |= neq(token, expTok);                                      // token handshake
-    acc |= neq(acc_s, cfg::ACCESS());                               // access scope
 
-    // Derive the session key. Correct ONLY when acc == 0. A patched build that
-    // forces the message/return still gets a WRONG key here and breaks later.
+    // Derive the session key. Correct ONLY when acc == 0. Forcing the message or
+    // the return value still yields a WRONG key here, so the app breaks later.
     unsigned char accb[8]; for(int i=0;i<8;i++) accb[i]=(unsigned char)(acc>>(i*8));
     Bytes sess = hmac256(key, std::string((char*)accb,8) + "|" + salt + "|" + token);
     std::memcpy(out.session, sess.data(), 32);
-
     out.advisory_ok = (acc == 0);
-    msg = out.advisory_ok ? OBF("[+] Successfully Logged In") : OBF("[-] Login failed.");
+
+    // ---- detailed message (cosmetic only; the gate above is out.session) ----
+    if      (status != 1)                 msg = OBF("[ER-S] ") + (reason.empty() ? OBF("Unknown error") : reason);
+    else if (!sig_ok)                     msg = OBF("[ER-S] Signature verification failed.");
+    else if (drift >= 60)                 msg = OBF("[ER-S] Invalid response time. Please check your device clock.");
+    else if (neq(token, expTok) != 0)     msg = OBF("[ER-S] Data verification failed.");
+    else                                  msg = OBF("[+] Successfully Logged In");
+
     return out.advisory_ok;
 }
 
