@@ -169,14 +169,16 @@ bool doLogin(const std::string& userKey, const std::string& game,
     std::string cnonce = tohex(cn.data(), cn.size());
     long long ts = (long long)time(nullptr);
 
+    // Meaningless wire field names — must match ConnectV2.php (F_* constants).
+    // Even if OBF is peeled at runtime, "_u" reveals nothing about "user_key".
     json j;
-    j[OBF("game")]     = game;
-    j[OBF("app_ver")]  = md5hex(versionString);
-    j[OBF("user_key")] = userKey;
-    j[OBF("serial")]   = serial;
-    j[OBF("public")]   = cfg::PUBLIC_KEY();
-    j[OBF("ts")]       = ts;
-    j[OBF("cnonce")]   = cnonce;
+    j[OBF("_i")] = game;                    // game
+    j[OBF("_p")] = md5hex(versionString);   // app_ver
+    j[OBF("_u")] = userKey;                 // user_key
+    j[OBF("_x")] = serial;                  // serial
+    j[OBF("_r")] = cfg::PUBLIC_KEY();       // public
+    j[OBF("tl")] = ts;                      // ts
+    j[OBF("gh")] = cnonce;                  // cnonce
 
     Bytes nonce = randb(cfg::NONCE), ct, tag;
     gcm_seal(key, nonce, cfg::TAG_STR(), j.dump(), ct, tag);
@@ -239,15 +241,16 @@ bool doLogin(const std::string& userKey, const std::string& game,
     if(!parsed){ msg=OBF("[-] Login failed."); return false; }
 
     // Pull fields with defaults so nothing throws on a failure response.
-    long long status = r.value(OBF("status"), (long long)-1);
-    std::string rcn  = r.value(OBF("cnonce"), std::string());
-    long long   rts  = r.value(OBF("ts"), (long long)0);
-    json d = r.contains(OBF("data")) ? r[OBF("data")] : json::object();
-    std::string token = d.value(OBF("token"), std::string());
-    std::string salt  = d.value(OBF("salt"), std::string());
-    std::string acc_s = d.value(OBF("access"), std::string());
-    out.id_key  = d.value(OBF("id_key"), std::string());
-    out.expired = d.value(OBF("expired"), std::string());
+    // Same meaningless tokens as the server's R_* constants.
+    long long status = r.value(OBF("sx"), (long long)-1);          // status
+    std::string rcn  = r.value(OBF("gh"), std::string());          // cnonce
+    long long   rts  = r.value(OBF("tl"), (long long)0);           // ts
+    json d = r.contains(OBF("d0")) ? r[OBF("d0")] : json::object(); // data
+    std::string token = d.value(OBF("wv"), std::string());         // token
+    std::string salt  = d.value(OBF("n2"), std::string());         // salt
+    std::string acc_s = d.value(OBF("ca"), std::string());         // access
+    out.id_key  = d.value(OBF("af"), std::string());               // id_key
+    out.expired = d.value(OBF("px"), std::string());               // expired
 
     std::string expTok = sha256hex(serial + "-" + game + "-" + userKey + "-" + cfg::STATIC_WORDS() + "-" + salt);
 

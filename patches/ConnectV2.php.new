@@ -49,6 +49,28 @@ class ConnectV2 extends BaseController
 
     private const CLIENT_UA = 'EagleA/1.2';
 
+    // Meaningless wire field names. The source stays readable (these constants),
+    // but on the wire — and in the client's memory — the keys carry no meaning:
+    // "_u" tells a reverse-engineer nothing about "user_key". The CLIENT must use
+    // the exact same tokens (it does, via OBF("_u") etc.). Change them per
+    // release if you like — just keep the two sides in sync.
+    private const F_GAME = '_i';   // game
+    private const F_VER  = '_p';   // app_ver
+    private const F_KEY  = '_u';   // user_key
+    private const F_SER  = '_x';   // serial
+    private const F_PUB  = '_r';   // public
+    private const F_TS   = 'tl';   // ts
+    private const F_CN   = 'gh';   // cnonce
+    private const R_STATUS = 'sx'; // status
+    private const R_REASON = 'z8'; // reason
+    private const R_DATA   = 'd0'; // data
+    private const R_ID     = 'af'; // id_key
+    private const R_TOKEN  = 'wv'; // token
+    private const R_SALT   = 'n2'; // salt
+    private const R_RNG    = 'rj'; // rng
+    private const R_EXP    = 'px'; // expired
+    private const R_ACCESS = 'ca'; // access
+
     // Per-IP brute-force limit (this is normal protection, not a honeypot).
     private const RL_TABLE  = 'connect_ratelimit';
     private const RL_LIMIT  = 20;
@@ -110,7 +132,7 @@ class ConnectV2 extends BaseController
         $ipHash = md5('connect_' . $this->clientIp());
 
         if ($this->rlRemaining($ipHash) > 0) {
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
+            return $this->aes_encrypt($this->fail('Invalid Parameter.'));
         }
         if ($this->aes_key === null) {
             return $this->response->setStatusCode(503)->setBody('');
@@ -118,40 +140,40 @@ class ConnectV2 extends BaseController
 
         $raw = $this->request->getPost('data');
         if (! $raw) {
-            return $this->response->setJSON(['status' => -1, 'error' => 'No data received.']);
+            return $this->response->setStatusCode(400)->setBody('');
         }
 
         $p = $this->aes_decrypt($raw);
         if (! $p) {
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'Decryption failed.']);
+            return $this->aes_encrypt($this->fail('Decryption failed.'));
         }
 
-        $game      = $p['game']     ?? null;
-        $aVer      = $p['app_ver']  ?? null;
-        $uKey      = $p['user_key'] ?? null;
-        $sDev      = $p['serial']   ?? null;
-        $PublicKey = $p['public']   ?? null;
+        $game      = $p[self::F_GAME] ?? null;
+        $aVer      = $p[self::F_VER]  ?? null;
+        $uKey      = $p[self::F_KEY]  ?? null;
+        $sDev      = $p[self::F_SER]  ?? null;
+        $PublicKey = $p[self::F_PUB]  ?? null;
 
         // presence
         if (! $this->str($game) || strlen((string) $game) < 2 || ! $this->str($aVer)
             || ! $this->str($uKey) || ! $this->str($sDev) || ! $this->str($PublicKey)) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);   // E-1
+            return $this->aes_encrypt($this->fail('Invalid Parameter.'));   // E-1
         }
 
         // A serial with a comma would split the stored device list.
         if (strpos((string) $sDev, ',') !== false) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Parameter.']);
+            return $this->aes_encrypt($this->fail('Invalid Parameter.'));
         }
 
         if ($this->maintenance) {
-            return $this->aes_encrypt(['status' => -1, 'reason' => \App\Models\SettingModel::maintenanceMessage()]); // E-2
+            return $this->aes_encrypt($this->fail(\App\Models\SettingModel::maintenanceMessage())); // E-2
         }
 
         // Timing-safe: the server does not trust the client's public key blindly.
         if (! hash_equals($this->Public_Key, (string) $PublicKey)) {
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'Invalid Public Key.']); // E-5
+            return $this->aes_encrypt($this->fail('Invalid Public Key.')); // E-5
         }
 
         $time    = new Time();
@@ -159,15 +181,15 @@ class ConnectV2 extends BaseController
 
         if (! $findKey) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'License/Key is Not Registered.']); // E-10
+            return $this->aes_encrypt($this->fail('License/Key is Not Registered.')); // E-10
         }
         if ($findKey->status != 1) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'License/Key is Blocked.']); // E-6
+            return $this->aes_encrypt($this->fail('License/Key is Blocked.')); // E-6
         }
         if ($this->isUpdate($aVer, $game)) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'Please Update Your App.']); // E-9
+            return $this->aes_encrypt($this->fail('Please Update Your App.')); // E-9
         }
 
         $id_keys    = $findKey->id_keys;
@@ -179,18 +201,18 @@ class ConnectV2 extends BaseController
             $hours = (int) $findKey->duration;
             if ($hours < 1) {
                 $this->rlFail($ipHash);
-                return $this->aes_encrypt(['status' => -1, 'reason' => 'License/Key is Not Registered.']);
+                return $this->aes_encrypt($this->fail('License/Key is Not Registered.'));
             }
             $setExpired = $time::now()->addHours($hours);
             $this->model->update($id_keys, ['expired_date' => $setExpired->toDateTimeString()]);
         } elseif ($time::now()->isAfter($expired)) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'License/Key is Expired.']); // E-8
+            return $this->aes_encrypt($this->fail('License/Key is Expired.')); // E-8
         }
 
         if (! $this->claimDeviceSlot($id_keys, $sDev, $max_dev)) {
             $this->rlFail($ipHash);
-            return $this->aes_encrypt(['status' => -1, 'reason' => 'Max Devices Reached.']); // E-7
+            return $this->aes_encrypt($this->fail('Max Devices Reached.')); // E-7
         }
 
         // ---- success ----
@@ -201,19 +223,25 @@ class ConnectV2 extends BaseController
         $real   = "$sDev-$game-$uKey-$this->staticWords-$salt";
 
         $data = [
-            'status' => 1,
-            'data' => [
-                'id_key'  => $id_keys,
-                'token'   => hash('sha256', $real),
-                'salt'    => $salt,
-                'rng'     => $time->getTimestamp(),
-                'expired' => $expOut,
-                'access'  => $this->setAccess,
+            self::R_STATUS => 1,
+            self::R_DATA => [
+                self::R_ID     => $id_keys,
+                self::R_TOKEN  => hash('sha256', $real),
+                self::R_SALT   => $salt,
+                self::R_RNG    => $time->getTimestamp(),
+                self::R_EXP    => $expOut,
+                self::R_ACCESS => $this->setAccess,
             ],
         ];
 
         $this->rlClear($ipHash);
         return $this->aes_encrypt($data);
+    }
+
+    /** A failure response, using the obfuscated status/reason keys. */
+    private function fail(string $reason): array
+    {
+        return [self::R_STATUS => -1, self::R_REASON => $reason];
     }
 
     private function str($v): bool
@@ -351,19 +379,19 @@ class ConnectV2 extends BaseController
         $params = json_decode($plain, true);
         if (json_last_error() !== JSON_ERROR_NONE || ! is_array($params)) { return null; }
 
-        $ts = (int) ($params['ts'] ?? 0);
+        $ts = (int) ($params[self::F_TS] ?? 0);
         if ($ts <= 0 || abs(time() - $ts) > self::MAX_SKEW) { return null; }
 
-        $this->reply_nonce = $params['cnonce'] ?? null;
+        $this->reply_nonce = $params[self::F_CN] ?? null;
         return $params;
     }
 
     private function aes_encrypt($data)
     {
         if (! empty($this->reply_nonce)) {
-            $data['cnonce'] = $this->reply_nonce;   // bind the reply to the request
+            $data[self::F_CN] = $this->reply_nonce;   // bind the reply to the request
         }
-        $data['ts'] = time();
+        $data[self::F_TS] = time();
 
         $plain = json_encode($data);
 
