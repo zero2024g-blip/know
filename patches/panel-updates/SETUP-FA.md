@@ -41,9 +41,10 @@ $routes->post('keys/renew/bulk-apply',    'KeyRenew::bulkApply');
 ```
 فیلترِ `admin` را به ارث می‌برند و کنترلر هم خودش دوباره سطحِ ادمین را چک می‌کند.
 
-### گام ۳: لینک در منو (اختیاری، توصیه‌شده)
-در `app/Views/Layout/Header.php`، داخلِ منوی کشویی ادمین (کنارِ «Deleted Keys»)
-این را اضافه کن:
+### گام ۳: لینک در منو + آیکون
+در `app/Views/Layout/Header.php`، داخلِ منوی کشویی ادمین، **درست بعد از «Deleted Keys»**
+(همان‌جا که گذاشتی) این `<li>` را بگذار — آیکونِ فلشِ چرخشی (`bi-arrow-clockwise`) دارد و
+مثلِ بقیه‌ی آیتم‌ها حالتِ active هم می‌گیرد (فایلِ `header-menu-item.php` هم همین است):
 ```php
 <li>
     <a class="dropdown-item <?= url_is('admin/keys/renew') ? 'active' : '' ?>" href="<?= site_url('admin/keys/renew') ?>">
@@ -51,6 +52,8 @@ $routes->post('keys/renew/bulk-apply',    'KeyRenew::bulkApply');
     </a>
 </li>
 ```
+اگر «Renew keys» را بدونِ آیکون گذاشته بودی، فقط تگِ `<i class="bi bi-arrow-clockwise"></i> `
+را قبل از متن اضافه کن.
 
 ### چطور کار می‌کند (منطقِ «معتبر / مصرف‌شده»)
 کلید سه حالت دارد و برای هرکدام کارِ درست انجام می‌شود:
