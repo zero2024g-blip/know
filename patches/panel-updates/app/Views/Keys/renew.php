@@ -10,9 +10,9 @@
         <h1>Renew keys</h1>
         <p>
             Look a key up by its code or ID, then add time. Renew applies
-            <b>only to an active key that is in use on a device</b> — its time is
+            <b>only to an active key that is still valid</b> — its time is
             <b>extended</b> from the current expiry. Inactive, unused, and expired
-            keys cannot be renewed here.
+            keys cannot be renewed here. (A device does not need to be bound.)
         </p>
     </div>
 </header>
@@ -102,7 +102,7 @@
         </div>
         <div class="em-panel-b">
             <p class="rn-bulk-note">
-                Adds time to every key that is <b>active and in use on a device</b>, at once,
+                Adds time to every key that is <b>active and still valid</b>, at once,
                 extending each from its own expiry so the remainder is kept. Inactive,
                 unused, and expired keys are never touched. Optionally narrow it to one game
                 or one seller.

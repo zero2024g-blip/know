@@ -214,11 +214,11 @@ class KeyRenew extends BaseController
     }
 
     // ------------------------------------------------------------------
-    //  BULK — add time to every ACTIVE, IN-USE key at once, optionally
+    //  BULK — add time to every ACTIVE, still-VALID key at once, optionally
     //  narrowed to one game and/or one seller. A key is touched ONLY when it is
-    //  status = 1, still valid (expired_date set and in the future), AND bound
-    //  to a device (devices not empty) — i.e. active on someone's device.
-    //  Inactive, unused, and expired keys are never touched.
+    //  status = 1 and still valid (expired_date set and in the future). A device
+    //  need NOT be bound (a reset key with no devices still counts). Inactive,
+    //  unused, and expired keys are never touched.
     // ------------------------------------------------------------------
 
     /** POST admin/keys/renew/bulk-preview — how many keys a scope would touch. */
@@ -341,15 +341,13 @@ class KeyRenew extends BaseController
         return [$game, $ownerId, null];
     }
 
-    /** The query builder for the renewable set (active + valid + device bound). */
+    /** The query builder for the renewable set (active + still valid). */
     private function bulkBuilder(string $game, ?int $ownerId)
     {
         $b = db_connect()->table('keys_code')
             ->where('status', 1)                                   // active only
             ->where('expired_date IS NOT NULL', null, false)      // has started
-            ->where('expired_date >', date('Y-m-d H:i:s'))        // still valid
-            ->where('devices IS NOT NULL', null, false)           // bound to
-            ->where("devices <> ''", null, false);                // ...a device
+            ->where('expired_date >', date('Y-m-d H:i:s'));       // still valid
 
         if ($game !== 'ALL') {
             $b->where('game', $game);
@@ -410,14 +408,13 @@ class KeyRenew extends BaseController
         $blocked  = (int) $k->status !== 1;
         $devCount = $k->devices ? count(array_filter(explode(',', (string) $k->devices))) : 0;
 
-        // A key may be renewed ONLY when it is active, still valid, and bound to
-        // a device (i.e. actually in use). Inactive, unused, and expired keys are
-        // refused — the reason says which.
+        // A key may be renewed ONLY when it is active and still valid. Inactive,
+        // unused, and expired keys are refused — the reason says which. (A device
+        // does NOT need to be bound: a reset key with no devices is still valid.)
         $reason = '';
-        if ($blocked)            { $reason = 'This key is inactive (blocked).'; }
-        elseif ($state === 'unused')  { $reason = 'This key is unused — it has no device bound yet.'; }
+        if ($blocked)                 { $reason = 'This key is inactive (blocked).'; }
+        elseif ($state === 'unused')  { $reason = 'This key is unused — its clock has not started.'; }
         elseif ($state === 'expired') { $reason = 'This key has expired.'; }
-        elseif ($devCount < 1)        { $reason = 'This key has no device bound yet.'; }
         $renewable = ($reason === '');
 
         return [
@@ -439,8 +436,9 @@ class KeyRenew extends BaseController
     }
 
     /**
-     * The one rule: renew only an ACTIVE, still-VALID, device-BOUND key.
-     * Returns '' when renewable, otherwise the reason it is refused.
+     * The one rule: renew only an ACTIVE, still-VALID key. Returns '' when
+     * renewable, otherwise the reason it is refused. A device does NOT need to
+     * be bound — a key whose devices were reset is still renewable.
      */
     private function renewBlock(object $k): string
     {
@@ -448,7 +446,7 @@ class KeyRenew extends BaseController
             return 'This key is inactive (blocked). Renew only applies to active keys.';
         }
         if (empty($k->expired_date)) {
-            return 'This key is unused (no device bound yet). Renew only applies to active, in-use keys.';
+            return 'This key is unused (its clock has not started). Renew only applies to active keys.';
         }
         try {
             if (! Time::parse($k->expired_date)->isAfter(Time::now())) {
@@ -456,10 +454,6 @@ class KeyRenew extends BaseController
             }
         } catch (\Throwable $e) {
             return 'This key has an unreadable expiry date.';
-        }
-        $devCount = $k->devices ? count(array_filter(explode(',', (string) $k->devices))) : 0;
-        if ($devCount < 1) {
-            return 'This key has no device bound yet. Renew only applies to keys active on a device.';
         }
         return '';
     }
