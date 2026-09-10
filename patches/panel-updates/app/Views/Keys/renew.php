@@ -9,11 +9,10 @@
         <span class="em-eyebrow"><i class="bi bi-arrow-clockwise"></i> Admin</span>
         <h1>Renew keys</h1>
         <p>
-            Look a key up by its code or ID, see whether it is unused, still
-            valid, or expired, then add time. A valid key is <b>extended</b> from
-            its current expiry; an expired one is <b>restarted</b> from now and
-            switched back on; an unused key gets a longer <b>duration</b> for when
-            it is first activated.
+            Look a key up by its code or ID, then add time. Renew applies
+            <b>only to an active key that is in use on a device</b> — its time is
+            <b>extended</b> from the current expiry. Inactive, unused, and expired
+            keys cannot be renewed here.
         </p>
     </div>
 </header>
@@ -59,7 +58,10 @@
             <div><dt>Devices</dt><dd id="rn-devices">—</dd></div>
         </dl>
 
-        <div class="rn-renew">
+        <!-- Shown when the key cannot be renewed (inactive / unused / expired). -->
+        <p class="rn-blocked" id="rn-blocked" hidden></p>
+
+        <div class="rn-renew" id="rn-renew">
             <h3>Add time</h3>
 
             <div class="rn-presets" id="rn-presets" role="group" aria-label="Preset amounts">
@@ -84,11 +86,6 @@
                 </div>
             </div>
 
-            <label class="rn-check" id="rn-reactivate-wrap">
-                <input type="checkbox" id="rn-reactivate" checked>
-                <span>Re-activate the key (turn its status on)</span>
-            </label>
-
             <div class="rn-apply-row">
                 <button type="button" class="em-btn is-primary" id="rn-apply" disabled>
                     <i class="bi bi-arrow-clockwise"></i> Renew key
@@ -105,9 +102,10 @@
         </div>
         <div class="em-panel-b">
             <p class="rn-bulk-note">
-                Adds time to every <b>active</b> key at once, extending each from its own
-                expiry so the remainder is kept. Unused and already-expired keys are left
-                alone. Optionally narrow it to one game or one seller.
+                Adds time to every key that is <b>active and in use on a device</b>, at once,
+                extending each from its own expiry so the remainder is kept. Inactive,
+                unused, and expired keys are never touched. Optionally narrow it to one game
+                or one seller.
             </p>
 
             <div class="rn-bulk-grid">
@@ -195,7 +193,14 @@
     .rn-facts dt { font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--em-dim); margin: 0 0 .15rem; }
     .rn-facts dd { margin: 0; font-weight: 600; color: var(--em-text); overflow-wrap: anywhere; }
 
+    .rn-blocked {
+        margin: 1rem 0 0; padding: .75rem .9rem; border-radius: 10px;
+        font-size: .88rem; color: var(--em-bad);
+        background: var(--em-bad-wash); border: 1px solid color-mix(in srgb, var(--em-bad) 35%, transparent);
+        display: flex; align-items: center; gap: .5rem;
+    }
     .rn-renew { margin-top: 1.1rem; padding-top: 1.1rem; border-top: 1px solid var(--em-line); }
+    .rn-renew.is-off { opacity: .4; pointer-events: none; filter: grayscale(.4); }
     .rn-renew h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--em-dim); margin: 0 0 .7rem; }
 
     .rn-presets { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .9rem; }
@@ -261,9 +266,9 @@
     var applyMsg = document.getElementById('rn-apply-msg');
     var amountEl = document.getElementById('rn-amount');
     var unitEl   = document.getElementById('rn-unit');
-    var reactEl  = document.getElementById('rn-reactivate');
-    var reactWrap= document.getElementById('rn-reactivate-wrap');
     var presets  = document.getElementById('rn-presets');
+    var renewBox = document.getElementById('rn-renew');
+    var blockedEl= document.getElementById('rn-blocked');
 
     var URL_LOOKUP = <?= json_encode(site_url('admin/keys/renew/lookup'), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
     var URL_APPLY  = <?= json_encode(site_url('admin/keys/renew/apply'),  JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
@@ -320,10 +325,16 @@
         document.getElementById('rn-duration').textContent = k.duration + ' h' + (k.duration % 24 === 0 && k.duration > 0 ? '  (' + (k.duration / 24) + ' d)' : '');
         document.getElementById('rn-devices').textContent  = k.devices_used + ' / ' + (k.max_devices === 0 ? '∞' : k.max_devices);
 
-        // The re-activate toggle only matters for a blocked/expired key.
-        var needsReact = k.blocked || k.state === 'expired';
-        reactWrap.style.display = needsReact ? '' : 'none';
-        reactEl.checked = needsReact;
+        // Renew is allowed ONLY for an active, in-use (device-bound) key. When
+        // it isn't, show the reason and lock the add-time controls.
+        if (k.renewable) {
+            blockedEl.hidden = true;
+            renewBox.classList.remove('is-off');
+        } else {
+            blockedEl.innerHTML = '<i class="bi bi-x-octagon"></i> ' + esc(k.reason || 'This key cannot be renewed.');
+            blockedEl.hidden = false;
+            renewBox.classList.add('is-off');
+        }
 
         result.hidden = false;
         updateApplyState();
@@ -336,7 +347,8 @@
         return unitEl.value === 'days' ? v * 24 : v;
     }
     function updateApplyState() {
-        applyBtn.disabled = !(current && selectedHours() > 0);
+        // Enabled only for a renewable key with a positive amount chosen.
+        applyBtn.disabled = !(current && current.renewable && selectedHours() > 0);
     }
 
     // --- look-up ---
@@ -374,14 +386,14 @@
     // --- apply ---
     applyBtn.addEventListener('click', function () {
         if (!current) return;
+        if (!current.renewable) { say(applyMsg, current.reason || 'This key cannot be renewed.', 'is-err'); return; }
         var hours = selectedHours();
         if (hours < 1) { say(applyMsg, 'Pick a preset or type an amount.', 'is-err'); return; }
         applyBtn.disabled = true; say(applyMsg, 'Renewing…');
         post(URL_APPLY, {
             id_keys: current.id,
             amount: hours,
-            unit: 'hours',
-            reactivate: reactEl.checked ? 1 : 0
+            unit: 'hours'
         }).then(function (j) {
             if (j && j.csrf) refreshCsrf(j.csrf);
             if (j && j.ok) {

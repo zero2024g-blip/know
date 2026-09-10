@@ -161,8 +161,6 @@ class KeyRenew extends BaseController
             ]);
         }
 
-        $reactivate = filter_var($this->request->getPost('reactivate'), FILTER_VALIDATE_BOOLEAN);
-
         // getKeys(), not find(): the model has no $returnType, so find() would
         // hand back an array and every ->property read below would be fatal.
         $key = $this->model->getKeys($id, 'id_keys');
@@ -170,40 +168,17 @@ class KeyRenew extends BaseController
             return $this->response->setJSON(['ok' => false, 'error' => 'That key no longer exists.', 'csrf' => csrf_hash()]);
         }
 
-        $now  = Time::now();
-        $set  = [];
-        $mode = '';
-
-        if (empty($key->expired_date)) {
-            // UNUSED — the clock has not started. Add to the stored duration so
-            // the key simply lasts longer once it is first activated.
-            $newDuration = max(0, (int) $key->duration) + $hours;
-            $set['duration'] = $newDuration;
-            $mode = 'duration';
-        } else {
-            try {
-                $exp = Time::parse($key->expired_date);
-            } catch (\Throwable $e) {
-                return $this->response->setJSON(['ok' => false, 'error' => 'This key has an unreadable expiry date.', 'csrf' => csrf_hash()]);
-            }
-
-            if ($exp->isAfter($now)) {
-                // ACTIVE — extend from the current expiry, keeping the remainder.
-                $base = $exp;
-                $mode = 'extend';
-            } else {
-                // EXPIRED / consumed — restart from now and bring it back to life.
-                $base = $now;
-                $mode = 'restart';
-            }
-            $set['expired_date'] = $base->addHours($hours)->toDateTimeString();
+        // THE RULE: renew only an active, still-valid, device-bound key. An
+        // inactive, unused, or expired key is refused and nothing is changed.
+        $block = $this->renewBlock($key);
+        if ($block !== '') {
+            return $this->response->setJSON(['ok' => false, 'error' => $block, 'csrf' => csrf_hash()]);
         }
 
-        // Re-activate when the admin asked, or always when we restarted an
-        // expired key (a consumed key that is renewed should come back on).
-        if (($reactivate || $mode === 'restart') && (int) $key->status !== 1) {
-            $set['status'] = 1;
-        }
+        // Extend from the key's OWN current expiry, so the remainder is kept and
+        // exactly $hours are added.
+        $set  = ['expired_date' => Time::parse($key->expired_date)->addHours($hours)->toDateTimeString()];
+        $mode = 'extend';
 
         $db = \Config\Database::connect();
         $db->transBegin();
@@ -213,8 +188,7 @@ class KeyRenew extends BaseController
             (new HistoryModel())->insert([
                 'keys_id' => (int) $id,
                 'user_do' => $this->user->username,
-                'info'    => 'renew|' . $mode . '|+' . $hours . 'h'
-                    . (isset($set['status']) ? '|reactivated' : ''),
+                'info'    => 'renew|' . $mode . '|+' . $hours . 'h',
             ]);
 
             if ($db->transStatus() === false) {
@@ -240,11 +214,11 @@ class KeyRenew extends BaseController
     }
 
     // ------------------------------------------------------------------
-    //  BULK — add time to every VALID (active) key at once, optionally
-    //  narrowed to one game and/or one seller. Only keys that are status = 1,
-    //  have started (expired_date set), and have not yet expired are touched:
-    //  "valid" keys, exactly. Unused and expired keys are left alone — extend
-    //  those one at a time above, where the intent is unambiguous.
+    //  BULK — add time to every ACTIVE, IN-USE key at once, optionally
+    //  narrowed to one game and/or one seller. A key is touched ONLY when it is
+    //  status = 1, still valid (expired_date set and in the future), AND bound
+    //  to a device (devices not empty) — i.e. active on someone's device.
+    //  Inactive, unused, and expired keys are never touched.
     // ------------------------------------------------------------------
 
     /** POST admin/keys/renew/bulk-preview — how many keys a scope would touch. */
@@ -367,13 +341,15 @@ class KeyRenew extends BaseController
         return [$game, $ownerId, null];
     }
 
-    /** The query builder for the "valid keys" set, scoped by game/owner. */
+    /** The query builder for the renewable set (active + valid + device bound). */
     private function bulkBuilder(string $game, ?int $ownerId)
     {
         $b = db_connect()->table('keys_code')
-            ->where('status', 1)
-            ->where('expired_date IS NOT NULL', null, false)
-            ->where('expired_date >', date('Y-m-d H:i:s'));
+            ->where('status', 1)                                   // active only
+            ->where('expired_date IS NOT NULL', null, false)      // has started
+            ->where('expired_date >', date('Y-m-d H:i:s'))        // still valid
+            ->where('devices IS NOT NULL', null, false)           // bound to
+            ->where("devices <> ''", null, false);                // ...a device
 
         if ($game !== 'ALL') {
             $b->where('game', $game);
@@ -431,7 +407,18 @@ class KeyRenew extends BaseController
         }
 
         // A blocked key overrides the time-based label for display.
-        $blocked = (int) $k->status !== 1;
+        $blocked  = (int) $k->status !== 1;
+        $devCount = $k->devices ? count(array_filter(explode(',', (string) $k->devices))) : 0;
+
+        // A key may be renewed ONLY when it is active, still valid, and bound to
+        // a device (i.e. actually in use). Inactive, unused, and expired keys are
+        // refused — the reason says which.
+        $reason = '';
+        if ($blocked)            { $reason = 'This key is inactive (blocked).'; }
+        elseif ($state === 'unused')  { $reason = 'This key is unused — it has no device bound yet.'; }
+        elseif ($state === 'expired') { $reason = 'This key has expired.'; }
+        elseif ($devCount < 1)        { $reason = 'This key has no device bound yet.'; }
+        $renewable = ($reason === '');
 
         return [
             'id'           => (int) $k->id_keys,
@@ -441,12 +428,40 @@ class KeyRenew extends BaseController
             'blocked'      => $blocked,
             'duration'     => (int) $k->duration,
             'max_devices'  => (int) $k->max_devices,
-            'devices_used' => $k->devices ? count(array_filter(explode(',', $k->devices))) : 0,
+            'devices_used' => $devCount,
             'expired_date' => $k->expired_date ?: null,
             'state'        => $state,           // unused | active | expired
             'remaining'    => $remain,          // human string, only when active
             'registrator'  => (string) ($k->registrator ?? ''),
+            'renewable'    => $renewable,       // active + valid + device bound
+            'reason'       => $reason,          // why not, when not renewable
         ];
+    }
+
+    /**
+     * The one rule: renew only an ACTIVE, still-VALID, device-BOUND key.
+     * Returns '' when renewable, otherwise the reason it is refused.
+     */
+    private function renewBlock(object $k): string
+    {
+        if ((int) $k->status !== 1) {
+            return 'This key is inactive (blocked). Renew only applies to active keys.';
+        }
+        if (empty($k->expired_date)) {
+            return 'This key is unused (no device bound yet). Renew only applies to active, in-use keys.';
+        }
+        try {
+            if (! Time::parse($k->expired_date)->isAfter(Time::now())) {
+                return 'This key has expired. Renew only applies to keys that are still valid.';
+            }
+        } catch (\Throwable $e) {
+            return 'This key has an unreadable expiry date.';
+        }
+        $devCount = $k->devices ? count(array_filter(explode(',', (string) $k->devices))) : 0;
+        if ($devCount < 1) {
+            return 'This key has no device bound yet. Renew only applies to keys active on a device.';
+        }
+        return '';
     }
 
     /** A compact "3 days, 4 hours" between two Times. */
