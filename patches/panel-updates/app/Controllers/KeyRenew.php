@@ -5,6 +5,7 @@ namespace App\Controllers;
 use App\Models\KeysModel;
 use App\Models\HistoryModel;
 use App\Models\UserModel;
+use App\Models\GameModel;
 use CodeIgniter\I18n\Time;
 
 /**
@@ -85,10 +86,22 @@ class KeyRenew extends BaseController
             ['h' => 8760, 'label' => '1 year'],
         ];
 
+        // Game codes for the bulk scope dropdown (all games ever on record, so
+        // keys for a since-removed game can still be renewed in bulk).
+        $games = [];
+        try {
+            foreach ((new GameModel())->allOrdered() as $g) {
+                $games[] = ['code' => (string) $g->code, 'name' => (string) $g->name];
+            }
+        } catch (\Throwable $e) {
+            $games = [];
+        }
+
         return view('Keys/renew', [
             'title'   => 'Renew keys',
             'user'    => $this->user,
             'presets' => $presets,
+            'games'   => $games,
         ]);
     }
 
@@ -224,6 +237,160 @@ class KeyRenew extends BaseController
             'key'     => $this->describe($fresh),
             'csrf'    => csrf_hash(),
         ]);
+    }
+
+    // ------------------------------------------------------------------
+    //  BULK — add time to every VALID (active) key at once, optionally
+    //  narrowed to one game and/or one seller. Only keys that are status = 1,
+    //  have started (expired_date set), and have not yet expired are touched:
+    //  "valid" keys, exactly. Unused and expired keys are left alone — extend
+    //  those one at a time above, where the intent is unambiguous.
+    // ------------------------------------------------------------------
+
+    /** POST admin/keys/renew/bulk-preview — how many keys a scope would touch. */
+    public function bulkPreview()
+    {
+        if ($deny = $this->denyNonAdminJson()) {
+            return $deny;
+        }
+
+        [$game, $ownerId, $err] = $this->bulkScope();
+        if ($err !== null) {
+            return $this->response->setJSON(['ok' => false, 'error' => $err, 'csrf' => csrf_hash()]);
+        }
+
+        $count = $this->bulkBuilder($game, $ownerId)->countAllResults();
+
+        return $this->response->setJSON([
+            'ok'    => true,
+            'count' => $count,
+            'scope' => $this->scopeLabel($game, $ownerId),
+            'csrf'  => csrf_hash(),
+        ]);
+    }
+
+    /** POST admin/keys/renew/bulk-apply — add the time to every matching key. */
+    public function bulkApply()
+    {
+        if ($deny = $this->denyNonAdminJson()) {
+            return $deny;
+        }
+
+        // A mass write needs an explicit confirm, so it cannot fire on a stray
+        // click or a replayed preview request.
+        if (! filter_var($this->request->getPost('confirm'), FILTER_VALIDATE_BOOLEAN)) {
+            return $this->response->setJSON(['ok' => false, 'error' => 'Not confirmed.', 'csrf' => csrf_hash()]);
+        }
+
+        [$game, $ownerId, $err] = $this->bulkScope();
+        if ($err !== null) {
+            return $this->response->setJSON(['ok' => false, 'error' => $err, 'csrf' => csrf_hash()]);
+        }
+
+        $amount = (int) $this->request->getPost('amount');
+        $unit   = strtolower((string) $this->request->getPost('unit'));
+        $hours  = $unit === 'days' ? $amount * 24 : $amount;
+
+        if ($hours < 1) {
+            return $this->response->setJSON(['ok' => false, 'error' => 'Amount must be at least 1.', 'csrf' => csrf_hash()]);
+        }
+        if ($hours > self::MAX_HOURS) {
+            return $this->response->setJSON([
+                'ok'    => false,
+                'error' => 'That is too long. The most you can add at once is 10 years.',
+                'csrf'  => csrf_hash(),
+            ]);
+        }
+
+        // One atomic UPDATE for the whole set — fast for thousands of rows, and
+        // it extends each key from ITS OWN expiry (DATE_ADD on the column), so
+        // every key keeps the exact remainder it had. $hours is an int, so the
+        // inline interval carries no untrusted input.
+        $affected = 0;
+        try {
+            $builder = $this->bulkBuilder($game, $ownerId);
+            $builder->set('expired_date', 'DATE_ADD(expired_date, INTERVAL ' . (int) $hours . ' HOUR)', false)
+                    ->update();
+            $affected = db_connect()->affectedRows();
+        } catch (\Throwable $e) {
+            log_message('error', 'Bulk renew failed: {m}', ['m' => $e->getMessage()]);
+            return $this->response->setJSON(['ok' => false, 'error' => 'Could not renew. Nothing was changed.', 'csrf' => csrf_hash()]);
+        }
+
+        // One audit line for the whole batch (per-key history rows would be
+        // thousands of writes for one action).
+        log_message('info', 'Bulk renew by {who}: +{h}h to {n} key(s), scope [{s}].', [
+            'who' => $this->user->username,
+            'h'   => $hours,
+            'n'   => $affected,
+            's'   => $this->scopeLabel($game, $ownerId),
+        ]);
+
+        $amountTxt = $hours % 24 === 0
+            ? ($hours / 24) . ' day' . ($hours === 24 ? '' : 's')
+            : $hours . ' hour' . ($hours === 1 ? '' : 's');
+
+        return $this->response->setJSON([
+            'ok'       => true,
+            'affected' => $affected,
+            'message'  => $affected > 0
+                ? "Added {$amountTxt} to {$affected} valid key" . ($affected === 1 ? '' : 's') . '.'
+                : 'No valid keys matched — nothing was changed.',
+            'csrf'     => csrf_hash(),
+        ]);
+    }
+
+    /**
+     * Resolve the bulk scope from the request.
+     * @return array{0:string,1:?int,2:?string}  [game, ownerId, error]
+     */
+    private function bulkScope(): array
+    {
+        $game = strtoupper(trim((string) $this->request->getPost('game')));
+        if ($game === '') {
+            $game = 'ALL';
+        }
+        if ($game !== 'ALL' && ! preg_match('/^[A-Z0-9_]{1,32}$/', $game)) {
+            return ['ALL', null, 'That game code is not valid.'];
+        }
+
+        $ownerId = null;
+        $owner   = trim((string) $this->request->getPost('owner'));
+        if ($owner !== '') {
+            $found = (new UserModel())->getUser($owner, 'username');
+            if (! $found) {
+                return [$game, null, 'No user with that username.'];
+            }
+            $ownerId = (int) $found->id_users;
+        }
+
+        return [$game, $ownerId, null];
+    }
+
+    /** The query builder for the "valid keys" set, scoped by game/owner. */
+    private function bulkBuilder(string $game, ?int $ownerId)
+    {
+        $b = db_connect()->table('keys_code')
+            ->where('status', 1)
+            ->where('expired_date IS NOT NULL', null, false)
+            ->where('expired_date >', date('Y-m-d H:i:s'));
+
+        if ($game !== 'ALL') {
+            $b->where('game', $game);
+        }
+        if ($ownerId !== null) {
+            $b->where('registrator_id', $ownerId);
+        }
+        return $b;
+    }
+
+    private function scopeLabel(string $game, ?int $ownerId): string
+    {
+        $parts = [$game === 'ALL' ? 'all games' : $game];
+        if ($ownerId !== null) {
+            $parts[] = 'owner #' . $ownerId;
+        }
+        return implode(', ', $parts);
     }
 
     // ------------------------------------------------------------------

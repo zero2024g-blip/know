@@ -29,12 +29,14 @@ app/Views/Keys/renew.php
 ```
 
 ### گام ۲: روت‌ها
-سه خطِ داخل `routes-add.php` را **درونِ گروهِ admin** در `app/Config/Routes.php`
+پنج خطِ داخل `routes-add.php` را **درونِ گروهِ admin** در `app/Config/Routes.php`
 بگذار (همان گروهی که `downloads`، `security`، `maintenance` داخلش است):
 ```php
-$routes->get('keys/renew',          'KeyRenew::index');
-$routes->post('keys/renew/lookup',  'KeyRenew::lookup');
-$routes->post('keys/renew/apply',   'KeyRenew::apply');
+$routes->get('keys/renew',                'KeyRenew::index');
+$routes->post('keys/renew/lookup',        'KeyRenew::lookup');
+$routes->post('keys/renew/apply',         'KeyRenew::apply');
+$routes->post('keys/renew/bulk-preview',  'KeyRenew::bulkPreview');
+$routes->post('keys/renew/bulk-apply',    'KeyRenew::bulkApply');
 ```
 فیلترِ `admin` را به ارث می‌برند و کنترلر هم خودش دوباره سطحِ ادمین را چک می‌کند.
 
@@ -62,6 +64,18 @@ $routes->post('keys/renew/apply',   'KeyRenew::apply');
 - هر تمدید در جدولِ `history` ثبت می‌شود: `renew|<mode>|+<hours>h`.
 - سقفِ یک‌بار تمدید: ۱۰ سال (جلوی اشتباهِ تایپی).
 - دکمه‌های آماده: ۱روز، ۷، ۳۰، ۹۰، ۱۸۰ روز، ۱ سال — یا مقدارِ دلخواه (روز/ساعت).
+
+### تمدیدِ دسته‌ای (Bulk) — «به همه‌ی کلیدهای معتبر مثلاً ۳-۴ روز اضافه کن»
+پایینِ همان صفحه یک پنلِ **Bulk renew** هست:
+- **دامنه (scope):** همه‌ی بازی‌ها یا یک بازیِ خاص + (اختیاری) یک فروشنده (username).
+- فقط کلیدهای **معتبر/فعال** لمس می‌شوند: `status=1` و `expired_date` در آینده.
+  کلیدهای **استفاده‌نشده** و **منقضی** دست‌نخورده می‌مانند (آنها را تک‌به‌تک بالا تمدید کن).
+- روالِ امن: اول **Preview count** تعداد را نشان می‌دهد → بعد **Renew all** با یک
+  دیالوگِ تأیید (SweetAlert). بدونِ `confirm` سرور چیزی را تغییر نمی‌دهد.
+- موتور: یک `UPDATE` اتمیکِ واحد با `DATE_ADD(expired_date, INTERVAL N HOUR)` —
+  برای هزاران کلید سریع است و هر کلید از **انتهای خودش** تمدید می‌شود (وقتِ باقی‌مانده حفظ).
+- تعدادِ مقدار یک عددِ صحیحِ اعتبارسنجی‌شده است (بدون امکانِ تزریق)؛ سقف ۱۰ سال.
+- یک خطِ خلاصه در لاگ ثبت می‌شود: `Bulk renew by <admin>: +Nh to M key(s), scope [...]`.
 
 هیچ ستون یا جدولِ جدیدی لازم **نیست** (از همان `keys_code` و `history` استفاده می‌کند).
 

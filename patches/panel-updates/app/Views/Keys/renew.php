@@ -97,6 +97,60 @@
             </div>
         </div>
     </section>
+
+    <!-- Bulk renew: add time to every VALID (active) key at once -->
+    <section class="em-panel rn-bulk">
+        <div class="em-panel-h">
+            <h2><i class="bi bi-layers"></i> Bulk renew &mdash; all valid keys</h2>
+        </div>
+        <div class="em-panel-b">
+            <p class="rn-bulk-note">
+                Adds time to every <b>active</b> key at once, extending each from its own
+                expiry so the remainder is kept. Unused and already-expired keys are left
+                alone. Optionally narrow it to one game or one seller.
+            </p>
+
+            <div class="rn-bulk-grid">
+                <div class="em-field">
+                    <label for="rn-b-game">Game</label>
+                    <select class="form-select" id="rn-b-game">
+                        <option value="ALL">All games</option>
+                        <?php foreach ($games as $g) : ?>
+                            <option value="<?= esc($g['code'], 'attr') ?>"><?= esc($g['code']) ?><?= $g['name'] !== '' ? ' — ' . esc($g['name']) : '' ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="em-field">
+                    <label for="rn-b-owner">Seller username <span class="rn-opt">(optional)</span></label>
+                    <input type="text" class="form-control" id="rn-b-owner" placeholder="blank = everyone" maxlength="64" autocapitalize="none" spellcheck="false">
+                </div>
+            </div>
+
+            <div class="rn-bulk-grid">
+                <div class="em-field">
+                    <label for="rn-b-amount">Add</label>
+                    <input type="number" class="form-control" id="rn-b-amount" min="1" max="87600" step="1" placeholder="e.g. 3">
+                </div>
+                <div class="em-field">
+                    <label for="rn-b-unit">Unit</label>
+                    <select class="form-select" id="rn-b-unit">
+                        <option value="days" selected>Days</option>
+                        <option value="hours">Hours</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="rn-bulk-act">
+                <button type="button" class="em-btn" id="rn-b-preview">
+                    <i class="bi bi-search"></i> Preview count
+                </button>
+                <button type="button" class="em-btn is-primary" id="rn-b-apply" disabled>
+                    <i class="bi bi-layers"></i> Renew all valid keys
+                </button>
+            </div>
+            <p class="rn-msg" id="rn-b-msg" role="status" aria-live="polite"></p>
+        </div>
+    </section>
 </div>
 
 <?= $this->endSection() ?>
@@ -169,6 +223,15 @@
     .rn-apply-row .em-btn { min-height: 44px; }
     .rn-apply-row .rn-msg { margin: 0; }
 
+    /* bulk */
+    .rn-bulk { margin-top: 1rem; }
+    .rn-bulk-note { color: var(--em-text-2); font-size: .88rem; margin: 0 0 1rem; }
+    .rn-bulk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; margin-bottom: .7rem; }
+    .rn-bulk-grid .em-field { margin: 0; }
+    .rn-opt { color: var(--em-dim); font-weight: 400; }
+    .rn-bulk-act { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: .3rem; }
+    .rn-bulk-act .em-btn { min-height: 44px; }
+
     .visually-hidden {
         position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
         overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
@@ -179,6 +242,9 @@
         .rn-find-row .em-btn { width: 100%; }
         .rn-custom { flex-direction: column; }
         .rn-custom .rn-unit { width: 100%; }
+        .rn-bulk-grid { grid-template-columns: 1fr; }
+        .rn-bulk-act { flex-direction: column; }
+        .rn-bulk-act .em-btn { width: 100%; }
     }
 </style>
 <?= $this->endSection() ?>
@@ -329,6 +395,105 @@
                 say(applyMsg, (j && j.error) ? j.error : 'Could not renew.', 'is-err');
             }
         }).catch(function () { applyBtn.disabled = false; say(applyMsg, 'Network error. Try again.', 'is-err'); });
+    });
+})();
+
+/* ---- Bulk renew: add time to every valid (active) key at once ---- */
+(function () {
+    var gameEl   = document.getElementById('rn-b-game');
+    var ownerEl  = document.getElementById('rn-b-owner');
+    var amountEl = document.getElementById('rn-b-amount');
+    var unitEl   = document.getElementById('rn-b-unit');
+    var prevBtn  = document.getElementById('rn-b-preview');
+    var applyBtn = document.getElementById('rn-b-apply');
+    var msgEl    = document.getElementById('rn-b-msg');
+    if (!prevBtn) return;
+
+    var URL_PREVIEW = <?= json_encode(site_url('admin/keys/renew/bulk-preview'), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
+    var URL_APPLY   = <?= json_encode(site_url('admin/keys/renew/bulk-apply'),   JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
+
+    var lastCount = -1;   // -1 = no fresh preview yet
+
+    function csrf() {
+        var n = document.querySelector('meta[name="csrf-name"]');
+        var h = document.querySelector('meta[name="csrf-hash"]');
+        var o = {}; if (n && h) o[n.getAttribute('content')] = h.getAttribute('content'); return o;
+    }
+    function refreshCsrf(hash) { var h = document.querySelector('meta[name="csrf-hash"]'); if (h && hash) h.setAttribute('content', hash); }
+    function body(obj) {
+        var b = new URLSearchParams(); var c = csrf(); for (var k in c) b.set(k, c[k]);
+        for (var k2 in obj) if (obj[k2] !== undefined && obj[k2] !== null) b.set(k2, obj[k2]);
+        return b.toString();
+    }
+    function post(url, data) {
+        return fetch(url, { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'}, body: body(data) })
+            .then(function (r) { return r.json().catch(function(){return {};}); });
+    }
+    function say(t, cls) { msgEl.textContent = t || ''; msgEl.className = 'rn-msg' + (cls ? ' ' + cls : ''); }
+
+    function hours() {
+        var v = parseInt(amountEl.value, 10);
+        if (!v || v < 1) return 0;
+        return unitEl.value === 'days' ? v * 24 : v;
+    }
+    function scope() { return { game: gameEl.value || 'ALL', owner: (ownerEl.value || '').trim() }; }
+    function amountText() {
+        var h = hours();
+        if (h % 24 === 0) return (h / 24) + (h === 24 ? ' day' : ' days');
+        return h + (h === 1 ? ' hour' : ' hours');
+    }
+    function updateApply() { applyBtn.disabled = !(lastCount > 0 && hours() > 0); }
+
+    // Any scope change invalidates the shown count — force a fresh preview.
+    function invalidate() { lastCount = -1; applyBtn.disabled = true; }
+    [gameEl, ownerEl].forEach(function (el) { el.addEventListener('change', invalidate); el.addEventListener('input', invalidate); });
+    amountEl.addEventListener('input', updateApply);
+    unitEl.addEventListener('change', updateApply);
+
+    prevBtn.addEventListener('click', function () {
+        prevBtn.disabled = true; say('Counting…');
+        post(URL_PREVIEW, scope()).then(function (j) {
+            prevBtn.disabled = false;
+            if (j && j.csrf) refreshCsrf(j.csrf);
+            if (j && j.ok) {
+                lastCount = j.count;
+                if (j.count > 0) say(j.count + ' valid key' + (j.count === 1 ? '' : 's') + ' match [' + j.scope + '].', 'is-ok');
+                else say('No valid keys match [' + j.scope + '].', 'is-err');
+                updateApply();
+            } else { say((j && j.error) ? j.error : 'Could not count.', 'is-err'); }
+        }).catch(function () { prevBtn.disabled = false; say('Network error. Try again.', 'is-err'); });
+    });
+
+    applyBtn.addEventListener('click', function () {
+        var h = hours();
+        if (h < 1) { say('Enter an amount first.', 'is-err'); return; }
+        if (lastCount < 1) { say('Preview the count first.', 'is-err'); return; }
+
+        var s = scope();
+        var scopeTxt = (s.game === 'ALL' ? 'all games' : s.game) + (s.owner ? ', seller ' + s.owner : '');
+        var question = 'Add ' + amountText() + ' to ' + lastCount + ' valid key' + (lastCount === 1 ? '' : 's') + ' (' + scopeTxt + ')?';
+
+        var run = function () {
+            applyBtn.disabled = true; prevBtn.disabled = true; say('Renewing…');
+            post(URL_APPLY, { game: s.game, owner: s.owner, amount: h, unit: 'hours', confirm: 1 }).then(function (j) {
+                prevBtn.disabled = false;
+                if (j && j.csrf) refreshCsrf(j.csrf);
+                if (j && j.ok) { say(j.message || 'Done.', 'is-ok'); invalidate(); }
+                else { applyBtn.disabled = false; say((j && j.error) ? j.error : 'Could not renew.', 'is-err'); }
+            }).catch(function () { prevBtn.disabled = false; applyBtn.disabled = false; say('Network error. Try again.', 'is-err'); });
+        };
+
+        // Confirm a mass write. Prefer the panel's SweetAlert, fall back to native.
+        if (window.Swal && typeof window.Swal.fire === 'function') {
+            window.Swal.fire({
+                title: 'Renew in bulk?',
+                text: question + ' This cannot be undone.',
+                icon: 'warning', showCancelButton: true,
+                confirmButtonText: 'Yes, renew all', cancelButtonText: 'Cancel'
+            }).then(function (res) { if (res && res.isConfirmed) run(); });
+        } else if (window.confirm(question + '\n\nThis cannot be undone.')) {
+            run();
+        }
     });
 })();
 </script>

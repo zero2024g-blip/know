@@ -10,11 +10,15 @@
 
 // --- add inside $routes->group('admin', ['filter' => 'admin'], function ($routes) { ... }) ---
 
-$routes->get('keys/renew',          'KeyRenew::index');    // the section (page)
-$routes->post('keys/renew/lookup',  'KeyRenew::lookup');   // find a key -> JSON
-$routes->post('keys/renew/apply',   'KeyRenew::apply');    // apply the renewal -> JSON
+$routes->get('keys/renew',                'KeyRenew::index');        // the section (page)
+$routes->post('keys/renew/lookup',        'KeyRenew::lookup');       // find one key -> JSON
+$routes->post('keys/renew/apply',         'KeyRenew::apply');        // renew one key -> JSON
+$routes->post('keys/renew/bulk-preview',  'KeyRenew::bulkPreview');  // count valid keys in scope -> JSON
+$routes->post('keys/renew/bulk-apply',    'KeyRenew::bulkApply');    // renew ALL valid keys in scope -> JSON
 
 // Resulting public URLs:
 //   GET  /admin/keys/renew
 //   POST /admin/keys/renew/lookup
 //   POST /admin/keys/renew/apply
+//   POST /admin/keys/renew/bulk-preview
+//   POST /admin/keys/renew/bulk-apply
