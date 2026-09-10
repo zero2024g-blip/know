@@ -16,6 +16,12 @@ $fmt = static function ($b) {
     do { $b /= 1024; $i++; } while ($b >= 1024 && $i < 2);
     return round($b, 1) . ' ' . $u[$i];
 };
+// Optional "locked teaser" list: names of key-gated files to show BEFORE a key
+// is entered (as locked rows). The controller only fills this when the admin
+// turns the teaser on; otherwise it stays empty and paid files appear only
+// after a valid key (the private default). Back-compatible: works with the old
+// controller too, where $locked is simply not set.
+$locked = $locked ?? [];
 // Same-origin theme assets (Poppins + icon font), so the public page matches
 // the panel. Both are self-hosted; a system-font stack is the fallback.
 $poppins = base_url('assets/vendor/css/poppins.css');
@@ -92,6 +98,13 @@ $icons   = base_url('assets/vendor/css/bootstrap-icons.min.css');
         border:1px solid rgba(244,114,90,.3);
     }
     .row .act { display:flex; align-items:center; gap:.35rem; flex:none; }
+    /* locked teaser rows */
+    .row.is-locked { opacity:.82; }
+    .row.is-locked .fic { color:var(--dim); background:var(--input); }
+    .row.is-locked .name { color:var(--text-2); }
+    .lock-tag { display:inline-flex; align-items:center; gap:.25em; font-size:.7rem; color:var(--accent);
+        background:var(--wash); border:1px solid rgba(244,114,90,.28); padding:.1em .5em; border-radius:20px; }
+    .locked-hint { display:flex; align-items:center; gap:.4rem; color:var(--dim); margin-top:.85rem; }
 
     /* buttons */
     button, .btn {
@@ -192,6 +205,26 @@ $icons   = base_url('assets/vendor/css/bootstrap-icons.min.css');
                 </div>
             </div>
         <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if (! empty($locked)) : ?>
+    <div class="card rise" id="locked-card">
+        <div class="card-h">
+            <span class="ic"><i class="bi bi-lock-fill"></i></span>
+            <h2>Premium files</h2>
+            <span class="count"><?= count($locked) ?></span>
+        </div>
+        <?php foreach ($locked as $f) : ?>
+            <div class="row is-locked">
+                <span class="fic"><i class="bi bi-lock"></i></span>
+                <div class="info">
+                    <div class="name"><?= esc($f['title']) ?></div>
+                    <div class="meta"><span class="pill"><?= esc($f['game']) ?></span> <?php $s = $fmt($f['size']); if ($s) : ?><span><?= esc($s) ?></span><?php endif; ?> <span class="lock-tag"><i class="bi bi-key"></i> Key required</span></div>
+                </div>
+            </div>
+        <?php endforeach; ?>
+        <p class="hint locked-hint"><i class="bi bi-arrow-down"></i> Enter your licence key below to unlock these.</p>
     </div>
     <?php endif; ?>
 
@@ -305,6 +338,8 @@ $icons   = base_url('assets/vendor/css/bootstrap-icons.min.css');
                         return;
                     }
                     box.className = 'has';
+                    // Hide the locked teaser once the real, downloadable list is shown.
+                    var lc = document.getElementById('locked-card'); if (lc) lc.hidden = true;
                     say(files.length + ' file' + (files.length>1?'s':'') + ' unlocked.','ok');
                     files.forEach(function (f) {
                         var row = document.createElement('div'); row.className = 'row';
